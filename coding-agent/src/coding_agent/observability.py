@@ -22,266 +22,335 @@ from agentkit.observability import (
     SpanRecord,
 )
 
-_SENSITIVE_ATTRIBUTE_PARTS = frozenset({
-    "content",
-    "env",
-    "message",
-    "output",
-    "prompt",
-    "result",
-    "secret",
-    "stderr",
-    "stdout",
-    "text",
-})
-_SANITIZED_LANGFUSE_OBSERVATION_KEYS = frozenset({
-    "langfuse.observation.input",
-    "langfuse.observation.output",
-})
+_SENSITIVE_ATTRIBUTE_PARTS = frozenset(
+    {
+        "content",
+        "env",
+        "message",
+        "output",
+        "prompt",
+        "result",
+        "secret",
+        "stderr",
+        "stdout",
+        "text",
+    }
+)
+_SANITIZED_LANGFUSE_OBSERVATION_KEYS = frozenset(
+    {
+        "langfuse.observation.input",
+        "langfuse.observation.output",
+    }
+)
 # Generation token counts. These keys contain the substring ``output`` which
 # the sensitive-key heuristic would otherwise drop, but integer token counts
 # cannot carry raw prompt/result text, so they are explicitly permitted with
 # int-only values.
-_GENERATION_USAGE_KEYS = frozenset({
-    "gen_ai.usage.input_tokens",
-    "gen_ai.usage.output_tokens",
-})
-_SANITIZED_LANGFUSE_ALLOWED_KEYS = frozenset({
-    "arg_shape",
-    "field_count",
-    "fields",
-    "final_length",
-    "final_present",
-    "input",
-    "item_count",
-    "key_count",
-    "length",
-    "line_count",
-    "list",
-    "output",
-    "result_shape",
-    "safe_keys",
-    "status",
-    "string_lengths",
-    "string_length",
-    "tool_call_count",
-    "tool_calls",
-    "tool_name",
-    "name",
-    "type",
-    "types",
-    "user_length",
-    "user_present",
-})
-_SENSITIVE_PROMETHEUS_VALUE_PARTS = frozenset({
-    "content",
-    "env",
-    "key",
-    "log",
-    "message",
-    "output",
-    "password",
-    "private",
-    "prompt",
-    "raw",
-    "result",
-    "secret",
-    "stderr",
-    "stdout",
-    "text",
-    "token",
-})
-_FORBIDDEN_PROMETHEUS_LABELS = frozenset({
-    "run_id",
-    "schedule_id",
-    "session_id",
-    "signal_id",
-    "template_id",
-    "node_id",
-    "task_id",
-    "trace_id",
-    "topic_id",
-    "event_id",
-    "executor_id",
-    "executor_run_id",
-    "interaction_id",
-    "job_name",
-    "launch_id",
-    "memory_id",
-    "pod_name",
-    "tool_call_id",
-    "workflow_name",
-    "file_path",
-    "prompt",
-    "message",
-    "content",
-    "command_output",
-    "secret",
-})
-_PROMETHEUS_ALLOWED_ATTRIBUTE_LABELS = frozenset({
-    "action_kind",
-    "action_status",
-    "cache_hit",
-    "error_type",
-    "executor_kind",
-    "eval_status",
-    "hitl_status",
-    "memory_kind",
-    "memory_review_status",
-    "memory_status",
-    "model",
-    "operation",
-    "policy_decision",
-    "provider",
-    "recall_source",
-    "recall_status",
-    "risk_level",
-    "schedule_kind",
-    "schedule_status",
-    "signal_kind",
-    "signal_status",
-    "source_kind",
-    "stage",
-    "status",
-    "storage_status",
-    "task_kind",
-    "task_profile",
-    "task_status",
-    "template_kind",
-    "template_profile",
-    "command_category",
-    "command_policy",
-    "command_status",
-    "tool_name",
-    "node_kind",
-    "node_profile",
-    "node_status",
-    "topic_kind",
-    "topic_profile",
-    "topic_status",
-    "trigger_kind",
-})
+_GENERATION_USAGE_KEYS = frozenset(
+    {
+        "gen_ai.usage.input_tokens",
+        "gen_ai.usage.output_tokens",
+    }
+)
+_SANITIZED_LANGFUSE_ALLOWED_KEYS = frozenset(
+    {
+        "arg_shape",
+        "field_count",
+        "fields",
+        "final_length",
+        "final_present",
+        "input",
+        "item_count",
+        "key_count",
+        "length",
+        "line_count",
+        "list",
+        "output",
+        "result_shape",
+        "safe_keys",
+        "status",
+        "string_lengths",
+        "string_length",
+        "tool_call_count",
+        "tool_calls",
+        "tool_name",
+        "name",
+        "type",
+        "types",
+        "user_length",
+        "user_present",
+    }
+)
+_SENSITIVE_PROMETHEUS_VALUE_PARTS = frozenset(
+    {
+        "content",
+        "env",
+        "key",
+        "log",
+        "message",
+        "output",
+        "password",
+        "private",
+        "prompt",
+        "raw",
+        "result",
+        "secret",
+        "stderr",
+        "stdout",
+        "text",
+        "token",
+    }
+)
+_FORBIDDEN_PROMETHEUS_LABELS = frozenset(
+    {
+        "run_id",
+        "schedule_id",
+        "session_id",
+        "signal_id",
+        "template_id",
+        "node_id",
+        "task_id",
+        "trace_id",
+        "topic_id",
+        "event_id",
+        "executor_id",
+        "executor_run_id",
+        "interaction_id",
+        "job_name",
+        "launch_id",
+        "memory_id",
+        "pod_name",
+        "tool_call_id",
+        "workflow_name",
+        "file_path",
+        "prompt",
+        "message",
+        "content",
+        "command_output",
+        "secret",
+    }
+)
+_PROMETHEUS_ALLOWED_ATTRIBUTE_LABELS = frozenset(
+    {
+        "action_kind",
+        "action_status",
+        "cache_hit",
+        "error_type",
+        "executor_kind",
+        "eval_status",
+        "hitl_status",
+        "memory_kind",
+        "memory_review_status",
+        "memory_status",
+        "model",
+        "operation",
+        "policy_decision",
+        "provider",
+        "publication_mode",
+        "publication_status",
+        "recall_source",
+        "recall_status",
+        "remote_status",
+        "risk_level",
+        "schedule_kind",
+        "schedule_status",
+        "signal_kind",
+        "signal_status",
+        "source_kind",
+        "stage",
+        "status",
+        "storage_status",
+        "task_kind",
+        "task_profile",
+        "task_status",
+        "template_kind",
+        "template_profile",
+        "command_category",
+        "command_policy",
+        "command_status",
+        "tool_name",
+        "workspace_ref_kind",
+        "node_kind",
+        "node_profile",
+        "node_status",
+        "topic_kind",
+        "topic_profile",
+        "topic_status",
+        "trigger_kind",
+    }
+)
 _PROMETHEUS_ATTRIBUTE_LABEL_ALIASES = {
     "retrieval.cache_hit": "cache_hit",
     "retrieval.source_kind": "source_kind",
 }
 _PROMETHEUS_RESERVED_LABELS = frozenset({"event", "span", "status"})
-_PROMETHEUS_KNOWN_SPAN_NAMES = frozenset({
-    "action.execute",
-    "action_safety.action",
-    "context_pack.build",
-    "context_pack.render",
-    "kb.index_failure",
-    "kb.index_repo",
-    "kb.query",
-    "llm.generation",
-    "runtime.stage.apply_directives",
-    "runtime.stage.build_context",
-    "runtime.stage.dispatch",
-    "runtime.stage.load_state",
-    "runtime.stage.render",
-    "runtime.stage.run_model",
-    "runtime.stage.save_state",
-    "tool.call",
-    "retrieval.kb.search",
-})
-_PROMETHEUS_KNOWN_EVENT_NAMES = frozenset({
-    "action_safety.action",
-    "action.completed",
-    "action.failed",
-    "action.started",
-    "runtime.started",
-    "tool.call.completed",
-})
+_PROMETHEUS_KNOWN_SPAN_NAMES = frozenset(
+    {
+        "action.execute",
+        "action_safety.action",
+        "context_pack.build",
+        "context_pack.render",
+        "kb.index_failure",
+        "kb.index_repo",
+        "kb.query",
+        "llm.generation",
+        "runtime.stage.apply_directives",
+        "runtime.stage.build_context",
+        "runtime.stage.dispatch",
+        "runtime.stage.load_state",
+        "runtime.stage.render",
+        "runtime.stage.run_model",
+        "runtime.stage.save_state",
+        "remote.workspace.agent_phase",
+        "remote.workspace.cleanup",
+        "remote.workspace.gc",
+        "remote.workspace.provision",
+        "result.archive",
+        "result.diff",
+        "result.patch",
+        "result.publish_branch",
+        "result.publish_pr",
+        "tool.call",
+        "retrieval.kb.search",
+    }
+)
+_PROMETHEUS_KNOWN_EVENT_NAMES = frozenset(
+    {
+        "action_safety.action",
+        "action.completed",
+        "action.failed",
+        "action.started",
+        "runtime.started",
+        "tool.call.completed",
+    }
+)
 _PROMETHEUS_LABEL_VALUE_ALLOWLISTS = {
-    "action_kind": frozenset({
-        "approval",
-        "command",
-        "command_policy",
-        "file_edit",
-        "patch",
-        "restore",
-        "validation",
-    }),
-    "action_status": frozenset({
-        "allowed",
-        "approval_required",
-        "completed",
-        "denied",
-        "failed",
-        "started",
-    }),
+    "action_kind": frozenset(
+        {
+            "approval",
+            "command",
+            "command_policy",
+            "file_edit",
+            "patch",
+            "restore",
+            "validation",
+        }
+    ),
+    "action_status": frozenset(
+        {
+            "allowed",
+            "approval_required",
+            "completed",
+            "denied",
+            "failed",
+            "started",
+        }
+    ),
     "cache_hit": frozenset({"false", "true"}),
-    "executor_kind": frozenset({
-        "local",
-        "docker",
-        "kubernetes_job",
-        "argo_workflow",
-        "fixture",
-        "unknown",
-    }),
+    "executor_kind": frozenset(
+        {
+            "local",
+            "docker",
+            "kubernetes_job",
+            "argo_workflow",
+            "fixture",
+            "unknown",
+        }
+    ),
     "eval_status": frozenset({"failed", "passed", "skipped"}),
     "hitl_status": frozenset({"approved", "rejected", "requested", "timed_out"}),
-    "memory_kind": frozenset({
-        "command_memory",
-        "decision",
-        "fact",
-        "incident",
-        "procedure",
-        "project_convention",
-        "unknown",
-    }),
+    "memory_kind": frozenset(
+        {
+            "command_memory",
+            "decision",
+            "fact",
+            "incident",
+            "procedure",
+            "project_convention",
+            "unknown",
+        }
+    ),
     "memory_review_status": frozenset({"accepted", "archived", "rejected"}),
     "memory_status": frozenset({"accepted", "archived", "candidate", "rejected"}),
-    "operation": frozenset({
-        "checkpoint_load",
-        "checkpoint_save",
-        "session_load",
-        "session_save",
-        "tape_append",
-        "tape_load",
-    }),
+    "operation": frozenset(
+        {
+            "checkpoint_load",
+            "checkpoint_save",
+            "session_load",
+            "session_save",
+            "tape_append",
+            "tape_load",
+        }
+    ),
     "policy_decision": frozenset({"allow", "approval_required", "deny"}),
-    "recall_source": frozenset({
-        "accepted_memory",
-        "none",
-        "topic_and_memory",
-        "topic_range",
-        "unknown",
-    }),
-    "recall_status": frozenset({
-        "disabled",
-        "empty",
-        "failed",
-        "matched",
-        "unknown",
-    }),
+    "publication_mode": frozenset({"branch", "pr", "unknown"}),
+    "publication_status": frozenset(
+        {
+            "failed",
+            "partial",
+            "published",
+            "unsupported",
+            "unknown",
+        }
+    ),
+    "recall_source": frozenset(
+        {
+            "accepted_memory",
+            "none",
+            "topic_and_memory",
+            "topic_range",
+            "unknown",
+        }
+    ),
+    "recall_status": frozenset(
+        {
+            "disabled",
+            "empty",
+            "failed",
+            "matched",
+            "unknown",
+        }
+    ),
+    "remote_status": frozenset(
+        {
+            "cancelled",
+            "completed",
+            "empty",
+            "failed",
+            "started",
+            "unknown",
+        }
+    ),
     "risk_level": frozenset({"low", "medium", "high"}),
     "schedule_kind": frozenset({"interval", "manual", "once", "unknown"}),
     "schedule_status": frozenset({"active", "completed", "disabled", "paused"}),
     "signal_kind": frozenset({"repo_activity", "unknown"}),
     "signal_status": frozenset({"consumed", "ignored", "new", "planned"}),
     "source_kind": frozenset({"kb", "kb_chunk", "repo_file", "test_failure"}),
-    "stage": frozenset({
-        "apply_directives",
-        "build_context",
-        "dispatch",
-        "load_state",
-        "render",
-        "run_model",
-        "save_state",
-    }),
+    "stage": frozenset(
+        {
+            "apply_directives",
+            "build_context",
+            "dispatch",
+            "load_state",
+            "render",
+            "run_model",
+            "save_state",
+        }
+    ),
     "status": frozenset({"ok", "error", "started", "completed", "failed"}),
     "storage_status": frozenset({"ok", "error"}),
     "task_kind": frozenset({"maintenance", "unknown"}),
     "task_profile": frozenset({"ci", "demo", "local", "unknown"}),
-    "task_status": frozenset({
-        "pending",
-        "running",
-        "completed",
-        "failed",
-        "cancelled",
-    }),
+    "task_status": frozenset(
+        {
+            "pending",
+            "running",
+            "completed",
+            "failed",
+            "cancelled",
+        }
+    ),
     "template_kind": frozenset({"maintenance", "unknown"}),
     "template_profile": frozenset({"ci", "demo", "local", "unknown"}),
     "command_category": frozenset({"analysis", "report", "validation", "unknown"}),
@@ -289,104 +358,142 @@ _PROMETHEUS_LABEL_VALUE_ALLOWLISTS = {
     "command_status": frozenset({"declared", "disabled", "unknown"}),
     "node_kind": frozenset({"analysis", "report", "validation", "unknown"}),
     "node_profile": frozenset({"ci", "demo", "default", "local", "unknown"}),
-    "node_status": frozenset({
-        "pending",
-        "ready",
-        "running",
-        "completed",
-        "failed",
-        "skipped",
-    }),
+    "node_status": frozenset(
+        {
+            "pending",
+            "ready",
+            "running",
+            "completed",
+            "failed",
+            "skipped",
+        }
+    ),
     "topic_kind": frozenset({"coding", "unknown"}),
     "topic_profile": frozenset({"ci", "demo", "local", "unknown"}),
     "topic_status": frozenset({"open", "finalized", "aborted"}),
     "trigger_kind": frozenset({"proactive_signal", "schedule", "unknown"}),
+    "workspace_ref_kind": frozenset(
+        {
+            "docker",
+            "external_worker_ref",
+            "git",
+            "local_path",
+            "snapshot",
+            "unknown",
+        }
+    ),
 }
-_BEE_LAUNCH_SOURCES: Final[frozenset[str]] = frozenset({
-    "manual",
-    "schedule",
-    "proactive_signal",
-})
-_BEE_LAUNCH_STATUSES: Final[frozenset[str]] = frozenset({
-    "planned",
-    "launching",
-    "launched",
-    "failed",
-    "cancelled",
-})
-_BEE_PROACTIVE_SIGNAL_KINDS: Final[frozenset[str]] = frozenset({
-    "repo_activity",
-    "unknown",
-})
-_EXECUTOR_KINDS: Final[frozenset[str]] = frozenset({
-    "local",
-    "docker",
-    "kubernetes_job",
-    "argo_workflow",
-    "fixture",
-    "unknown",
-})
-_EXECUTOR_STATUSES: Final[frozenset[str]] = frozenset({
-    "available",
-    "cancelled",
-    "disabled",
-    "failed",
-    "planned",
-    "running",
-    "submitted",
-    "succeeded",
-    "unavailable",
-    "unknown",
-})
-_TOPIC_RECALL_SOURCES: Final[frozenset[str]] = frozenset({
-    "accepted_memory",
-    "none",
-    "topic_and_memory",
-    "topic_range",
-    "unknown",
-})
-_TOPIC_RECALL_STATUSES: Final[frozenset[str]] = frozenset({
-    "disabled",
-    "empty",
-    "failed",
-    "matched",
-    "unknown",
-})
-_MEMORY_KINDS: Final[frozenset[str]] = frozenset({
-    "command_memory",
-    "decision",
-    "fact",
-    "incident",
-    "procedure",
-    "project_convention",
-    "unknown",
-})
-_MEMORY_STATUSES: Final[frozenset[str]] = frozenset({
-    "accepted",
-    "archived",
-    "candidate",
-    "rejected",
-})
-_MEMORY_REVIEW_STATUSES: Final[frozenset[str]] = frozenset({
-    "accepted",
-    "archived",
-    "rejected",
-})
-_BEE_PACK_SOURCE_TYPES: Final[frozenset[str]] = frozenset({
-    "fixture",
-    "imported",
-    "local_workspace",
-})
-_BEE_PACK_COMPATIBILITY_STATUSES: Final[frozenset[str]] = frozenset({
-    "compatible",
-    "incompatible",
-    "warning",
-})
-_BEE_PACK_DRY_RUN_STATUSES: Final[frozenset[str]] = frozenset({
-    "ready",
-    "rejected",
-    "warning",
-})
+_BEE_LAUNCH_SOURCES: Final[frozenset[str]] = frozenset(
+    {
+        "manual",
+        "schedule",
+        "proactive_signal",
+    }
+)
+_BEE_LAUNCH_STATUSES: Final[frozenset[str]] = frozenset(
+    {
+        "planned",
+        "launching",
+        "launched",
+        "failed",
+        "cancelled",
+    }
+)
+_BEE_PROACTIVE_SIGNAL_KINDS: Final[frozenset[str]] = frozenset(
+    {
+        "repo_activity",
+        "unknown",
+    }
+)
+_EXECUTOR_KINDS: Final[frozenset[str]] = frozenset(
+    {
+        "local",
+        "docker",
+        "kubernetes_job",
+        "argo_workflow",
+        "fixture",
+        "unknown",
+    }
+)
+_EXECUTOR_STATUSES: Final[frozenset[str]] = frozenset(
+    {
+        "available",
+        "cancelled",
+        "disabled",
+        "failed",
+        "planned",
+        "running",
+        "submitted",
+        "succeeded",
+        "unavailable",
+        "unknown",
+    }
+)
+_TOPIC_RECALL_SOURCES: Final[frozenset[str]] = frozenset(
+    {
+        "accepted_memory",
+        "none",
+        "topic_and_memory",
+        "topic_range",
+        "unknown",
+    }
+)
+_TOPIC_RECALL_STATUSES: Final[frozenset[str]] = frozenset(
+    {
+        "disabled",
+        "empty",
+        "failed",
+        "matched",
+        "unknown",
+    }
+)
+_MEMORY_KINDS: Final[frozenset[str]] = frozenset(
+    {
+        "command_memory",
+        "decision",
+        "fact",
+        "incident",
+        "procedure",
+        "project_convention",
+        "unknown",
+    }
+)
+_MEMORY_STATUSES: Final[frozenset[str]] = frozenset(
+    {
+        "accepted",
+        "archived",
+        "candidate",
+        "rejected",
+    }
+)
+_MEMORY_REVIEW_STATUSES: Final[frozenset[str]] = frozenset(
+    {
+        "accepted",
+        "archived",
+        "rejected",
+    }
+)
+_BEE_PACK_SOURCE_TYPES: Final[frozenset[str]] = frozenset(
+    {
+        "fixture",
+        "imported",
+        "local_workspace",
+    }
+)
+_BEE_PACK_COMPATIBILITY_STATUSES: Final[frozenset[str]] = frozenset(
+    {
+        "compatible",
+        "incompatible",
+        "warning",
+    }
+)
+_BEE_PACK_DRY_RUN_STATUSES: Final[frozenset[str]] = frozenset(
+    {
+        "ready",
+        "rejected",
+        "warning",
+    }
+)
 _PROMETHEUS_HISTOGRAM_BUCKETS = (5.0, 10.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 5000.0)
 _PROMETHEUS_HTTP_HISTOGRAM_BUCKETS = (
     1.0,
@@ -399,17 +506,19 @@ _PROMETHEUS_HTTP_HISTOGRAM_BUCKETS = (
     1000.0,
     5000.0,
 )
-_PROMETHEUS_HTTP_METHODS = frozenset({
-    "CONNECT",
-    "DELETE",
-    "GET",
-    "HEAD",
-    "OPTIONS",
-    "PATCH",
-    "POST",
-    "PUT",
-    "TRACE",
-})
+_PROMETHEUS_HTTP_METHODS = frozenset(
+    {
+        "CONNECT",
+        "DELETE",
+        "GET",
+        "HEAD",
+        "OPTIONS",
+        "PATCH",
+        "POST",
+        "PUT",
+        "TRACE",
+    }
+)
 _LABEL_VALUE_PATTERN = re.compile(r"[^a-zA-Z0-9_.:-]+")
 
 
@@ -560,7 +669,9 @@ def _sanitized_langfuse_payload_allowed(value: Any) -> bool:
     return _sanitized_langfuse_payload_allowed_for_key(None, value)
 
 
-def _sanitized_langfuse_payload_allowed_for_key(parent_key: str | None, value: Any) -> bool:
+def _sanitized_langfuse_payload_allowed_for_key(
+    parent_key: str | None, value: Any
+) -> bool:
     if isinstance(value, bool | int | float) or value is None:
         return True
     if isinstance(value, str):
@@ -917,10 +1028,12 @@ class PrometheusMetricsRecorder:
             span_counters = self._span_counters
             event_counters = self._event_counters
             if span_counters:
-                lines.extend((
-                    "# HELP coding_agent_observation_spans_total Observation spans recorded.",
-                    "# TYPE coding_agent_observation_spans_total counter",
-                ))
+                lines.extend(
+                    (
+                        "# HELP coding_agent_observation_spans_total Observation spans recorded.",
+                        "# TYPE coding_agent_observation_spans_total counter",
+                    )
+                )
                 lines.extend(
                     self._format_metric(
                         "coding_agent_observation_spans_total", span_counters
@@ -928,16 +1041,20 @@ class PrometheusMetricsRecorder:
                 )
             observation_histograms = self._observation_span_histograms
             if observation_histograms:
-                lines.extend((
-                    "# HELP coding_agent_observation_span_duration_ms Observation span duration in milliseconds.",
-                    "# TYPE coding_agent_observation_span_duration_ms histogram",
-                ))
+                lines.extend(
+                    (
+                        "# HELP coding_agent_observation_span_duration_ms Observation span duration in milliseconds.",
+                        "# TYPE coding_agent_observation_span_duration_ms histogram",
+                    )
+                )
                 lines.extend(self._format_histograms(histograms=observation_histograms))
             if event_counters:
-                lines.extend((
-                    "# HELP coding_agent_observation_events_total Observation events recorded.",
-                    "# TYPE coding_agent_observation_events_total counter",
-                ))
+                lines.extend(
+                    (
+                        "# HELP coding_agent_observation_events_total Observation events recorded.",
+                        "# TYPE coding_agent_observation_events_total counter",
+                    )
+                )
                 lines.extend(
                     self._format_metric(
                         "coding_agent_observation_events_total",
@@ -945,10 +1062,12 @@ class PrometheusMetricsRecorder:
                     )
                 )
             if self._gauges:
-                lines.extend((
-                    "# HELP coding_agent_observation_last_event_timestamp_seconds Last observation event timestamp.",
-                    "# TYPE coding_agent_observation_last_event_timestamp_seconds gauge",
-                ))
+                lines.extend(
+                    (
+                        "# HELP coding_agent_observation_last_event_timestamp_seconds Last observation event timestamp.",
+                        "# TYPE coding_agent_observation_last_event_timestamp_seconds gauge",
+                    )
+                )
                 lines.extend(
                     self._format_metric(
                         "coding_agent_observation_last_event_timestamp_seconds",
@@ -958,10 +1077,12 @@ class PrometheusMetricsRecorder:
             http_counters = self._http_request_counters
             http_histograms = self._http_request_histograms
             if http_counters:
-                lines.extend((
-                    "# HELP coding_agent_http_requests_total HTTP requests handled.",
-                    "# TYPE coding_agent_http_requests_total counter",
-                ))
+                lines.extend(
+                    (
+                        "# HELP coding_agent_http_requests_total HTTP requests handled.",
+                        "# TYPE coding_agent_http_requests_total counter",
+                    )
+                )
                 lines.extend(
                     self._format_metric(
                         "coding_agent_http_requests_total",
@@ -969,10 +1090,12 @@ class PrometheusMetricsRecorder:
                     )
                 )
             if http_histograms:
-                lines.extend((
-                    "# HELP coding_agent_http_request_duration_ms HTTP request duration in milliseconds.",
-                    "# TYPE coding_agent_http_request_duration_ms histogram",
-                ))
+                lines.extend(
+                    (
+                        "# HELP coding_agent_http_request_duration_ms HTTP request duration in milliseconds.",
+                        "# TYPE coding_agent_http_request_duration_ms histogram",
+                    )
+                )
                 lines.extend(
                     self._format_histograms(
                         histograms=http_histograms,
@@ -982,30 +1105,36 @@ class PrometheusMetricsRecorder:
                 )
             domain_counters = self._domain_counters
             if domain_counters:
-                lines.extend((
-                    "# HELP coding_agent_evaluation_case_results_total Evaluation case results.",
-                    "# TYPE coding_agent_evaluation_case_results_total counter",
-                ))
+                lines.extend(
+                    (
+                        "# HELP coding_agent_evaluation_case_results_total Evaluation case results.",
+                        "# TYPE coding_agent_evaluation_case_results_total counter",
+                    )
+                )
                 lines.extend(
                     self._format_metric(
                         "coding_agent_evaluation_case_results_total",
                         domain_counters,
                     )
                 )
-                lines.extend((
-                    "# HELP coding_agent_hitl_interactions_total Human interaction outcomes.",
-                    "# TYPE coding_agent_hitl_interactions_total counter",
-                ))
+                lines.extend(
+                    (
+                        "# HELP coding_agent_hitl_interactions_total Human interaction outcomes.",
+                        "# TYPE coding_agent_hitl_interactions_total counter",
+                    )
+                )
                 lines.extend(
                     self._format_metric(
                         "coding_agent_hitl_interactions_total",
                         domain_counters,
                     )
                 )
-                lines.extend((
-                    "# HELP coding_agent_storage_operations_total Storage operations.",
-                    "# TYPE coding_agent_storage_operations_total counter",
-                ))
+                lines.extend(
+                    (
+                        "# HELP coding_agent_storage_operations_total Storage operations.",
+                        "# TYPE coding_agent_storage_operations_total counter",
+                    )
+                )
                 lines.extend(
                     self._format_metric(
                         "coding_agent_storage_operations_total",
@@ -1014,10 +1143,12 @@ class PrometheusMetricsRecorder:
                 )
             storage_histograms = self._storage_operation_histograms
             if storage_histograms:
-                lines.extend((
-                    "# HELP coding_agent_storage_operation_duration_ms Storage operation duration in milliseconds.",
-                    "# TYPE coding_agent_storage_operation_duration_ms histogram",
-                ))
+                lines.extend(
+                    (
+                        "# HELP coding_agent_storage_operation_duration_ms Storage operation duration in milliseconds.",
+                        "# TYPE coding_agent_storage_operation_duration_ms histogram",
+                    )
+                )
                 lines.extend(
                     self._format_histograms(
                         histograms=storage_histograms,
@@ -1028,27 +1159,33 @@ class PrometheusMetricsRecorder:
             bee_launch_counters = self._bee_launch_counters
             bee_launch_histograms = self._bee_launch_histograms
             if bee_launch_counters:
-                lines.extend((
-                    "# HELP bee_launches_total Bee launches by source and status.",
-                    "# TYPE bee_launches_total counter",
-                ))
+                lines.extend(
+                    (
+                        "# HELP bee_launches_total Bee launches by source and status.",
+                        "# TYPE bee_launches_total counter",
+                    )
+                )
                 lines.extend(
                     self._format_metric("bee_launches_total", bee_launch_counters)
                 )
-                lines.extend((
-                    "# HELP scheduled_bee_launches_total Scheduled Bee launches.",
-                    "# TYPE scheduled_bee_launches_total counter",
-                ))
+                lines.extend(
+                    (
+                        "# HELP scheduled_bee_launches_total Scheduled Bee launches.",
+                        "# TYPE scheduled_bee_launches_total counter",
+                    )
+                )
                 lines.extend(
                     self._format_metric(
                         "scheduled_bee_launches_total",
                         bee_launch_counters,
                     )
                 )
-                lines.extend((
-                    "# HELP proactive_bee_launches_total Proactive Bee launches.",
-                    "# TYPE proactive_bee_launches_total counter",
-                ))
+                lines.extend(
+                    (
+                        "# HELP proactive_bee_launches_total Proactive Bee launches.",
+                        "# TYPE proactive_bee_launches_total counter",
+                    )
+                )
                 lines.extend(
                     self._format_metric(
                         "proactive_bee_launches_total",
@@ -1056,10 +1193,12 @@ class PrometheusMetricsRecorder:
                     )
                 )
             if bee_launch_histograms:
-                lines.extend((
-                    "# HELP bee_launch_duration_seconds Bee launch duration in seconds.",
-                    "# TYPE bee_launch_duration_seconds histogram",
-                ))
+                lines.extend(
+                    (
+                        "# HELP bee_launch_duration_seconds Bee launch duration in seconds.",
+                        "# TYPE bee_launch_duration_seconds histogram",
+                    )
+                )
                 lines.extend(
                     self._format_histograms(
                         histograms=bee_launch_histograms,
@@ -1071,18 +1210,22 @@ class PrometheusMetricsRecorder:
             executor_histograms = self._executor_histograms
             executor_capabilities = self._executor_capability_gauges
             if executor_counters:
-                lines.extend((
-                    "# HELP executor_runs_total External executor runs by kind and status.",
-                    "# TYPE executor_runs_total counter",
-                ))
+                lines.extend(
+                    (
+                        "# HELP executor_runs_total External executor runs by kind and status.",
+                        "# TYPE executor_runs_total counter",
+                    )
+                )
                 lines.extend(
                     self._format_metric("executor_runs_total", executor_counters)
                 )
             if executor_histograms:
-                lines.extend((
-                    "# HELP executor_run_duration_seconds External executor run duration in seconds.",
-                    "# TYPE executor_run_duration_seconds histogram",
-                ))
+                lines.extend(
+                    (
+                        "# HELP executor_run_duration_seconds External executor run duration in seconds.",
+                        "# TYPE executor_run_duration_seconds histogram",
+                    )
+                )
                 lines.extend(
                     self._format_histograms(
                         histograms=executor_histograms,
@@ -1091,10 +1234,12 @@ class PrometheusMetricsRecorder:
                     )
                 )
             if executor_capabilities:
-                lines.extend((
-                    "# HELP executor_capability_status External executor capability status.",
-                    "# TYPE executor_capability_status gauge",
-                ))
+                lines.extend(
+                    (
+                        "# HELP executor_capability_status External executor capability status.",
+                        "# TYPE executor_capability_status gauge",
+                    )
+                )
                 lines.extend(
                     self._format_metric(
                         "executor_capability_status",
@@ -1104,10 +1249,12 @@ class PrometheusMetricsRecorder:
             topic_recall_counters = self._topic_recall_counters
             topic_recall_histograms = self._topic_recall_histograms
             if topic_recall_counters:
-                lines.extend((
-                    "# HELP topic_recall_runs_total Topic recall runs by source and status.",
-                    "# TYPE topic_recall_runs_total counter",
-                ))
+                lines.extend(
+                    (
+                        "# HELP topic_recall_runs_total Topic recall runs by source and status.",
+                        "# TYPE topic_recall_runs_total counter",
+                    )
+                )
                 lines.extend(
                     self._format_metric(
                         "topic_recall_runs_total",
@@ -1115,10 +1262,12 @@ class PrometheusMetricsRecorder:
                     )
                 )
             if topic_recall_histograms:
-                lines.extend((
-                    "# HELP topic_recall_candidates Recall candidates returned by source.",
-                    "# TYPE topic_recall_candidates histogram",
-                ))
+                lines.extend(
+                    (
+                        "# HELP topic_recall_candidates Recall candidates returned by source.",
+                        "# TYPE topic_recall_candidates histogram",
+                    )
+                )
                 lines.extend(
                     self._format_histograms(
                         histograms=topic_recall_histograms,
@@ -1128,20 +1277,24 @@ class PrometheusMetricsRecorder:
                 )
             memory_counters = self._memory_counters
             if memory_counters:
-                lines.extend((
-                    "# HELP memory_candidates_total Topic-derived memory candidates by kind and status.",
-                    "# TYPE memory_candidates_total counter",
-                ))
+                lines.extend(
+                    (
+                        "# HELP memory_candidates_total Topic-derived memory candidates by kind and status.",
+                        "# TYPE memory_candidates_total counter",
+                    )
+                )
                 lines.extend(
                     self._format_metric(
                         "memory_candidates_total",
                         memory_counters,
                     )
                 )
-                lines.extend((
-                    "# HELP memory_reviews_total Memory review transitions by status.",
-                    "# TYPE memory_reviews_total counter",
-                ))
+                lines.extend(
+                    (
+                        "# HELP memory_reviews_total Memory review transitions by status.",
+                        "# TYPE memory_reviews_total counter",
+                    )
+                )
                 lines.extend(
                     self._format_metric(
                         "memory_reviews_total",
@@ -1150,30 +1303,36 @@ class PrometheusMetricsRecorder:
                 )
             bee_pack_counters = self._bee_pack_counters
             if bee_pack_counters:
-                lines.extend((
-                    "# HELP bee_pack_validations_total Bee template pack compatibility validations.",
-                    "# TYPE bee_pack_validations_total counter",
-                ))
+                lines.extend(
+                    (
+                        "# HELP bee_pack_validations_total Bee template pack compatibility validations.",
+                        "# TYPE bee_pack_validations_total counter",
+                    )
+                )
                 lines.extend(
                     self._format_metric(
                         "bee_pack_validations_total",
                         bee_pack_counters,
                     )
                 )
-                lines.extend((
-                    "# HELP bee_pack_templates_total Bee template pack templates by compatibility status.",
-                    "# TYPE bee_pack_templates_total counter",
-                ))
+                lines.extend(
+                    (
+                        "# HELP bee_pack_templates_total Bee template pack templates by compatibility status.",
+                        "# TYPE bee_pack_templates_total counter",
+                    )
+                )
                 lines.extend(
                     self._format_metric(
                         "bee_pack_templates_total",
                         bee_pack_counters,
                     )
                 )
-                lines.extend((
-                    "# HELP bee_pack_dry_runs_total Bee template pack dry-run plans.",
-                    "# TYPE bee_pack_dry_runs_total counter",
-                ))
+                lines.extend(
+                    (
+                        "# HELP bee_pack_dry_runs_total Bee template pack dry-run plans.",
+                        "# TYPE bee_pack_dry_runs_total counter",
+                    )
+                )
                 lines.extend(
                     self._format_metric(
                         "bee_pack_dry_runs_total",

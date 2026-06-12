@@ -5,6 +5,7 @@ import os
 import shlex
 import stat
 import subprocess
+import asyncio
 from pathlib import Path
 
 import httpx
@@ -12,7 +13,30 @@ import click
 import pytest
 from click.testing import CliRunner
 
+from agentkit.observability import ObservationEvent, SpanRecord
 from coding_agent.__main__ import main
+
+
+class RecordingObservationSink:
+    def __init__(self) -> None:
+        self.spans: list[SpanRecord] = []
+        self.events: list[ObservationEvent] = []
+
+    def record_span(self, span: SpanRecord) -> None:
+        self.spans.append(span)
+
+    def record_event(self, event: ObservationEvent) -> None:
+        self.events.append(event)
+
+
+class FailingObservationSink:
+    def record_span(self, span: SpanRecord) -> None:
+        del span
+        raise RuntimeError("span sink failed")
+
+    def record_event(self, event: ObservationEvent) -> None:
+        del event
+        raise RuntimeError("event sink failed")
 
 
 def test_create_remote_session_sends_git_workspace_source(
@@ -84,6 +108,91 @@ def test_create_remote_session_sends_git_workspace_source(
             {"Authorization": "Bearer secret-token"},
         )
     ]
+
+
+def test_create_remote_session_records_remote_provision_span(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from coding_agent.remote.client import RemoteEndpoint, create_remote_session
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"session_id": "sess-git"}
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def post(
+            self, path: str, json: dict[str, object] | None = None
+        ) -> FakeResponse:
+            del path, json
+            return FakeResponse()
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+    sink = RecordingObservationSink()
+
+    session_id = create_remote_session(
+        RemoteEndpoint("dev", "http://agent.example", None),
+        workspace_source={"kind": "git", "remote_url": "https://example.invalid/repo"},
+        observation_sink=sink,
+    )
+
+    assert session_id == "sess-git"
+    assert [span.name for span in sink.spans] == ["remote.workspace.provision"]
+    assert sink.spans[0].status == "ok"
+    assert sink.spans[0].attributes == {
+        "workspace_ref_kind": "git",
+        "remote_status": "completed",
+        "session_id": "sess-git",
+    }
+
+
+def test_create_remote_session_observation_sink_failure_fails_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from coding_agent.remote.client import RemoteEndpoint, create_remote_session
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"session_id": "sess-docker"}
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def post(
+            self, path: str, json: dict[str, object] | None = None
+        ) -> FakeResponse:
+            del path, json
+            return FakeResponse()
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+
+    session_id = create_remote_session(
+        RemoteEndpoint("dev", "http://agent.example", None),
+        observation_sink=FailingObservationSink(),
+    )
+
+    assert session_id == "sess-docker"
 
 
 def test_create_local_daemon_session_sends_local_run_target(
@@ -1259,6 +1368,96 @@ async def test_attached_executor_client_claims_via_executor_endpoint(
     assert payload["executor_id"] == "executor-1"
     assert payload["executor_kind"] == "local_cli"
     assert payload["session_id"] == "sess-1"
+
+
+@pytest.mark.asyncio
+async def test_attached_executor_records_agent_phase_span(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from coding_agent.adapter_types import StopReason, TurnOutcome
+    from coding_agent.remote import worker as remote_worker
+
+    sink = RecordingObservationSink()
+    completed_requests: list[dict[str, object]] = []
+
+    class FakeTape:
+        tape_id = "tape-1"
+
+        def to_list(self) -> list[dict[str, object]]:
+            return [{"kind": "message"}]
+
+    class FakeContext:
+        tape = FakeTape()
+        config = {"observation_sink": sink}
+
+    class FakePipelineAdapter:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+        async def run_turn(self, prompt: str) -> TurnOutcome:
+            assert prompt == "private prompt should not be traced"
+            return TurnOutcome(
+                stop_reason=StopReason.NO_TOOL_CALLS,
+                final_message="done",
+                steps_taken=2,
+            )
+
+    def fake_create_agent(**kwargs: object) -> tuple[object, FakeContext]:
+        assert kwargs["session_id_override"] == "sess-1"
+        assert kwargs["run_id_override"] == "run-1"
+        return object(), FakeContext()
+
+    async def fake_heartbeat_until_complete(**kwargs: object) -> None:
+        del kwargs
+        await asyncio.sleep(0)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/executor/runs/run-1/complete"
+        completed_requests.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(200, json={})
+
+    monkeypatch.setattr("coding_agent.remote.worker.create_agent", fake_create_agent)
+    monkeypatch.setattr(
+        "coding_agent.remote.worker.PipelineAdapter",
+        FakePipelineAdapter,
+    )
+    monkeypatch.setattr(
+        "coding_agent.remote.worker._heartbeat_until_complete",
+        fake_heartbeat_until_complete,
+    )
+
+    async with httpx.AsyncClient(
+        base_url="http://agent.example",
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        status = await remote_worker._execute_claimed_run(
+            client=client,
+            claim={
+                "run_id": "run-1",
+                "session_id": "sess-1",
+                "claim_token": "claim-token",
+                "prompt": "private prompt should not be traced",
+                "approval_policy": "yolo",
+                "max_steps": 7,
+            },
+            repo_path=tmp_path,
+            worker_id="executor-1",
+            worker_instance_id="executor-1:instance",
+        )
+
+    assert status == 0
+    assert completed_requests[0]["status"] == "completed"
+    assert [span.name for span in sink.spans] == ["remote.workspace.agent_phase"]
+    assert sink.spans[0].status == "ok"
+    assert sink.spans[0].attributes == {
+        "session_id": "sess-1",
+        "run_id": "run-1",
+        "executor_kind": "local",
+        "workspace_ref_kind": "local_path",
+        "remote_status": "completed",
+    }
+    assert "private prompt should not be traced" not in str(sink.spans[0].attributes)
 
 
 def test_remote_worker_runs_external_worker_loop(tmp_path: Path, monkeypatch) -> None:
@@ -3108,6 +3307,69 @@ def test_remote_publish_branch_prints_publication_result(
             {"Authorization": "Bearer secret-token"},
         )
     ]
+
+
+def test_publish_remote_result_records_safe_publication_span(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from coding_agent.remote.client import RemoteEndpoint, publish_remote_result
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "session_id": "sess-123",
+                "mode": "pr",
+                "status": "published",
+                "branch_name": "coding-agent/result",
+                "pushed_ref": "refs/heads/coding-agent/result",
+                "commit_sha": "abc123",
+                "remote_url": "https://github.com/org/repo.git",
+                "pr_url": "https://github.com/org/repo/pull/12",
+                "error": None,
+            }
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def post(
+            self, path: str, json: dict[str, object] | None = None
+        ) -> FakeResponse:
+            del path, json
+            return FakeResponse()
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+    sink = RecordingObservationSink()
+
+    publication = publish_remote_result(
+        RemoteEndpoint("dev", "http://agent.example", None),
+        "sess-123",
+        mode="pr",
+        branch_name="coding-agent/result",
+        observation_sink=sink,
+    )
+
+    assert publication["status"] == "published"
+    assert [span.name for span in sink.spans] == ["result.publish_pr"]
+    attributes = sink.spans[0].attributes
+    assert attributes == {
+        "session_id": "sess-123",
+        "publication_mode": "pr",
+        "remote_status": "completed",
+        "publication_status": "published",
+    }
+    assert "branch_name" not in attributes
+    assert "remote_url" not in attributes
+    assert "pr_url" not in attributes
 
 
 def test_remote_publish_branch_prints_partial_publication_result(
