@@ -16,7 +16,7 @@ from coding_agent.runs import (
 )
 from coding_agent.server.http_server import app, session_manager
 from coding_agent.server.rate_limit import limiter
-from coding_agent.server.session_manager import Session
+from coding_agent.server.session_manager import Session, SessionManager
 from coding_agent.server.stores.session_owner_store import SessionOwnerRecord
 from coding_agent.core.config import settings
 from httpx import ASGITransport, AsyncClient
@@ -118,13 +118,15 @@ def _test_runtime_profile_config() -> dict[str, object]:
 
 
 @pytest.fixture(autouse=True)
-async def clear_sessions() -> AsyncIterator[None]:
+async def clear_sessions(
+    isolated_http_session_manager: SessionManager,
+) -> AsyncIterator[None]:
+    del isolated_http_session_manager
     session_manager.configure_owner_leases(
         owner_store=None,
         owner_id=None,
         fencing_token=None,
     )
-    session_manager.clear_sessions()
     limiter.reset()
     yield
     session_manager.configure_owner_leases(
@@ -132,7 +134,6 @@ async def clear_sessions() -> AsyncIterator[None]:
         owner_id=None,
         fencing_token=None,
     )
-    session_manager.clear_sessions()
     limiter.reset()
 
 

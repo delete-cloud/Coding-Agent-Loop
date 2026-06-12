@@ -11,6 +11,7 @@ from fastapi import HTTPException
 from httpx import AsyncClient, ASGITransport
 
 from coding_agent.server.http_server import app, session_manager
+from coding_agent.server.session_manager import SessionManager
 from coding_agent.server.auth import auth_context_from_headers, verify_api_key
 from coding_agent.server.rate_limit import limiter
 from coding_agent.core.config import settings
@@ -18,11 +19,10 @@ from tests.ui.test_http_server import add_store_backed_approval_request
 
 
 @pytest.fixture(autouse=True)
-async def clear_sessions():
+async def clear_sessions(isolated_http_session_manager: SessionManager):
     """Clear sessions before each test."""
-    session_manager.clear_sessions()
+    del isolated_http_session_manager
     yield
-    session_manager.clear_sessions()
 
 
 @pytest.fixture

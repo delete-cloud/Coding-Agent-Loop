@@ -257,7 +257,10 @@ def _statuses_for(store: _SmokeRuntimeStore, run_id: str) -> list[str]:
 
 
 @pytest.fixture(autouse=True)
-async def _clean_http_server_state() -> None:
+async def _clean_http_server_state(
+    isolated_http_session_manager: SessionManager,
+) -> None:
+    del isolated_http_session_manager
     http_server.session_manager.configure_owner_leases(
         owner_store=None,
         owner_id=None,
@@ -265,11 +268,9 @@ async def _clean_http_server_state() -> None:
     )
     http_server.session_manager.configure_workspace_metadata_store(None)
     http_server.session_manager.configure_runtime_store(None)
-    http_server.session_manager.clear_sessions()
     http_server.limiter.reset()
     yield
     http_server.session_manager.configure_runtime_store(None)
-    http_server.session_manager.clear_sessions()
     http_server.limiter.reset()
 
 

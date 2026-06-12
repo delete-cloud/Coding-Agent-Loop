@@ -79,12 +79,10 @@ from coding_agent.server.http_server import (
     stream_wire_messages,
     _wire_message_to_event,
     app,
-    limiter,
     session_manager,
     wait_for_approval,
 )
 import coding_agent.server.http_server as http_server
-from coding_agent.observability import reset_prometheus_metrics
 from coding_agent.wire.protocol import (
     ApprovalRequest,
     ApprovalResponse,
@@ -178,45 +176,10 @@ def _test_runtime_profile_config(image: str = "python:3.11-slim") -> dict[str, o
 
 
 @pytest.fixture(autouse=True)
-async def clear_sessions(tmp_path: Path):
+async def clear_sessions(isolated_http_session_manager: SessionManager):
     """Provide each test with an isolated unfenced session manager."""
-    global session_manager
-    original_session_manager = session_manager
-    original_http_session_manager = http_server.session_manager
-    test_session_manager = SessionManager(
-        storage_config=local_sqlite_storage_config(tmp_path),
-        provisioned_cloud_binding_cleanup=http_server._cleanup_provisioned_cloud_binding,
-    )
-    session_manager = test_session_manager
-    http_server.session_manager = test_session_manager
-
-    reset_prometheus_metrics()
-    session_manager.configure_owner_leases(
-        owner_store=None,
-        owner_id=None,
-        fencing_token=None,
-    )
-    session_manager.configure_workspace_metadata_store(None)
-    session_manager.configure_runtime_store(None)
-    session_manager.clear_sessions()
-    # Clear rate limit storage to prevent 429 errors
-    limiter.reset()
-    try:
-        yield
-    finally:
-        session_manager.configure_owner_leases(
-            owner_store=None,
-            owner_id=None,
-            fencing_token=None,
-        )
-        session_manager.configure_workspace_metadata_store(None)
-        session_manager.configure_runtime_store(None)
-        SessionManager.clear_sessions(test_session_manager)
-        reset_prometheus_metrics()
-        limiter.reset()
-        await SessionManager.close(test_session_manager)
-        session_manager = original_session_manager
-        http_server.session_manager = original_http_session_manager
+    del isolated_http_session_manager
+    yield
 
 
 def register_session(
