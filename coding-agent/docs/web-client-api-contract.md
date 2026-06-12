@@ -28,11 +28,12 @@ Source of truth in code:
 | `POST` | `/sessions` | `CreateSessionRequest` → `{ session_id }` |
 | `GET`  | `/sessions` | → `{ sessions: SessionSummary[] }` |
 | `GET`  | `/sessions/{id}` | → `SessionSummary` |
+| `GET`  | `/sessions/{id}/runs` | → `{ session_id, runs: RuntimeRun[] }` |
 | `POST` | `/sessions/{id}/prompt?event_format=display` | `{ prompt }` → **DisplayEvent SSE stream** |
 | `POST` | `/sessions/{id}/resume?event_format=display` | `{ prompt?, resume_reason }` → **DisplayEvent SSE stream** |
 | `POST` | `/sessions/{id}/approve` | `{ request_id, approved, feedback?, scope: "once"\|"session" }` → `{ status, request_id, decision }` |
 | `POST` | `/sessions/{id}/cancel` | → `{ session_id, turn_id, status }` |
-| `GET`  | `/sessions/{id}/display-events` | → live **DisplayEvent SSE stream** |
+| `GET`  | `/sessions/{id}/display-events` | → live reconnect **DisplayEvent SSE stream** |
 | `GET`  | `/runs/{run_id}/display-events` | → replayed `DisplayEvent[]` |
 | `GET`  | `/sessions/{id}/result` | → `SessionResultResponse` (`final_answer`, ...) |
 | `GET`  | `/sessions/{id}/workspace/diff` | → `{ files[], additions, deletions }` |
@@ -101,6 +102,20 @@ The stream ends when a `final_result` arrives **with an empty `payload.agent_id`
    - on `approval_prompt`, block on user choice and `POST /approve`.
 4. Stop when `final_result` has empty `payload.agent_id`.
 5. Optionally `GET /sessions/{id}/workspace/diff` to show file changes.
+
+## History restore and reconnect
+
+Full history restore is deterministic replay:
+
+1. `GET /sessions/{id}` for current status and resume metadata.
+2. `GET /sessions/{id}/runs` for durable runs in session order.
+3. For each run, `GET /runs/{run_id}/display-events`.
+4. Fold the replayed `DisplayEvent` records through the same reducer used for
+   live prompt streams.
+
+`GET /sessions/{id}/display-events` is not the full-history replay endpoint. It
+is a live session-level SSE stream for reconnecting while a turn is still active
+after the client has replayed persisted history.
 
 ## Notes for the future Go runtime
 
