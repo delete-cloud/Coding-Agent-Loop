@@ -9,6 +9,7 @@ server:
   host: 0.0.0.0
   port: 8080
   configPath: /app/src/coding_agent/agent.toml
+  allowUnauthenticated: false
   auth:
     enabled: true
     bearerTokenEnv: CODING_AGENT_API_KEY

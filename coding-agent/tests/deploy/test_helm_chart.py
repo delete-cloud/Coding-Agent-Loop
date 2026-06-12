@@ -144,6 +144,7 @@ def test_helm_default_runtime_contract_is_runnable() -> None:
         _command_option(main["command"], "--config")
         == "/app/src/coding_agent/agent.toml"
     )
+    assert "--allow-unauthenticated" not in main["command"]
 
 
 def test_helm_default_configures_http_auth() -> None:
@@ -178,6 +179,16 @@ def test_helm_default_exposes_webui_static_dir_and_cors_whitelist() -> None:
     }
 
 
+def test_helm_can_disable_bundled_webui_static_mount() -> None:
+    docs = _render("--set", "webui.enabled=false")
+    main = _container(docs)
+
+    assert _env_var(main, "WEBUI_DIST_DIR") == {
+        "name": "WEBUI_DIST_DIR",
+        "value": "",
+    }
+
+
 def test_helm_cors_whitelist_can_be_disabled_for_local_values() -> None:
     docs = _render("-f", str(CHART / "values-orbstack.yaml"))
     main = _container(docs)
@@ -203,6 +214,23 @@ def test_helm_local_values_disable_http_auth_secret(values_file: str) -> None:
     main = _container(docs)
     with pytest.raises(AssertionError, match="missing env var CODING_AGENT_API_KEY"):
         _env_var(main, "CODING_AGENT_API_KEY")
+
+
+@pytest.mark.parametrize(
+    "values_file",
+    [
+        "values-orbstack.yaml",
+        "values-orbstack-kimi.yaml",
+    ],
+)
+def test_helm_local_values_explicitly_allow_unauthenticated_listener(
+    values_file: str,
+) -> None:
+    docs = _render("-f", str(CHART / values_file))
+    main = _container(docs)
+
+    assert "--allow-unauthenticated" in main["command"]
+    assert _command_option(main["command"], "--host") == "0.0.0.0"
 
 
 def test_helm_service_port_override_keeps_app_port() -> None:

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -51,19 +54,37 @@ async def test_webui_static_mount_is_disabled_without_dist_dir() -> None:
     assert response.status_code == 404
 
 
-@pytest.mark.asyncio
-async def test_default_app_root_is_404_without_webui_dist_dir(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("WEBUI_DIST_DIR", raising=False)
+def test_default_app_root_is_404_without_webui_dist_dir() -> None:
+    env = os.environ.copy()
+    env.pop("WEBUI_DIST_DIR", None)
+    script = """
+import asyncio
 
+from httpx import ASGITransport, AsyncClient
+
+from coding_agent.server import http_server
+
+
+async def main() -> None:
     async with AsyncClient(
         transport=ASGITransport(app=http_server.app),
         base_url="http://test",
     ) as client:
         response = await client.get("/")
+    assert response.status_code == 404, response.status_code
 
-    assert response.status_code == 404
+
+asyncio.run(main())
+"""
+
+    subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        env=env,
+        stderr=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
 
 
 def test_cors_allowed_origins_defaults_to_development_wildcard() -> None:

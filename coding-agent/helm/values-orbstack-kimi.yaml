@@ -8,6 +8,7 @@ service:
   port: 8080
 
 server:
+  allowUnauthenticated: true
   auth:
     enabled: false
 
