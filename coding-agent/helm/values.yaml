@@ -5,15 +5,11 @@ image:
   tag: latest
   pullPolicy: IfNotPresent
 
-command:
-  - python
-  - -m
-  - coding_agent
-  - serve
-  - --host
-  - 0.0.0.0
-  - --port
-  - "8080"
+server:
+  host: 0.0.0.0
+  port: 8080
+
+command: []
 
 service:
   type: ClusterIP
@@ -21,7 +17,6 @@ service:
 
 agent:
   dataDir: /var/lib/coding-agent/data
-  workspaceDir: /workspace
   extraEnv: []
   secretRef: []
   secretEnv: []
@@ -51,8 +46,13 @@ probes:
 
 resources: {}
 podAnnotations: {}
-podSecurityContext: {}
-securityContext: {}
+podSecurityContext:
+  fsGroup: 10001
+  fsGroupChangePolicy: OnRootMismatch
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
 
 persistence:
   workspace:
