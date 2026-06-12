@@ -6,7 +6,10 @@ service:
   type: ClusterIP
   port: 8080
 server:
+  allowUnauthenticated: true
   auth:
     enabled: false
+cors:
+  origins: []
 redis:
   enabled: false

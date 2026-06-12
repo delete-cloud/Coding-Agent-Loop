@@ -40,6 +40,9 @@ spec:
             - {{ .Values.server.port | quote }}
             - --config
             - {{ .Values.server.configPath | quote }}
+            {{- if .Values.server.allowUnauthenticated }}
+            - --allow-unauthenticated
+            {{- end }}
             {{- end }}
           {{- if .Values.persistence.workspace.enabled }}
           workingDir: {{ .Values.persistence.workspace.mountPath | quote }}
@@ -58,6 +61,16 @@ spec:
           env:
             - name: AGENT_DATA_DIR
               value: {{ .Values.persistence.data.mountPath | quote }}
+            - name: WEBUI_DIST_DIR
+              {{- if .Values.webui.enabled }}
+              value: {{ .Values.webui.distDir | quote }}
+              {{- else }}
+              value: ""
+              {{- end }}
+            {{- if .Values.cors.origins }}
+            - name: CODING_AGENT_CORS_ORIGINS
+              value: {{ join "," .Values.cors.origins | quote }}
+            {{- end }}
             {{- if .Values.server.auth.enabled }}
             - name: {{ required "server.auth.bearerTokenEnv is required when server.auth.enabled=true" .Values.server.auth.bearerTokenEnv | quote }}
               valueFrom:

@@ -8,8 +8,12 @@ service:
   port: 8080
 
 server:
+  allowUnauthenticated: true
   auth:
     enabled: false
+
+cors:
+  origins: []
 
 agent:
   config:

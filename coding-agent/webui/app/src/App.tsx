@@ -32,6 +32,14 @@ type Config = {
   approval: ApprovalPolicy;
 };
 
+function defaultBaseUrl(): string {
+  const configured = import.meta.env.VITE_API_BASE_URL;
+  if (typeof configured === "string" && configured.trim()) {
+    return configured.trim();
+  }
+  return window.location.origin;
+}
+
 function loadConfig(): Config {
   try {
     const raw = localStorage.getItem(LS_KEY);
@@ -40,7 +48,7 @@ function loadConfig(): Config {
     /* ignore */
   }
   return {
-    baseUrl: "http://127.0.0.1:8080",
+    baseUrl: defaultBaseUrl(),
     apiKey: "",
     repoPath: "",
     approval: "auto",

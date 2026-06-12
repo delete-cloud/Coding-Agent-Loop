@@ -446,6 +446,9 @@ def test_serve_config_sets_explicit_server_config(
                 'model = "test-model"',
                 'provider = "openai"',
                 "",
+                "[server]",
+                'bearer_token = "test-token"',
+                "",
             ]
         ),
         encoding="utf-8",
@@ -481,6 +484,141 @@ def test_serve_config_sets_explicit_server_config(
         "port": 9000,
         "config": str(config_path.resolve()),
     }
+
+
+def test_serve_rejects_non_localhost_without_auth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "server.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[agent]",
+                'name = "test-agent"',
+                'model = "test-model"',
+                'provider = "openai"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    def fail_uvicorn_run(app: object, *, host: str, port: int) -> None:
+        raise AssertionError("uvicorn.run must not be called")
+
+    monkeypatch.setattr("uvicorn.run", fail_uvicorn_run)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        main,
+        [
+            "serve",
+            "--config",
+            str(config_path),
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "9000",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "refuses to listen on non-localhost" in result.output
+
+
+def test_serve_allows_non_localhost_with_configured_auth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "server.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[agent]",
+                'name = "test-agent"',
+                'model = "test-model"',
+                'provider = "openai"',
+                "",
+                "[server]",
+                'bearer_token = "test-token"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_uvicorn_run(app: object, *, host: str, port: int) -> None:
+        del app
+        captured["host"] = host
+        captured["port"] = port
+
+    monkeypatch.setattr("uvicorn.run", fake_uvicorn_run)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        main,
+        [
+            "serve",
+            "--config",
+            str(config_path),
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "9000",
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert captured == {"host": "0.0.0.0", "port": 9000}
+
+
+def test_serve_allow_unauthenticated_bypasses_non_localhost_auth_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "server.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[agent]",
+                'name = "test-agent"',
+                'model = "test-model"',
+                'provider = "openai"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_uvicorn_run(app: object, *, host: str, port: int) -> None:
+        del app
+        captured["host"] = host
+        captured["port"] = port
+
+    monkeypatch.setattr("uvicorn.run", fake_uvicorn_run)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        main,
+        [
+            "serve",
+            "--config",
+            str(config_path),
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "9000",
+            "--allow-unauthenticated",
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert captured == {"host": "0.0.0.0", "port": 9000}
 
 
 def test_daemon_command_starts_foreground_local_control_plane(
@@ -1073,6 +1211,7 @@ def test_serve_config_uses_server_host_and_port_when_cli_omits_them(
                 "[server]",
                 'host = "0.0.0.0"',
                 "port = 9000",
+                'bearer_token = "test-token"',
                 "",
             ]
         ),

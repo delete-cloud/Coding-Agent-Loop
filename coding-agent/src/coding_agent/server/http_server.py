@@ -24,6 +24,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.params import Depends as DependsParam
 from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 from slowapi.errors import RateLimitExceeded
 from sse_starlette.sse import EventSourceResponse
 
@@ -291,6 +292,8 @@ SESSION_IDLE_TIMEOUT_MINUTES = 30
 WORKER_STALE_AFTER_SECONDS = 60
 WORKER_OFFLINE_AFTER_SECONDS = 300
 _SERVER_CONFIG_ENV = "CODING_AGENT_SERVER_CONFIG"
+_CORS_ORIGINS_ENV = "CODING_AGENT_CORS_ORIGINS"
+_WEBUI_DIST_DIR_ENV = "WEBUI_DIST_DIR"
 _GITHUB_API_BASE_URL = "https://api.github.com"
 _GITHUB_API_VERSION = "2022-11-28"
 _GITHUB_SCP_REMOTE_RE = re.compile(r"^git@github\.com:(?P<path>[^:]+)$")
@@ -314,6 +317,31 @@ def _server_config_path() -> Path:
 def _has_explicit_server_config() -> bool:
     configured_path = os.environ.get(_SERVER_CONFIG_ENV)
     return configured_path is not None and bool(configured_path.strip())
+
+
+def _cors_allowed_origins(environ: Mapping[str, str] = os.environ) -> list[str]:
+    raw_origins = environ.get(_CORS_ORIGINS_ENV)
+    if raw_origins is None:
+        return ["*"]
+    origins = [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
+    if not origins:
+        raise ValueError(f"{_CORS_ORIGINS_ENV} must contain at least one origin")
+    return origins
+
+
+def mount_webui_static_files(app: FastAPI, dist_dir: str | None = None) -> None:
+    configured_dir = (
+        os.environ.get(_WEBUI_DIST_DIR_ENV) if dist_dir is None else dist_dir
+    )
+    if configured_dir is None or not configured_dir.strip():
+        return
+    dist_path = Path(configured_dir).expanduser()
+    if not dist_path.is_dir():
+        raise RuntimeError(f"{_WEBUI_DIST_DIR_ENV} must point to an existing directory")
+
+    # Registered last so API and /console routes keep precedence. StaticFiles
+    # serves "/" but does not implement SPA deep-link fallback.
+    app.mount("/", StaticFiles(directory=str(dist_path), html=True), name="webui")
 
 
 def _load_agent_config_section(section: str) -> dict[str, Any]:
@@ -1074,7 +1102,7 @@ app.state.limiter = limiter
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=_cors_allowed_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -6797,3 +6825,6 @@ async def wait_for_approval(
         }
         await _broadcast_event(session, timeout_event)
     return response
+
+
+mount_webui_static_files(app)

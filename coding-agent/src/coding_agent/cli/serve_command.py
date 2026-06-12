@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import os
 from pathlib import Path
 from typing import Any, cast
@@ -75,12 +76,69 @@ def _server_cli_port(server_config: dict[str, Any], port: int | None) -> int:
     return configured_port
 
 
+def _is_localhost_listener(host: str) -> bool:
+    normalized = host.strip().lower()
+    if normalized == "localhost":
+        return True
+    if normalized.startswith("[") and normalized.endswith("]"):
+        normalized = normalized[1:-1]
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def _configured_env_token(server_config: dict[str, Any], key: str) -> str | None:
+    env_name = server_config.get(key)
+    if not isinstance(env_name, str) or not env_name.strip():
+        return None
+    token = os.environ.get(env_name.strip())
+    return token.strip() if token is not None and token.strip() else None
+
+
+def _configured_direct_token(server_config: dict[str, Any], key: str) -> str | None:
+    token = server_config.get(key)
+    if not isinstance(token, str) or not token.strip():
+        return None
+    return token.strip()
+
+
+def _server_cli_has_effective_auth(server_config: dict[str, Any]) -> bool:
+    if os.environ.get("AGENT_HTTP_API_KEY", "").strip():
+        return True
+    for key in ("bearer_token", "admin_bearer_token"):
+        if _configured_direct_token(server_config, key) is not None:
+            return True
+    for key in ("bearer_token_env", "admin_bearer_token_env"):
+        if _configured_env_token(server_config, key) is not None:
+            return True
+    return False
+
+
+def _guard_unauthenticated_remote_listener(
+    *,
+    host: str,
+    server_config: dict[str, Any],
+    allow_unauthenticated: bool,
+) -> None:
+    if allow_unauthenticated or _is_localhost_listener(host):
+        return
+    if _server_cli_has_effective_auth(server_config):
+        return
+    raise click.ClickException(
+        "serve refuses to listen on non-localhost without authentication; "
+        "configure server.bearer_token, server.bearer_token_env, AGENT_HTTP_API_KEY, "
+        "or pass --allow-unauthenticated"
+    )
+
+
 def _run_http_control_plane(
     *,
     config_path: Path | None,
     host: str | None,
     port: int | None,
     label: str,
+    allow_unauthenticated: bool,
 ) -> None:
     import uvicorn
 
@@ -91,6 +149,11 @@ def _run_http_control_plane(
         server_config = _load_server_cli_settings(config_path)
         resolved_host = _server_cli_host(server_config, host)
         resolved_port = _server_cli_port(server_config, port)
+        _guard_unauthenticated_remote_listener(
+            host=resolved_host,
+            server_config=server_config,
+            allow_unauthenticated=allow_unauthenticated,
+        )
 
         from coding_agent.server.http_server import app
 
@@ -114,13 +177,24 @@ def _run_http_control_plane(
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     help="Explicit server config file.",
 )
-def serve(port: int | None, host: str | None, config_path: Path | None):
+@click.option(
+    "--allow-unauthenticated",
+    is_flag=True,
+    help="Allow unauthenticated non-localhost listeners.",
+)
+def serve(
+    port: int | None,
+    host: str | None,
+    config_path: Path | None,
+    allow_unauthenticated: bool,
+):
     """Start HTTP API server."""
     _run_http_control_plane(
         config_path=config_path,
         host=host,
         port=port,
         label="HTTP server",
+        allow_unauthenticated=allow_unauthenticated,
     )
 
 
@@ -134,12 +208,18 @@ def serve(port: int | None, host: str | None, config_path: Path | None):
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     help="Explicit daemon config file.",
 )
+@click.option(
+    "--allow-unauthenticated",
+    is_flag=True,
+    help="Allow unauthenticated non-localhost listeners.",
+)
 @click.pass_context
 def daemon(
     ctx: click.Context,
     port: int | None,
     host: str | None,
     config_path: Path | None,
+    allow_unauthenticated: bool,
 ) -> None:
     """Start local daemon control plane or use daemon-backed clients."""
     if ctx.invoked_subcommand is not None:
@@ -149,6 +229,7 @@ def daemon(
         host=host,
         port=port,
         label="local daemon control plane",
+        allow_unauthenticated=allow_unauthenticated,
     )
 
 

@@ -139,6 +139,29 @@ describe("App session switching", () => {
     expect(activePromptSignal?.aborted).toBe(true);
   });
 
+  it("defaults API base URL to same origin when no config is stored", async () => {
+    localStorage.removeItem("coding-agent-webui-config");
+    let sessionsUrl = "";
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/sessions")) {
+          sessionsUrl = url;
+          return Promise.resolve(jsonResponse({ sessions: [] }));
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    const baseUrl = screen.getByTitle("Server base URL") as HTMLInputElement;
+    await waitFor(() => expect(sessionsUrl).toBe(`${window.location.origin}/sessions`));
+    expect(baseUrl.value).toBe(window.location.origin);
+  });
+
   it("uses prompt for completed restored sessions even when historical resume metadata remains", async () => {
     const completed = session("session-completed-0001", "model-completed", {
       resumable: true,
