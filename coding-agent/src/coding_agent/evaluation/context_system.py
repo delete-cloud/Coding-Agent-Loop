@@ -39,6 +39,8 @@ class ContextSystemGoldenFailure:
 class ContextSystemGoldenExpectation:
     rendered_contains: tuple[str, ...] = ()
     rendered_excludes: tuple[str, ...] = ()
+    min_selected_score: float | None = None
+    max_selected_score: float | None = None
 
 
 @dataclass(frozen=True)
@@ -49,6 +51,9 @@ class ContextSystemGoldenCase:
     test_failures: tuple[ContextSystemGoldenFailure, ...]
     expected: ContextSystemGoldenExpectation
     top_k: int = 5
+    corpus: str = "default"
+    search_corpora: tuple[str, ...] | None = None
+    max_distance: float | None = None
 
 
 @dataclass(frozen=True)
@@ -56,6 +61,7 @@ class ContextSystemGoldenResult:
     case_id: str
     rendered_context: str
     message_count: int
+    selected_scores: tuple[float, ...]
 
 
 def load_context_system_golden_cases(path: Path) -> tuple[ContextSystemGoldenCase, ...]:
@@ -111,6 +117,18 @@ def _golden_case_from_mapping(
     case_id = _case_id(data.get("id"))
     query = _non_empty_str(data.get("query"), context=f"golden case {case_id} query")
     top_k = _positive_int(data.get("top_k", 5), context=f"golden case {case_id} top_k")
+    corpus = _non_empty_str(
+        data.get("corpus", "default"),
+        context=f"golden case {case_id} corpus",
+    )
+    search_corpora = _optional_string_tuple(
+        data.get("search_corpora"),
+        context=f"golden case {case_id} search_corpora",
+    )
+    max_distance = _optional_non_negative_float(
+        data.get("max_distance"),
+        context=f"golden case {case_id} max_distance",
+    )
     repo_files = tuple(
         _repo_file_from_mapping(
             _mapping(repo_file, context=f"golden case {case_id} repo file")
@@ -142,6 +160,9 @@ def _golden_case_from_mapping(
         test_failures=test_failures,
         expected=expected,
         top_k=top_k,
+        corpus=corpus,
+        search_corpora=search_corpora,
+        max_distance=max_distance,
     )
 
 
@@ -196,6 +217,14 @@ def _expectation_from_mapping(
             data.get("rendered_excludes", []),
             context="rendered_excludes",
         ),
+        min_selected_score=_optional_non_negative_float(
+            data.get("min_selected_score"),
+            context="min_selected_score",
+        ),
+        max_selected_score=_optional_non_negative_float(
+            data.get("max_selected_score"),
+            context="max_selected_score",
+        ),
     )
 
 
@@ -218,6 +247,7 @@ async def _evaluate_golden_case(
         embedding_fn=_context_system_embed,
         chunk_size=1000,
         chunk_overlap=0,
+        corpus=case.corpus,
     )
     if case.repo_files:
         await kb.index_directory(repo_root, show_progress=False)
@@ -236,7 +266,9 @@ async def _evaluate_golden_case(
         db_path=db_path,
         embedding_dim=4,
         top_k=case.top_k,
+        max_distance=case.max_distance,
         embedding_fn=_context_system_embed,
+        search_corpora=case.search_corpora,
     )
     plugin.do_mount()
     tape = Tape()
@@ -256,6 +288,11 @@ async def _evaluate_golden_case(
         case_id=case.case_id,
         rendered_context=rendered_context,
         message_count=len(messages),
+        selected_scores=(
+            tuple(result.score for result in plugin._snapshot.retrieval_results)
+            if plugin._snapshot is not None
+            else ()
+        ),
     )
 
 
@@ -273,6 +310,22 @@ def _assert_expectations(
             raise AssertionError(
                 f"{case.case_id}: rendered context included excluded text: {unexpected}"
             )
+    if case.expected.min_selected_score is not None and (
+        not result.selected_scores
+        or min(result.selected_scores) < case.expected.min_selected_score
+    ):
+        raise AssertionError(
+            f"{case.case_id}: selected score below expected minimum "
+            f"{case.expected.min_selected_score}: {result.selected_scores}"
+        )
+    if case.expected.max_selected_score is not None and (
+        not result.selected_scores
+        or max(result.selected_scores) > case.expected.max_selected_score
+    ):
+        raise AssertionError(
+            f"{case.case_id}: selected score above expected maximum "
+            f"{case.expected.max_selected_score}: {result.selected_scores}"
+        )
 
 
 def _context_system_embed(texts: list[str]) -> list[list[float]]:
@@ -283,8 +336,24 @@ def _context_system_embed(texts: list[str]) -> list[list[float]]:
             vectors.append([1.0, 0.0, 0.0, 0.0])
         elif "billing" in lower or "invoice" in lower:
             vectors.append([0.0, 1.0, 0.0, 0.0])
-        else:
+        elif (
+            "longhorn" in lower
+            or "restore" in lower
+            or "netbird" in lower
+            or "cilium" in lower
+            or "mtu" in lower
+        ):
             vectors.append([0.0, 0.0, 1.0, 0.0])
+        elif (
+            "adr" in lower
+            or "fencing" in lower
+            or "sqlite" in lower
+            or "corpus" in lower
+            or "retrieval" in lower
+        ):
+            vectors.append([0.0, 0.0, 0.0, 1.0])
+        else:
+            vectors.append([0.5, 0.5, 0.5, 0.5])
     return vectors
 
 
@@ -311,6 +380,12 @@ def _string_tuple(value: object, *, context: str) -> tuple[str, ...]:
     return tuple(strings)
 
 
+def _optional_string_tuple(value: object, *, context: str) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    return _string_tuple(value, context=context)
+
+
 def _non_empty_str(value: object, *, context: str) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError(f"{context} must be a non-empty string")
@@ -321,6 +396,17 @@ def _int(value: object, *, context: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool):
         raise TypeError(f"{context} must be an integer")
     return value
+
+
+def _optional_non_negative_float(value: object, *, context: str) -> float | None:
+    if value is None:
+        return None
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        raise TypeError(f"{context} must be a number")
+    number = float(value)
+    if number < 0:
+        raise ValueError(f"{context} must be non-negative")
+    return number
 
 
 def _positive_int(value: object, *, context: str) -> int:

@@ -29,8 +29,10 @@ async def test_context_system_golden_cases_cover_retrieval_and_context_pack(
         workspace_dir=tmp_path,
     )
 
-    assert len(results) == 1
-    result = results[0]
+    assert len(results) == 6
+    result = next(
+        result for result in results if result.case_id == "auth-retrieval-context-pack"
+    )
     assert result.case_id == "auth-retrieval-context-pack"
     assert result.message_count == 1
     assert "## Repo references" in result.rendered_context
@@ -41,16 +43,29 @@ async def test_context_system_golden_cases_cover_retrieval_and_context_pack(
         in result.rendered_context
     )
     assert "billing invoice total" not in result.rendered_context
+    threshold_result = next(
+        result
+        for result in results
+        if result.case_id == "rag-distance-threshold-negative"
+    )
+    assert threshold_result.selected_scores
+    assert max(threshold_result.selected_scores) <= 0.1
+    assert "Authentication module with JWT token validation" not in (
+        threshold_result.rendered_context
+    )
 
 
 def test_load_context_system_golden_cases_resolves_fixture_paths() -> None:
     cases = load_context_system_golden_cases(GOLDEN_PATH)
 
-    assert len(cases) == 1
+    assert len(cases) == 6
     case = cases[0]
     assert case.case_id == "auth-retrieval-context-pack"
     assert case.query == "expired auth token failure"
     assert case.top_k == 2
+    assert case.corpus == "default"
+    assert case.search_corpora == ("default",)
+    assert case.expected.max_selected_score == 0.8
     assert [repo_file.path for repo_file in case.repo_files] == [
         Path("src/auth.py"),
         Path("src/billing.py"),
@@ -72,6 +87,13 @@ def test_load_context_system_golden_cases_resolves_fixture_paths() -> None:
             ),
         ),
     )
+    distance_case = next(
+        case for case in cases if case.case_id == "rag-distance-threshold-negative"
+    )
+    assert distance_case.corpus == "notes"
+    assert distance_case.search_corpora == ("notes",)
+    assert distance_case.max_distance == 0.1
+    assert distance_case.expected.max_selected_score == 0.1
 
 
 def test_load_context_system_golden_cases_rejects_unsafe_case_id(
@@ -178,5 +200,8 @@ async def test_context_system_golden_cases_can_reuse_workspace(
 
     assert first[0].message_count == 1
     assert second[0].message_count == 1
-    assert "## Repo references" in second[0].rendered_context
-    assert "## Test failures" in second[0].rendered_context
+    auth_result = next(
+        result for result in second if result.case_id == "auth-retrieval-context-pack"
+    )
+    assert "## Repo references" in auth_result.rendered_context
+    assert "## Test failures" in auth_result.rendered_context

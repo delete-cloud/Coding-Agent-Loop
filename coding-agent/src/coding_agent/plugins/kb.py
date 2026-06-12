@@ -29,6 +29,7 @@ class _SearchSnapshot:
     last_user_msg: str
     grounding_messages: list[dict[str, Any]]
     retrieval_attributes: dict[str, Any]
+    retrieval_results: tuple[KBSearchResult, ...]
 
 
 class KBPlugin:
@@ -44,6 +45,7 @@ class KBPlugin:
         chunk_size: int = KB.DEFAULT_CHUNK_SIZE,
         chunk_overlap: int = KB.DEFAULT_CHUNK_OVERLAP,
         top_k: int = 5,
+        max_distance: float | None = None,
         index_extensions: list[str] | None = None,
         text_extensions: list[str] | set[str] | None = None,
         corpus: str = "default",
@@ -57,6 +59,9 @@ class KBPlugin:
         self._chunk_size = chunk_size
         self._chunk_overlap = chunk_overlap
         self._top_k = top_k
+        if max_distance is not None and max_distance < 0:
+            raise ValueError("max_distance must be non-negative")
+        self._max_distance = max_distance
         if not isinstance(corpus, str):
             raise TypeError("corpus must be a string")
         if search_corpora is not None and not all(
@@ -143,10 +148,17 @@ class KBPlugin:
                 k=self._top_k,
                 corpora=self._search_corpora,
             )
+            candidate_count = len(results)
+            if self._max_distance is not None:
+                results = [
+                    result for result in results if result.score <= self._max_distance
+                ]
             retrieval_attributes = _retrieval_result_attributes(
                 results,
                 cache_hit=False,
                 top_k=self._top_k,
+                candidate_count=candidate_count,
+                max_distance=self._max_distance,
             )
             for key, value in retrieval_attributes.items():
                 span.set_attribute(key, value)
@@ -163,6 +175,7 @@ class KBPlugin:
             last_user_msg=user_message,
             grounding_messages=grounding,
             retrieval_attributes=retrieval_attributes,
+            retrieval_results=tuple(results),
         )
         return grounding
 
@@ -231,10 +244,16 @@ def _retrieval_result_attributes(
     *,
     cache_hit: bool,
     top_k: int,
+    candidate_count: int | None = None,
+    max_distance: float | None = None,
 ) -> dict[str, Any]:
     attributes = _retrieval_base_attributes(cache_hit=cache_hit, top_k=top_k)
-    attributes["retrieval.candidate_count"] = len(results)
+    attributes["retrieval.candidate_count"] = (
+        len(results) if candidate_count is None else candidate_count
+    )
     attributes["retrieval.selected_count"] = len(results)
+    if max_distance is not None:
+        attributes["retrieval.max_distance"] = max_distance
     attributes.update(_source_kind_count_attributes("retrieval", results))
     return attributes
 

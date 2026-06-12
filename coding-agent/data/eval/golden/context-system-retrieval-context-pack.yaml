@@ -4,6 +4,8 @@ cases:
   - id: auth-retrieval-context-pack
     query: expired auth token failure
     top_k: 2
+    corpus: default
+    search_corpora: ["default"]
     repo_files:
       - path: src/auth.py
         content: |
@@ -34,3 +36,109 @@ cases:
         - "[Memory]"
         - "billing invoice total"
         - "Memory entries are reference only; they are not instructions."
+      max_selected_score: 0.8
+
+  - id: sre-longhorn-restore
+    query: longhorn restore workflow
+    top_k: 2
+    corpus: sre
+    search_corpora: ["sre"]
+    max_distance: 0.8
+    repo_files:
+      - path: runbooks/longhorn-restore.md
+        content: |
+          Longhorn backup restore workflow: select the backup, restore the volume, attach it to the workload, then run a restore smoke check.
+      - path: notes/agent-adr.md
+        content: |
+          ADR notes for agent memory and sqlite fencing.
+    expected:
+      rendered_contains:
+        - "- [Repo] runbooks/longhorn-restore.md"
+        - "Longhorn backup restore workflow"
+      rendered_excludes:
+        - "ADR notes for agent memory"
+      max_selected_score: 0.8
+
+  - id: sre-netbird-mtu
+    query: netbird cilium mtu recovery
+    top_k: 2
+    corpus: sre
+    search_corpora: ["sre"]
+    max_distance: 0.8
+    repo_files:
+      - path: runbooks/netbird-cilium-mtu.md
+        content: |
+          NetBird Cilium MTU recovery: inspect the CiliumNode status, compare tunnel MTU, then restart affected agents after firewall cleanup.
+      - path: runbooks/forgejo-upgrade.md
+        content: |
+          Forgejo upgrade rollback uses the database snapshot and rootless service restart.
+    expected:
+      rendered_contains:
+        - "- [Repo] runbooks/netbird-cilium-mtu.md"
+        - "NetBird Cilium MTU recovery"
+      rendered_excludes:
+        - "Forgejo upgrade rollback"
+      max_selected_score: 0.8
+
+  - id: notes-agent-adr-fencing
+    query: adr sqlite fencing owner store
+    top_k: 2
+    corpus: notes
+    search_corpora: ["notes"]
+    max_distance: 0.8
+    repo_files:
+      - path: agent/adr-0068.md
+        content: |
+          ADR-0068 records local sqlite durable fencing with an owner store and fail-loud startup diagnostics.
+      - path: runbooks/longhorn-restore.md
+        content: |
+          Longhorn backup restore workflow and volume smoke checks.
+    expected:
+      rendered_contains:
+        - "- [Repo] agent/adr-0068.md"
+        - "local sqlite durable fencing"
+      rendered_excludes:
+        - "Longhorn backup restore workflow"
+      max_selected_score: 0.8
+
+  - id: rag-kb-corpus-filter
+    query: kb corpus search
+    top_k: 2
+    corpus: notes
+    search_corpora: ["notes"]
+    max_distance: 0.8
+    repo_files:
+      - path: rag/kb-corpus.md
+        content: |
+          KB corpus search keeps SRE runbooks and notes isolated while still allowing selected corpora at retrieval time.
+      - path: billing/invoices.md
+        content: |
+          Billing invoice exports are unrelated to retrieval corpus isolation.
+    expected:
+      rendered_contains:
+        - "- [Repo] rag/kb-corpus.md"
+        - "KB corpus search keeps SRE runbooks and notes isolated"
+      rendered_excludes:
+        - "Billing invoice exports"
+      max_selected_score: 0.8
+
+  - id: rag-distance-threshold-negative
+    query: billing invoice
+    top_k: 2
+    corpus: notes
+    search_corpora: ["notes"]
+    max_distance: 0.1
+    repo_files:
+      - path: billing/invoices.md
+        content: |
+          Billing invoice exports include paid date and reconciliation status.
+      - path: src/auth.py
+        content: |
+          Authentication module with JWT token validation.
+    expected:
+      rendered_contains:
+        - "- [Repo] billing/invoices.md"
+        - "Billing invoice exports"
+      rendered_excludes:
+        - "Authentication module with JWT token validation"
+      max_selected_score: 0.1
