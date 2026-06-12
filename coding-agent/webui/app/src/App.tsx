@@ -3,6 +3,8 @@ import { AgentClient } from "./lib/api";
 import type {
   ApprovalPolicy,
   DisplayEventEnvelope,
+  DisplayStreamEvent,
+  FinalResultPayload,
   ProgressPayload,
   SessionSummary,
   WorkspaceDiff,
@@ -55,6 +57,7 @@ export default function App() {
   const [items, setItems] = useState<TimelineItem[]>([]);
   const [status, setStatus] = useState("no session");
   const [streaming, setStreaming] = useState(false);
+  const [sessionLoading, setSessionLoading] = useState(false);
   const [prompt, setPrompt] = useState("");
   const [diffState, setDiffState] = useState<{
     diff: WorkspaceDiff;
@@ -62,6 +65,9 @@ export default function App() {
   } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const followAbortRef = useRef<AbortController | null>(null);
+  const loadSeqRef = useRef(0);
+  const activeSessionRef = useRef<string | null>(null);
+  const sessionLoadingRef = useRef(false);
 
   const client = useMemo(
     () => new AgentClient({ baseUrl: config.baseUrl, apiKey: config.apiKey }),
@@ -78,6 +84,11 @@ export default function App() {
       }
       return next;
     });
+
+  const setSessionLoadingState = useCallback((value: boolean) => {
+    sessionLoadingRef.current = value;
+    setSessionLoading(value);
+  }, []);
 
   const refreshSessions = useCallback(async () => {
     setSessionsLoading(true);
@@ -103,18 +114,39 @@ export default function App() {
   }, []);
 
   const newSession = useCallback(async () => {
+    const loadSeq = loadSeqRef.current + 1;
+    const previousSessionId = activeSessionRef.current;
     try {
+      loadSeqRef.current = loadSeq;
+      abortRef.current?.abort();
+      abortRef.current = null;
+      followAbortRef.current?.abort();
+      followAbortRef.current = null;
+      activeSessionRef.current = null;
+      setSessionId(null);
+      setSessionMode("prompt");
+      setSessionLoadingState(true);
+      setStreaming(false);
+      setStatus("creating session…");
       const id = await client.createSession({
         repoPath: config.repoPath,
         approvalPolicy: config.approval,
       });
+      if (loadSeqRef.current !== loadSeq) return;
+      activeSessionRef.current = id;
       setSessionId(id);
       setSessionMode("prompt");
+      setSessionLoadingState(false);
       setItems([]);
       setDiffState(null);
       setStatus("idle");
       void refreshSessions();
     } catch (e) {
+      if (loadSeqRef.current !== loadSeq) return;
+      activeSessionRef.current = previousSessionId;
+      setSessionId(previousSessionId);
+      setSessionLoadingState(false);
+      setStatus(previousSessionId ? "idle" : "no session");
       setItems([
         {
           id: `e${Date.now()}`,
@@ -123,13 +155,14 @@ export default function App() {
         },
       ]);
     }
-  }, [client, config.repoPath, config.approval, refreshSessions]);
+  }, [client, config.repoPath, config.approval, refreshSessions, setSessionLoadingState]);
 
   const followSession = useCallback(async (id: string) => {
     const ctrl = new AbortController();
     followAbortRef.current = ctrl;
     try {
       for await (const ev of client.followDisplayEvents(id, ctrl.signal)) {
+        if (ctrl.signal.aborted || activeSessionRef.current !== id) break;
         if (ev.event === "progress_update") {
           const d = (ev.data as DisplayEventEnvelope<ProgressPayload>).payload;
           setStatus(formatProgressStatus(d));
@@ -138,9 +171,11 @@ export default function App() {
         }
         if (isRootTurnEnd(ev)) break;
       }
-      if (!ctrl.signal.aborted) await reconcileSession(id, "");
+      if (!ctrl.signal.aborted && activeSessionRef.current === id) {
+        await reconcileSession(id, "");
+      }
     } catch (e) {
-      if (!ctrl.signal.aborted) {
+      if (!ctrl.signal.aborted && activeSessionRef.current === id) {
         await reconcileSession(id, `stream interrupted: ${msg(e)}`);
       }
     } finally {
@@ -150,13 +185,17 @@ export default function App() {
   }, [client, refreshSessions]);
 
   const loadSession = useCallback(async (id: string) => {
+    const loadSeq = loadSeqRef.current + 1;
+    loadSeqRef.current = loadSeq;
     abortRef.current?.abort();
     abortRef.current = null;
     setStreaming(false);
     followAbortRef.current?.abort();
     followAbortRef.current = null;
+    activeSessionRef.current = id;
     setSessionId(id);
-    setSessionMode("resume");
+    setSessionMode("prompt");
+    setSessionLoadingState(true);
     setItems([]);
     setDiffState(null);
     setStatus("loading history…");
@@ -165,11 +204,16 @@ export default function App() {
         client.getSession(id),
         client.displayEvents(id),
       ]);
+      if (loadSeqRef.current !== loadSeq || activeSessionRef.current !== id) return;
       setSessions((prev) => upsertSession(prev, summary));
+      setSessionMode(shouldResumeSession(summary) ? "resume" : "prompt");
+      setSessionLoadingState(false);
       setItems(replayEvents([], events));
       setStatus(summary.turn_in_progress ? "reconnected" : "idle");
       if (summary.turn_in_progress) void followSession(id);
     } catch (e) {
+      if (loadSeqRef.current !== loadSeq || activeSessionRef.current !== id) return;
+      setSessionLoadingState(false);
       setItems([
         {
           id: `e${Date.now()}`,
@@ -179,7 +223,7 @@ export default function App() {
       ]);
       setStatus("restore failed");
     }
-  }, [client, followSession]);
+  }, [client, followSession, setSessionLoadingState]);
 
   async function reconcileSession(id: string, errorText: string) {
     try {
@@ -187,6 +231,7 @@ export default function App() {
         client.getSession(id),
         client.displayEvents(id),
       ]);
+      if (activeSessionRef.current !== id) return;
       setSessions((prev) => upsertSession(prev, summary));
       const replayed = replayEvents([], events);
       setItems(errorText ? [
@@ -199,6 +244,7 @@ export default function App() {
       ] : replayed);
       setStatus(summary.turn_in_progress ? "reconnected" : "idle");
     } catch (e) {
+      if (activeSessionRef.current !== id) return;
       setItems((prev) => [
         ...prev,
         {
@@ -212,7 +258,7 @@ export default function App() {
 
   const send = useCallback(async () => {
     const text = prompt.trim();
-    if (!text || !sessionId || streaming) return;
+    if (!text || !sessionId || streaming || sessionLoadingRef.current) return;
     setPrompt("");
     setItems((prev) => pushUser(prev, text));
     setStreaming(true);
@@ -220,23 +266,27 @@ export default function App() {
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     let reconciled = false;
+    let resumeSucceeded = false;
+    const usedResume = sessionMode === "resume";
     try {
       const stream =
-        sessionMode === "resume"
+        usedResume
           ? client.resume(sessionId, text, ctrl.signal)
           : client.prompt(sessionId, text, ctrl.signal);
       for await (const ev of stream) {
-        if (ctrl.signal.aborted) break;
+        if (ctrl.signal.aborted || activeSessionRef.current !== sessionId) break;
         if (ev.event === "progress_update") {
           const d = (ev.data as DisplayEventEnvelope<ProgressPayload>).payload;
           setStatus(formatProgressStatus(d));
         } else {
           setItems((prev) => applyEvent(prev, ev));
         }
-        if (isRootTurnEnd(ev)) break;
+        const rootTurnEnded = isRootTurnEnd(ev);
+        if (rootTurnEnded && isCompletedRootTurnEnd(ev)) resumeSucceeded = true;
+        if (rootTurnEnded) break;
       }
     } catch (e) {
-      if (!ctrl.signal.aborted) {
+      if (!ctrl.signal.aborted && activeSessionRef.current === sessionId) {
         await reconcileSession(sessionId, `stream error: ${msg(e)}`);
         reconciled = true;
       }
@@ -244,6 +294,7 @@ export default function App() {
       if (abortRef.current === ctrl) {
         setStreaming(false);
         if (!reconciled) setStatus("idle");
+        if (usedResume && resumeSucceeded) setSessionMode("prompt");
         abortRef.current = null;
       }
       void refreshSessions();
@@ -335,7 +386,7 @@ export default function App() {
         onPromptChange={setPrompt}
         onSend={send}
         onCancel={cancel}
-        disabled={!sessionId || streaming}
+        disabled={!sessionId || streaming || sessionLoading}
         streaming={streaming}
       />
     </div>
@@ -348,6 +399,19 @@ function msg(e: unknown): string {
 
 function formatProgressStatus(d: ProgressPayload): string {
   return `${d.phase ?? "running"} · ${d.model_name || "?"} · ↑${d.tokens_in ?? 0} ↓${d.tokens_out ?? 0} · ctx ${Math.round(d.context_percent ?? 0)}% · ${(d.elapsed_seconds ?? 0).toFixed(1)}s`;
+}
+
+function shouldResumeSession(session: SessionSummary): boolean {
+  return (
+    session.resumable &&
+    session.last_run_status === "interrupted" &&
+    Boolean(session.last_interrupted_run_id || session.resume_from_event_id)
+  );
+}
+
+function isCompletedRootTurnEnd(ev: DisplayStreamEvent): boolean {
+  const envelope = ev.data as DisplayEventEnvelope<FinalResultPayload>;
+  return envelope.payload.completion_status === "completed";
 }
 
 function upsertSession(

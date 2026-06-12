@@ -36,4 +36,55 @@ describe("replayEvents", () => {
 
     expect(withoutIds(replayEvents(seed, events))).toEqual(withoutIds(streamed));
   });
+
+  it("marks approval prompts resolved when replaying approval results", () => {
+    const events: DisplayStreamEvent[] = [
+      displayEvent(
+        "approval_prompt",
+        {
+          agent_id: "",
+          request_id: "approval-1",
+          tool_call: { call_id: "call-1", tool_name: "bash", arguments: { cmd: "pwd" } },
+        },
+        1,
+      ),
+      displayEvent("approval_result", { agent_id: "", request_id: "approval-1", approved: true }, 2),
+    ];
+
+    expect(withoutIds(replayEvents([], events))).toEqual([
+      {
+        kind: "approval",
+        agentId: "",
+        requestId: "approval-1",
+        toolName: "bash",
+        args: { cmd: "pwd" },
+        resolved: "approved",
+      },
+    ]);
+  });
+
+  it("leaves approval prompts unresolved when replaying malformed approval results", () => {
+    const events: DisplayStreamEvent[] = [
+      displayEvent(
+        "approval_prompt",
+        {
+          agent_id: "",
+          request_id: "approval-1",
+          tool_call: { call_id: "call-1", tool_name: "bash", arguments: { cmd: "pwd" } },
+        },
+        1,
+      ),
+      displayEvent("approval_result", { agent_id: "", request_id: "approval-1" }, 2),
+    ];
+
+    expect(withoutIds(replayEvents([], events))).toEqual([
+      {
+        kind: "approval",
+        agentId: "",
+        requestId: "approval-1",
+        toolName: "bash",
+        args: { cmd: "pwd" },
+      },
+    ]);
+  });
 });

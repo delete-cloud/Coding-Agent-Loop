@@ -1,5 +1,6 @@
 import type {
   ApprovalPromptPayload,
+  ApprovalResultPayload,
   AssistantTextPayload,
   DisplayEventEnvelope,
   DisplayStreamEvent,
@@ -139,7 +140,11 @@ export function applyEvent(
       ];
     }
     case "approval_result": {
-      return items;
+      const envelope = ev.data as DisplayEventEnvelope<ApprovalResultPayload>;
+      const d = envelope.payload;
+      if (!d.request_id) return items;
+      if (typeof d.approved !== "boolean") return items;
+      return resolveApproval(items, d.request_id, d.approved ? "approved" : "denied");
     }
     case "final_result": {
       const envelope = ev.data as DisplayEventEnvelope<FinalResultPayload>;
