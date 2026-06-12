@@ -695,8 +695,9 @@ class TestPipelineE2E:
 
     @pytest.mark.asyncio
     async def test_tool_error_recovery(self, tmp_path):
-        """Given a tool that raises RuntimeError, when pipeline executes it, then error is recorded in tape and LLM recovers with text response."""
+        """Given a failing tool command, when pipeline executes it, then failure is recorded in tape and LLM recovers with text response."""
         pipeline, ctx = _setup_agent(tmp_path, approval_mode="yolo")
+        ctx.config.setdefault("shell", {})["sandbox_mode"] = "none"
 
         call_count = 0
 
@@ -716,15 +717,6 @@ class TestPipelineE2E:
 
         _mock_provider(pipeline, mock_stream)
 
-        original_call_first = pipeline._runtime.call_first
-
-        def patched_call_first(hook_name, **kwargs):
-            if hook_name == "execute_tool" and kwargs.get("name") == "bash_run":
-                raise RuntimeError("Tool execution failed: command not found")
-            return original_call_first(hook_name, **kwargs)
-
-        pipeline._runtime.call_first = patched_call_first
-
         await pipeline.mount(ctx)
 
         adapter = PipelineAdapter(pipeline, ctx, consumer=None)
@@ -735,7 +727,9 @@ class TestPipelineE2E:
         tool_results = ctx.tape.filter("tool_result")
         assert len(tool_results) >= 1
         error_results = [
-            tr for tr in tool_results if "Error" in tr.payload.get("content", "")
+            tr
+            for tr in tool_results
+            if "No such file or directory" in tr.payload.get("content", "")
         ]
         assert len(error_results) >= 1
 

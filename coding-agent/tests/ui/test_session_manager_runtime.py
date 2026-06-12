@@ -3282,7 +3282,7 @@ async def test_ensure_session_runtime_uses_default_run_target_workspace(
     assert isinstance(captured_kwargs["environment"], SandboxedEnvironment)
     assert captured_kwargs["environment"].workspace_root == target_bound.resolve()
     assert captured_kwargs["environment"].tool_config()["shell"] == {
-        "sandbox_mode": "none"
+        "sandbox_mode": "native"
     }
     assert len(local_executor.preparations) == 1
     assert local_executor.preparations[0].request.target == session.default_run_target
@@ -3351,7 +3351,7 @@ async def test_replace_session_runtime_config_uses_default_run_target_workspace(
     assert isinstance(captured_kwargs["environment"], SandboxedEnvironment)
     assert captured_kwargs["environment"].workspace_root == target_bound.resolve()
     assert captured_kwargs["environment"].tool_config()["shell"] == {
-        "sandbox_mode": "none"
+        "sandbox_mode": "native"
     }
     assert len(local_executor.preparations) == 1
     assert local_executor.preparations[0].request.target == session.default_run_target
@@ -4172,7 +4172,7 @@ async def test_restore_checkpoint_uses_default_run_target_workspace(
     assert isinstance(captured_kwargs["environment"], SandboxedEnvironment)
     assert captured_kwargs["environment"].workspace_root == target_bound.resolve()
     assert captured_kwargs["environment"].tool_config()["shell"] == {
-        "sandbox_mode": "none"
+        "sandbox_mode": "native"
     }
     assert len(local_executor.preparations) == 1
     assert local_executor.preparations[0].request.target == session.default_run_target

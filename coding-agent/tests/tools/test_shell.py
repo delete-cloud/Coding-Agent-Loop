@@ -634,6 +634,7 @@ class TestNativeSandboxResolution:
         workspace = tmp_path / "workspace"
         workspace.mkdir()
 
+        assert _sandbox_mode({}) == "native"
         assert _sandbox_mode({"sandbox_mode": "none"}) == "none"
         assert _sandbox_mode({"sandbox_mode": "docker"}) == "docker"
 
@@ -645,6 +646,21 @@ class TestNativeSandboxResolution:
         )
         assert isinstance(none_runner, sandbox_module.NoneSandboxRunner)
         assert isinstance(docker_runner, sandbox_module.DockerSandboxRunner)
+
+    def test_default_memory_limit_filter_uses_native_default(self, monkeypatch):
+        from coding_agent.tools.shell import _uses_unsupported_default_memory_limit
+
+        monkeypatch.setattr(
+            "coding_agent.tools.shell.platform.system", lambda: "Darwin"
+        )
+
+        assert _uses_unsupported_default_memory_limit({"memory_limit_mb": 256}) is False
+        assert (
+            _uses_unsupported_default_memory_limit(
+                {"sandbox_mode": "none", "memory_limit_mb": 256}
+            )
+            is True
+        )
 
 
 class TestMacosSeatbeltSandbox:

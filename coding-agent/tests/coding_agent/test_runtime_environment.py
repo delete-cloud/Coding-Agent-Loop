@@ -65,7 +65,7 @@ def test_runtime_environment_resolver_resolves_local_target(tmp_path: Path) -> N
 
     assert isinstance(environment, SandboxedEnvironment)
     assert environment.workspace_root == workspace.resolve()
-    assert environment.tool_config()["shell"] == {"sandbox_mode": "none"}
+    assert environment.tool_config()["shell"] == {"sandbox_mode": "native"}
     assert environment.tool_config()["isolation_policy"] == target.isolation.to_dict()
     assert service.workspace_root_for_environment(environment) == workspace.resolve()
 
