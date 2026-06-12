@@ -638,8 +638,9 @@ async def test_run_agent_does_not_hardcode_api_key() -> None:
             del pipeline, consumer
             self.ctx = ctx
 
-        async def run_turn(self, prompt: str) -> None:
+        async def run_turn(self, prompt: str) -> TurnOutcome:
             del prompt
+            return TurnOutcome(stop_reason=StopReason.NO_TOOL_CALLS, steps_taken=1)
 
     fake_pipeline = types.SimpleNamespace(
         _registry=types.SimpleNamespace(
@@ -2322,9 +2323,10 @@ async def test_run_agent_reuses_session_tape_id_across_hot_turns() -> None:
             del pipeline, consumer
             self.ctx = ctx
 
-        async def run_turn(self, prompt: str) -> None:
+        async def run_turn(self, prompt: str) -> TurnOutcome:
             del prompt
             self.ctx.tape.tape_id = "stable-session-tape"
+            return TurnOutcome(stop_reason=StopReason.NO_TOOL_CALLS, steps_taken=1)
 
     fake_pipeline = types.SimpleNamespace(
         _registry=types.SimpleNamespace(
@@ -2369,9 +2371,10 @@ async def test_run_agent_reuses_live_runtime_for_hot_turns() -> None:
             self.ctx = ctx
             adapter_instances.append(self)
 
-        async def run_turn(self, prompt: str) -> None:
+        async def run_turn(self, prompt: str) -> TurnOutcome:
             observed_prompts.append(prompt)
             observed_run_ids.append(self.ctx.run_context.run_id)
+            return TurnOutcome(stop_reason=StopReason.NO_TOOL_CALLS, steps_taken=1)
 
     fake_pipeline = types.SimpleNamespace(
         _registry=types.SimpleNamespace(
@@ -2435,8 +2438,9 @@ async def test_run_agent_rebuilds_live_runtime_when_default_run_target_changes(
             del pipeline, consumer
             self.ctx = ctx
 
-        async def run_turn(self, prompt: str) -> None:
+        async def run_turn(self, prompt: str) -> TurnOutcome:
             del prompt
+            return TurnOutcome(stop_reason=StopReason.NO_TOOL_CALLS, steps_taken=1)
 
         async def close(self) -> None:
             close_calls.append(str(self.ctx.run_context.environment.workspace_root))

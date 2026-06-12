@@ -18,7 +18,6 @@ from coding_agent.__main__ import create_agent
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.adapter_types import StopReason, TurnOutcome
 from coding_agent.evaluation import build_test_cases, load_tape_entries
-from coding_agent.plugins.storage import JSONLTapeStore
 from coding_agent.wire.protocol import (
     StreamDelta,
     ToolCallDelta,
@@ -265,8 +264,7 @@ class TestPipelineE2E:
         storage = pipeline._runtime.call_first("provide_storage")
         assert isinstance(storage, ForkTapeStore)
 
-        jsonl_store = JSONLTapeStore(tmp_path / "tapes")
-        persisted = await jsonl_store.load(ctx.tape.tape_id)
+        persisted = await storage._backing.load(ctx.tape.tape_id)
 
         assert persisted
         persisted_entries = tuple(Entry.from_dict(item) for item in persisted)

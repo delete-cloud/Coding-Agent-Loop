@@ -619,9 +619,9 @@ class TestThinkingCommand:
         monkeypatch.setattr(
             terminal_output_module, "_prompt_output", create_output(stdout=buf)
         )
-        context = {"thinking_enabled": False}
+        context = {"thinking_config": {"enabled": False, "effort": "medium"}}
         await handle_command("/thinking on", context)
-        assert context["thinking_enabled"] is True
+        assert context["thinking_config"]["enabled"] is True
 
     @pytest.mark.asyncio
     async def test_thinking_off_sets_disabled(self, monkeypatch):
@@ -631,9 +631,9 @@ class TestThinkingCommand:
         monkeypatch.setattr(
             terminal_output_module, "_prompt_output", create_output(stdout=buf)
         )
-        context = {"thinking_enabled": True}
+        context = {"thinking_config": {"enabled": True, "effort": "medium"}}
         await handle_command("/thinking off", context)
-        assert context["thinking_enabled"] is False
+        assert context["thinking_config"]["enabled"] is False
 
     @pytest.mark.asyncio
     async def test_thinking_effort_low(self, monkeypatch):
@@ -645,7 +645,7 @@ class TestThinkingCommand:
         )
         context = {}
         await handle_command("/thinking effort low", context)
-        assert context["thinking_effort"] == "low"
+        assert context["thinking_config"]["effort"] == "low"
 
     @pytest.mark.asyncio
     async def test_thinking_effort_medium(self, monkeypatch):
@@ -657,7 +657,7 @@ class TestThinkingCommand:
         )
         context = {}
         await handle_command("/thinking effort medium", context)
-        assert context["thinking_effort"] == "medium"
+        assert context["thinking_config"]["effort"] == "medium"
 
     @pytest.mark.asyncio
     async def test_thinking_effort_high(self, monkeypatch):
@@ -669,7 +669,7 @@ class TestThinkingCommand:
         )
         context = {}
         await handle_command("/thinking effort high", context)
-        assert context["thinking_effort"] == "high"
+        assert context["thinking_config"]["effort"] == "high"
 
     @pytest.mark.asyncio
     async def test_thinking_effort_invalid_shows_error(self, monkeypatch):
@@ -679,9 +679,9 @@ class TestThinkingCommand:
         monkeypatch.setattr(
             terminal_output_module, "_prompt_output", create_output(stdout=buf)
         )
-        context = {"thinking_effort": "medium"}
+        context = {"thinking_config": {"enabled": True, "effort": "medium"}}
         await handle_command("/thinking effort invalid", context)
-        assert context["thinking_effort"] == "medium"
+        assert context["thinking_config"]["effort"] == "medium"
         output = buf.getvalue()
         assert "low" in output and "medium" in output and "high" in output
 

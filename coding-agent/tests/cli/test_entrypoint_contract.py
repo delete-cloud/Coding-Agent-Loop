@@ -116,12 +116,20 @@ def test_acp_command_uses_shared_provider_model(
 
     calls: list[dict[str, object]] = []
 
-    async def fake_run_acp_stdio(ctx, approval_policy: str, max_steps: int) -> None:
+    async def fake_run_acp_stdio(
+        ctx,
+        approval_policy: str,
+        max_steps: int,
+        acp_modes: tuple[str, ...],
+        acp_modes_json: str | None,
+    ) -> None:
         calls.append(
             {
                 "shared_cli_args": ctx.find_root().obj["shared_cli_args"],
                 "approval_policy": approval_policy,
                 "max_steps": max_steps,
+                "acp_modes": acp_modes,
+                "acp_modes_json": acp_modes_json,
             }
         )
 
@@ -156,6 +164,8 @@ def test_acp_command_uses_shared_provider_model(
             },
             "approval_policy": "yolo",
             "max_steps": 4,
+            "acp_modes": (),
+            "acp_modes_json": None,
         }
     ]
 
