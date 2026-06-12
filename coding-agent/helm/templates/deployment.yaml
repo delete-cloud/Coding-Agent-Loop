@@ -58,6 +58,14 @@ spec:
           env:
             - name: AGENT_DATA_DIR
               value: {{ .Values.persistence.data.mountPath | quote }}
+            {{- if .Values.webui.enabled }}
+            - name: WEBUI_DIST_DIR
+              value: {{ .Values.webui.distDir | quote }}
+            {{- end }}
+            {{- if .Values.cors.origins }}
+            - name: CODING_AGENT_CORS_ORIGINS
+              value: {{ join "," .Values.cors.origins | quote }}
+            {{- end }}
             {{- if .Values.server.auth.enabled }}
             - name: {{ required "server.auth.bearerTokenEnv is required when server.auth.enabled=true" .Values.server.auth.bearerTokenEnv | quote }}
               valueFrom:

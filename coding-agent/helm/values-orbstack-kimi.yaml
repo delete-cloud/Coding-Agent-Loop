@@ -11,6 +11,9 @@ server:
   auth:
     enabled: false
 
+cors:
+  origins: []
+
 agent:
   config:
     provider: kimi-code

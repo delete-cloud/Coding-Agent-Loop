@@ -8,5 +8,7 @@ service:
 server:
   auth:
     enabled: false
+cors:
+  origins: []
 redis:
   enabled: false

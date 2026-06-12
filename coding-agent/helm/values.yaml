@@ -15,6 +15,14 @@ server:
     secretName: ""
     secretKey: api-key
 
+webui:
+  enabled: true
+  distDir: /app/webui-dist
+
+cors:
+  origins:
+    - https://agent.example.com
+
 command: []
 
 service:

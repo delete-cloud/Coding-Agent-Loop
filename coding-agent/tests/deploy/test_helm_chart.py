@@ -164,6 +164,30 @@ def test_helm_default_configures_http_auth() -> None:
     }
 
 
+def test_helm_default_exposes_webui_static_dir_and_cors_whitelist() -> None:
+    docs = _render()
+    main = _container(docs)
+
+    assert _env_var(main, "WEBUI_DIST_DIR") == {
+        "name": "WEBUI_DIST_DIR",
+        "value": "/app/webui-dist",
+    }
+    assert _env_var(main, "CODING_AGENT_CORS_ORIGINS") == {
+        "name": "CODING_AGENT_CORS_ORIGINS",
+        "value": "https://agent.example.com",
+    }
+
+
+def test_helm_cors_whitelist_can_be_disabled_for_local_values() -> None:
+    docs = _render("-f", str(CHART / "values-orbstack.yaml"))
+    main = _container(docs)
+
+    with pytest.raises(
+        AssertionError, match="missing env var CODING_AGENT_CORS_ORIGINS"
+    ):
+        _env_var(main, "CODING_AGENT_CORS_ORIGINS")
+
+
 @pytest.mark.parametrize(
     "values_file",
     [
@@ -231,3 +255,22 @@ def test_runtime_image_installs_native_linux_sandbox_binary() -> None:
         "&& rm", maxsplit=1
     )[0]
     assert "bubblewrap" in install_block
+
+
+def test_runtime_image_builds_and_copies_webui_dist() -> None:
+    dockerfile = (ROOT / "Dockerfile").read_text()
+
+    assert "FROM node:20-alpine AS webui" in dockerfile
+    assert "ARG PNPM_VERSION=" in dockerfile
+    assert 'corepack prepare "pnpm@${PNPM_VERSION}" --activate' in dockerfile
+    assert (
+        "COPY webui/app/package.json webui/app/pnpm-lock.yaml webui/app/pnpm-workspace.yaml"
+        in dockerfile
+    )
+    assert "pnpm install --frozen-lockfile" in dockerfile
+    assert "pnpm build" in dockerfile
+    assert (
+        "COPY --chown=coding-agent:coding-agent --from=webui /webui/app/dist /app/webui-dist"
+        in dockerfile
+    )
+    assert 'WEBUI_DIST_DIR="/app/webui-dist"' in dockerfile
