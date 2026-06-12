@@ -27,10 +27,24 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command:
+            {{- if .Values.command }}
             {{- toYaml .Values.command | nindent 12 }}
+            {{- else }}
+            - python
+            - -m
+            - coding_agent
+            - serve
+            - --host
+            - {{ .Values.server.host | quote }}
+            - --port
+            - {{ .Values.server.port | quote }}
+            {{- end }}
+          {{- if .Values.persistence.workspace.enabled }}
+          workingDir: {{ .Values.persistence.workspace.mountPath | quote }}
+          {{- end }}
           ports:
             - name: http
-              containerPort: {{ .Values.service.port }}
+              containerPort: {{ .Values.server.port }}
               protocol: TCP
           {{- if .Values.agent.secretRef }}
           envFrom:
