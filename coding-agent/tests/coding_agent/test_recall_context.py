@@ -152,6 +152,38 @@ def test_recall_planner_recalls_accepted_memory() -> None:
     assert plan.accepted_memories == (accepted,)
 
 
+def test_memory_review_store_loads_accepted_memory_for_recall(tmp_path) -> None:
+    path = tmp_path / "kb" / "reviewed_memory.jsonl"
+    review_store = MemoryReviewStore(path)
+    candidate = propose_memory_candidate_from_topic(
+        _topic(
+            "topic-auth",
+            title="Auth convention",
+            summary="JWT validation belongs in shared middleware",
+        ),
+        tags=("auth",),
+    )
+    assert candidate is not None
+    review_store.add_candidate(candidate)
+    accepted = review_store.accept_candidate(candidate.candidate_id or "")
+    reloaded = MemoryReviewStore(path)
+    planner = TopicRecallPlanner(
+        topic_index=TopicRangeIndex(),
+        accepted_memories=reloaded.accepted_memories(),
+    )
+
+    plan = planner.plan(
+        TopicRecallPlannerInput(
+            source_topic=_topic("topic-new", status="open", summary=None, end=None),
+            text="jwt middleware",
+            tags=("auth",),
+        )
+    )
+
+    assert plan.accepted_memories == (accepted,)
+    assert "Accepted memory references" in recall_context_messages(plan)[0]["content"]
+
+
 def test_bee_pack_recall_boosts_accepted_memory_by_domain_and_tags() -> None:
     review_store = MemoryReviewStore()
     candidate = propose_memory_candidate_from_topic(

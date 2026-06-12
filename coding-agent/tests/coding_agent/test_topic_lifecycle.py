@@ -16,6 +16,7 @@ from coding_agent.topic_lifecycle import (
     find_topic_anchors,
     topic_range_entries,
 )
+from coding_agent.topic_memory import MemoryReviewStore
 from coding_agent.topic_store import (
     JSONObject,
     TopicAnchorRecord,
@@ -96,6 +97,11 @@ class FakeTopicStore:
         return topic
 
 
+class FailingMemoryReviewStore(MemoryReviewStore):
+    def add_candidate(self, candidate):
+        raise OSError("review store unavailable")
+
+
 class FakeClock:
     def __init__(self) -> None:
         self._now = datetime(2026, 5, 21, 9, tzinfo=UTC)
@@ -132,10 +138,17 @@ def _replace_topic(
     )
 
 
-def _lifecycle(store: FakeTopicStore) -> TopicLifecycle:
+def _lifecycle(
+    store: FakeTopicStore,
+    *,
+    memory_review_store: MemoryReviewStore | None = None,
+) -> TopicLifecycle:
     ids = iter(("topic-1", "topic-2", "topic-3"))
     return TopicLifecycle(
-        store=store, now=FakeClock(), topic_id_factory=lambda: next(ids)
+        store=store,
+        now=FakeClock(),
+        topic_id_factory=lambda: next(ids),
+        memory_review_store=memory_review_store,
     )
 
 
@@ -195,6 +208,33 @@ async def test_finalize_topic_writes_topic_finalized_anchor() -> None:
     assert getattr(anchor, "meta")["product_anchor_type"] == TOPIC_FINALIZED
     assert store.anchors[-1].anchor_type == TOPIC_FINALIZED
     assert store.anchors[-1].seq == 2
+
+
+@pytest.mark.asyncio
+async def test_finalize_topic_adds_memory_candidate_to_review_store() -> None:
+    store = FakeTopicStore()
+    review_store = MemoryReviewStore()
+    lifecycle = _lifecycle(store, memory_review_store=review_store)
+    tape = Tape(tape_id="tape-1")
+    topic = await lifecycle.create_topic(
+        tape=tape,
+        session_id="session-1",
+        kind="coding",
+        title="Auth convention",
+    )
+    tape.append(Entry(kind="event", payload={"kind": "work"}))
+
+    finalized = await lifecycle.finalize_topic(
+        tape=tape,
+        topic=topic,
+        summary="JWT validation belongs in shared middleware",
+    )
+
+    records = review_store.list_memories(status="candidate")
+    assert len(records) == 1
+    assert records[0].candidate.title == "Auth convention"
+    assert records[0].candidate.summary == finalized.summary
+    assert records[0].candidate.provenance["topic_id"] == finalized.topic_id
 
 
 @pytest.mark.asyncio
@@ -336,3 +376,31 @@ async def test_failed_close_does_not_leave_orphan_topic_anchor() -> None:
     assert [view.product_anchor_type for view in find_topic_anchors(tape)] == [
         TOPIC_INITIAL
     ]
+
+
+@pytest.mark.asyncio
+async def test_memory_candidate_failure_keeps_finalized_topic_anchor() -> None:
+    store = FakeTopicStore()
+    lifecycle = _lifecycle(store, memory_review_store=FailingMemoryReviewStore())
+    tape = Tape(tape_id="tape-1")
+    topic = await lifecycle.create_topic(
+        tape=tape,
+        session_id="session-1",
+        kind="coding",
+        title="Auth convention",
+    )
+    tape.append(Entry(kind="event", payload={"kind": "work"}))
+
+    with pytest.raises(OSError, match="review store unavailable"):
+        await lifecycle.finalize_topic(
+            tape=tape,
+            topic=topic,
+            summary="JWT validation belongs in shared middleware",
+        )
+
+    assert store.topics[topic.topic_id].status == "finalized"
+    assert [view.product_anchor_type for view in find_topic_anchors(tape)] == [
+        TOPIC_INITIAL,
+        TOPIC_FINALIZED,
+    ]
+    assert store.anchors[-1].metadata["encoded_anchor_type"] == "topic_end"

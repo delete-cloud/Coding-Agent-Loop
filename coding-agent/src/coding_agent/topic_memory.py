@@ -5,6 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from pathlib import Path
+from tempfile import NamedTemporaryFile
+from typing import Any
 
 from coding_agent.bee_workspace import BeeWorkspaceRunArtifacts
 from coding_agent.context_pack import (
@@ -22,14 +25,16 @@ MEMORY_CANDIDATE_STATUS = "candidate"
 MEMORY_REFERENCE_MODE = "reference_only"
 MEMORY_REVIEW_STATUSES = frozenset({"candidate", "accepted", "rejected", "archived"})
 
-_ALLOWED_KINDS = frozenset({
-    "procedure",
-    "decision",
-    "incident",
-    "fact",
-    "command_memory",
-    "project_convention",
-})
+_ALLOWED_KINDS = frozenset(
+    {
+        "procedure",
+        "decision",
+        "incident",
+        "fact",
+        "command_memory",
+        "project_convention",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -103,8 +108,65 @@ class ReviewedMemoryRecord:
 class MemoryReviewStore:
     """Local deterministic review store for topic-derived memory candidates."""
 
-    def __init__(self) -> None:
+    def __init__(self, path: Path | str | None = None) -> None:
+        self._path = Path(path) if path is not None else None
         self._records: dict[str, ReviewedMemoryRecord] = {}
+        self.load()
+
+    @property
+    def path(self) -> Path | None:
+        return self._path
+
+    def load(self) -> None:
+        if self._path is None:
+            return
+        if not self._path.exists():
+            return
+        records: dict[str, ReviewedMemoryRecord] = {}
+        with self._path.open("r", encoding="utf-8") as file:
+            for line_number, line in enumerate(file, start=1):
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    payload = json.loads(stripped)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"invalid memory review JSONL at line {line_number}: "
+                        f"{self._path}"
+                    ) from exc
+                if not isinstance(payload, dict):
+                    raise ValueError(
+                        f"memory review record at line {line_number} must be an object"
+                    )
+                record = _reviewed_memory_record_from_dict(payload)
+                records[_candidate_id_value(record.candidate)] = record
+        self._records = records
+
+    def save(self) -> None:
+        if self._path is None:
+            return
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        with NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=self._path.parent,
+            prefix=f".{self._path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temp_file:
+            temp_path = Path(temp_file.name)
+            for record in self.list_memories():
+                temp_file.write(
+                    json.dumps(
+                        record.to_dict(),
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                )
+                temp_file.write("\n")
+        temp_path.replace(self._path)
 
     def add_candidate(
         self,
@@ -116,6 +178,7 @@ class MemoryReviewStore:
             return existing
         record = ReviewedMemoryRecord(candidate=candidate, status="candidate")
         self._records[candidate_id] = record
+        self.save()
         return record
 
     def list_memories(
@@ -184,6 +247,7 @@ class MemoryReviewStore:
             review_reason=reason,
         )
         self._records[candidate_id] = updated
+        self.save()
         return updated
 
     def accepted_memories(self) -> tuple[ReviewedMemoryRecord, ...]:
@@ -300,6 +364,32 @@ def propose_memory_candidates_from_bee_artifacts(
         if candidate is not None:
             candidates.append(candidate)
     return tuple(candidates)
+
+
+def _reviewed_memory_record_from_dict(payload: dict[str, Any]) -> ReviewedMemoryRecord:
+    status = _required_str(payload, "status")
+    candidate_status = payload.get("candidate_status")
+    if candidate_status is not None and candidate_status != MEMORY_CANDIDATE_STATUS:
+        raise ValueError("reviewed memory candidate_status must be candidate")
+    candidate = TopicDerivedMemoryCandidate(
+        kind=_required_str(payload, "kind"),
+        title=_required_str(payload, "title"),
+        summary=_required_str(payload, "summary"),
+        scope=_required_str(payload, "scope"),
+        tags=_required_string_tuple(payload, "tags"),
+        confidence=_required_confidence(payload, "confidence"),
+        provenance=_required_json_object(payload, "provenance"),
+        candidate_id=_required_str(payload, "candidate_id"),
+        status=MEMORY_CANDIDATE_STATUS,
+    )
+    review_reason = payload.get("review_reason")
+    if review_reason is not None and not isinstance(review_reason, str):
+        raise ValueError("review_reason must be a string")
+    return ReviewedMemoryRecord(
+        candidate=candidate,
+        status=status,
+        review_reason=review_reason,
+    )
 
 
 def _candidate_from_existing(
@@ -524,3 +614,31 @@ def _confidence(value: object, *, default: float) -> float:
     if isinstance(value, int | float) and not isinstance(value, bool):
         return float(value)
     return default
+
+
+def _required_str(payload: dict[str, Any], key: str) -> str:
+    value = payload.get(key)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"memory review record requires string {key}")
+    return value
+
+
+def _required_string_tuple(payload: dict[str, Any], key: str) -> tuple[str, ...]:
+    value = payload.get(key)
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"memory review record requires string list {key}")
+    return tuple(value)
+
+
+def _required_confidence(payload: dict[str, Any], key: str) -> float:
+    value = payload.get(key)
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        raise ValueError(f"memory review record requires numeric {key}")
+    return float(value)
+
+
+def _required_json_object(payload: dict[str, Any], key: str) -> JSONObject:
+    value = payload.get(key)
+    if not isinstance(value, dict):
+        raise ValueError(f"memory review record requires object {key}")
+    return value

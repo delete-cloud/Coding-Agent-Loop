@@ -37,6 +37,7 @@ from coding_agent.plugins.skills import SkillsPlugin
 from coding_agent.plugins.storage import StoragePlugin
 from coding_agent.plugins.summarizer import SummarizerPlugin
 from coding_agent.subagents.coordinator import ChildWorkerCoordinator
+from coding_agent.topic_memory import MemoryReviewStore
 from coding_agent.tools.web_search import create_web_search_backend
 
 ToolFilter = Any
@@ -271,6 +272,12 @@ def create_child_pipeline(
         isinstance(item, str) for item in kb_search_corpora
     ):
         raise ValueError("[kb].search_corpora must contain only strings")
+    kb_db_path = kb_cfg.get("db_path", "kb")
+    if not isinstance(kb_db_path, str):
+        raise ValueError("[kb].db_path must be a string")
+    memory_review_store = MemoryReviewStore(
+        data_dir / kb_db_path / "reviewed_memory.jsonl"
+    )
     observability_cfg = cfg.extra.get("observability", {})
     if not isinstance(observability_cfg, dict):
         raise ValueError("[observability] config must be a table")
@@ -358,7 +365,7 @@ def create_child_pipeline(
                 ),
             ),
             "kb": lambda: KBPlugin(
-                db_path=data_dir / kb_cfg.get("db_path", "kb"),
+                db_path=data_dir / kb_db_path,
                 embedding_model=kb_cfg.get("embedding_model", "text-embedding-3-small"),
                 embedding_base_url=kb_cfg.get("embedding_base_url"),
                 embedding_dim=int(kb_cfg.get("embedding_dim", 1536)),
@@ -442,6 +449,7 @@ def create_child_pipeline(
         "environment": environment,
         "shell": _merge_shell_config(environment_config, shell_cfg),
         "structured_tool_result_scope": structured_tool_result_scope,
+        "memory_review_store": memory_review_store,
     }
     if "isolation_policy" in environment_config:
         ctx_config["isolation_policy"] = environment_config["isolation_policy"]

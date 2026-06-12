@@ -11,6 +11,10 @@ from typing import Protocol
 from agentkit.tape.anchor import Anchor
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
+from coding_agent.topic_memory import (
+    MemoryReviewStore,
+    propose_memory_candidate_from_topic,
+)
 from coding_agent.topic_store import (
     JSONObject,
     TopicAnchorRecord,
@@ -66,10 +70,12 @@ class TopicLifecycle:
         store: TopicLifecycleStore,
         now: Callable[[], datetime] | None = None,
         topic_id_factory: Callable[[], str] | None = None,
+        memory_review_store: MemoryReviewStore | None = None,
     ) -> None:
         self._store = store
         self._now = now or (lambda: datetime.now(UTC))
         self._topic_id_factory = topic_id_factory or _new_topic_id
+        self._memory_review_store = memory_review_store
 
     async def create_topic(
         self,
@@ -201,6 +207,10 @@ class TopicLifecycle:
         except Exception:
             _remove_anchor(tape, seq=seq, entry_id=anchor.id)
             raise
+        if close_status == "finalized" and self._memory_review_store is not None:
+            candidate = propose_memory_candidate_from_topic(stored)
+            if candidate is not None:
+                self._memory_review_store.add_candidate(candidate)
         return stored
 
     async def _record_anchor(
