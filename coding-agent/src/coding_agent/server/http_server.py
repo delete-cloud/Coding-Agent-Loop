@@ -14,6 +14,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -1850,6 +1851,8 @@ def _durable_workspace_retention_not_implemented() -> HTTPException:
 
 def _explicit_run_target_from_request(
     body: CreateSessionRequest | None,
+    *,
+    auth_context: AuthContext | None = None,
 ) -> RunTarget | None:
     if body is None:
         return None
@@ -1862,15 +1865,23 @@ def _explicit_run_target_from_request(
     )
     if target_payload is None:
         return None
-    return run_target_from_dict(target_payload)
+    return _lock_minimum_http_isolation(
+        run_target_from_dict(target_payload),
+        auth_context=auth_context,
+    )
 
 
 def _provisioned_run_target_from_request(
     body: CreateSessionRequest | None,
+    *,
+    auth_context: AuthContext | None = None,
 ) -> RunTarget | None:
     if body is None:
         return None
-    explicit_target = _explicit_run_target_from_request(body)
+    explicit_target = _explicit_run_target_from_request(
+        body,
+        auth_context=auth_context,
+    )
     if explicit_target is not None and body.workspace_source is not None:
         raise ValueError("run_target and workspace_source cannot be set together")
     if explicit_target is not None:
@@ -1900,6 +1911,25 @@ def _provisioned_run_target_from_request(
             filesystem="provider_managed",
             secrets="provider_managed",
         ),
+    )
+
+
+def _can_disable_http_isolation(auth_context: AuthContext | None) -> bool:
+    return auth_context is not None and auth_context.scope == "admin"
+
+
+def _lock_minimum_http_isolation(
+    target: RunTarget,
+    *,
+    auth_context: AuthContext | None,
+) -> RunTarget:
+    if _can_disable_http_isolation(auth_context):
+        return target
+    if target.isolation.kind != "dev_unsafe_disabled":
+        return target
+    return replace(
+        target,
+        isolation=IsolationPolicy(kind="default_local_sandbox"),
     )
 
 
@@ -2422,7 +2452,10 @@ async def create_session(
     provisioned_workspace: CloudWorkspaceRef | None = None
 
     try:
-        default_run_target = _provisioned_run_target_from_request(body)
+        default_run_target = _provisioned_run_target_from_request(
+            body,
+            auth_context=auth_context,
+        )
         if (
             body is not None
             and body.workspace_source is not None

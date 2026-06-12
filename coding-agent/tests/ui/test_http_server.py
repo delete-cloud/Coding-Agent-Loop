@@ -107,6 +107,17 @@ def _local_run_target(path: Path | str) -> RunTarget:
     )
 
 
+def _unsafe_local_run_target_payload(path: Path | str) -> dict[str, object]:
+    payload = _local_run_target(path).to_dict()
+    payload["isolation"] = {
+        "kind": "dev_unsafe_disabled",
+        "network": "unrestricted",
+        "filesystem": "unrestricted",
+        "secrets": "unrestricted",
+    }
+    return payload
+
+
 def _cloud_run_target(workspace: CloudWorkspaceRef) -> RunTarget:
     return RunTarget(
         workspace=workspace,
@@ -1254,6 +1265,109 @@ class TestSessionCreation:
             == "https://workspace.example.com"
         )
         assert session.default_run_target.workspace.workspace_id == "ws-123"
+
+    @pytest.mark.parametrize("target_field", ["run_target", "default_run_target"])
+    async def test_http_create_session_locks_user_run_target_to_default_local_sandbox(
+        self,
+        client,
+        monkeypatch,
+        tmp_path,
+        target_field,
+    ):
+        monkeypatch.setenv(
+            "CODING_AGENT_SERVER_CONFIG", str(_write_auth_config(tmp_path))
+        )
+        monkeypatch.setattr(settings, "http_api_key", None)
+
+        response = await client.post(
+            "/sessions",
+            json={target_field: _unsafe_local_run_target_payload(tmp_path)},
+            headers={"Authorization": "Bearer user-token-a"},
+        )
+
+        assert response.status_code == 200
+        session = session_manager.get_session(response.json()["session_id"])
+        assert session.default_run_target.isolation == IsolationPolicy(
+            kind="default_local_sandbox"
+        )
+
+    @pytest.mark.parametrize("target_field", ["run_target", "default_run_target"])
+    async def test_http_create_session_locks_unauthenticated_run_target_to_default_local_sandbox(
+        self,
+        client,
+        monkeypatch,
+        tmp_path,
+        target_field,
+    ):
+        monkeypatch.delenv("CODING_AGENT_SERVER_CONFIG", raising=False)
+        monkeypatch.setattr(settings, "http_api_key", None)
+
+        response = await client.post(
+            "/sessions",
+            json={target_field: _unsafe_local_run_target_payload(tmp_path)},
+        )
+
+        assert response.status_code == 200
+        session = session_manager.get_session(response.json()["session_id"])
+        assert session.default_run_target.isolation == IsolationPolicy(
+            kind="default_local_sandbox"
+        )
+
+    @pytest.mark.parametrize("target_field", ["run_target", "default_run_target"])
+    async def test_http_create_session_allows_admin_dev_unsafe_disabled_run_target(
+        self,
+        client,
+        monkeypatch,
+        tmp_path,
+        target_field,
+    ):
+        monkeypatch.setenv(
+            "CODING_AGENT_SERVER_CONFIG", str(_write_auth_config(tmp_path))
+        )
+        monkeypatch.setattr(settings, "http_api_key", None)
+
+        response = await client.post(
+            "/sessions",
+            json={target_field: _unsafe_local_run_target_payload(tmp_path)},
+            headers={"Authorization": "Bearer admin-token"},
+        )
+
+        assert response.status_code == 200
+        session = session_manager.get_session(response.json()["session_id"])
+        assert session.default_run_target.isolation == IsolationPolicy(
+            kind="dev_unsafe_disabled",
+            network="unrestricted",
+            filesystem="unrestricted",
+            secrets="unrestricted",
+        )
+
+    @pytest.mark.parametrize("target_field", ["run_target", "default_run_target"])
+    async def test_http_create_session_preserves_user_safe_isolation(
+        self,
+        client,
+        monkeypatch,
+        tmp_path,
+        target_field,
+    ):
+        monkeypatch.setenv(
+            "CODING_AGENT_SERVER_CONFIG", str(_write_auth_config(tmp_path))
+        )
+        monkeypatch.setattr(settings, "http_api_key", None)
+
+        response = await client.post(
+            "/sessions",
+            json={target_field: _cloud_run_target_payload()},
+            headers={"Authorization": "Bearer user-token-a"},
+        )
+
+        assert response.status_code == 200
+        session = session_manager.get_session(response.json()["session_id"])
+        assert session.default_run_target.isolation == IsolationPolicy(
+            kind="provider_sandbox",
+            network="provider_managed",
+            filesystem="provider_managed",
+            secrets="provider_managed",
+        )
 
     async def test_http_create_session_round_trips_workspace_provider_metadata(
         self, client
