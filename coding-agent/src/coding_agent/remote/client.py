@@ -16,6 +16,7 @@ import click
 import httpx
 from httpx_sse import connect_sse
 
+from agentkit.observability import ObservationSink, record_span
 from coding_agent.remote.approval import APPROVAL_POLICIES
 from coding_agent.wire.protocol import (
     ApprovalRequest,
@@ -148,6 +149,7 @@ def create_remote_session(
     workspace_source: dict[str, object] | None = None,
     approval_policy: str = "auto",
     runtime_profile: str | None = None,
+    observation_sink: ObservationSink | None = None,
 ) -> str:
     if approval_policy not in APPROVAL_POLICIES:
         raise click.ClickException(f"Unsupported approval policy: {approval_policy}")
@@ -167,24 +169,39 @@ def create_remote_session(
         "workspace_source": workspace_source,
         "approval_policy": approval_policy,
     }
-    try:
-        with httpx.Client(
-            base_url=endpoint.url,
-            headers=auth_headers(endpoint),
-            timeout=60.0,
-        ) as client:
-            response = client.post("/sessions", json=payload)
-            _raise_remote_http_error(response, "create remote session")
-            data = _response_json(response, "create remote session")
-    except httpx.RequestError as exc:
-        raise click.ClickException(f"Failed to create remote session: {exc}") from exc
-    if not isinstance(data, Mapping):
-        raise click.ClickException("Remote session response must be a JSON object")
-    data = cast(Mapping[str, object], data)
-    session_id = data.get("session_id")
-    if not isinstance(session_id, str) or not session_id:
-        raise click.ClickException("Remote session response missing session_id")
-    return session_id
+    with record_span(
+        "remote.workspace.provision",
+        sink=observation_sink,
+        attributes={
+            "workspace_ref_kind": _workspace_ref_kind(workspace_source),
+            "remote_status": "started",
+        },
+    ) as span:
+        try:
+            with httpx.Client(
+                base_url=endpoint.url,
+                headers=auth_headers(endpoint),
+                timeout=60.0,
+            ) as client:
+                response = client.post("/sessions", json=payload)
+                _raise_remote_http_error(response, "create remote session")
+                data = _response_json(response, "create remote session")
+        except httpx.RequestError as exc:
+            span.set_attribute("remote_status", "failed")
+            raise click.ClickException(
+                f"Failed to create remote session: {exc}"
+            ) from exc
+        if not isinstance(data, Mapping):
+            span.set_attribute("remote_status", "failed")
+            raise click.ClickException("Remote session response must be a JSON object")
+        data = cast(Mapping[str, object], data)
+        session_id = data.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            span.set_attribute("remote_status", "failed")
+            raise click.ClickException("Remote session response missing session_id")
+        span.set_attribute("session_id", session_id)
+        span.set_attribute("remote_status", "completed")
+        return session_id
 
 
 def create_local_daemon_session(
@@ -512,8 +529,18 @@ def unpin_remote_workspace(
     )
 
 
-def cleanup_stale_remote_workspaces(endpoint: RemoteEndpoint) -> int:
-    data = _post_remote_json(endpoint, "/workspaces/gc", "cleanup stale workspaces")
+def cleanup_stale_remote_workspaces(
+    endpoint: RemoteEndpoint,
+    *,
+    observation_sink: ObservationSink | None = None,
+) -> int:
+    data = _post_remote_json(
+        endpoint,
+        "/workspaces/gc",
+        "cleanup stale workspaces",
+        observation_sink=observation_sink,
+        span_name="remote.workspace.gc",
+    )
     cleaned_count = data.get("cleaned_count")
     if not isinstance(cleaned_count, int):
         raise click.ClickException("Remote workspace GC response missing cleaned_count")
@@ -521,22 +548,33 @@ def cleanup_stale_remote_workspaces(endpoint: RemoteEndpoint) -> int:
 
 
 def cleanup_remote_workspace(
-    endpoint: RemoteEndpoint, workspace_id: str
+    endpoint: RemoteEndpoint,
+    workspace_id: str,
+    *,
+    observation_sink: ObservationSink | None = None,
 ) -> dict[str, object]:
-    try:
-        with httpx.Client(
-            base_url=endpoint.url,
-            headers=auth_headers(endpoint),
-            timeout=30.0,
-        ) as client:
-            response = client.delete(f"/workspaces/{workspace_id}")
-            _raise_remote_http_error(response, "cleanup remote workspace")
-            data = cast(object, response.json())
-    except httpx.RequestError as exc:
-        raise click.ClickException(
-            f"Failed to cleanup remote workspace: {exc}"
-        ) from exc
-    return dict(_expect_mapping(data, "Remote workspace cleanup response"))
+    with record_span(
+        "remote.workspace.cleanup",
+        sink=observation_sink,
+        attributes={"workspace_id": workspace_id, "remote_status": "started"},
+    ) as span:
+        try:
+            with httpx.Client(
+                base_url=endpoint.url,
+                headers=auth_headers(endpoint),
+                timeout=30.0,
+            ) as client:
+                response = client.delete(f"/workspaces/{workspace_id}")
+                _raise_remote_http_error(response, "cleanup remote workspace")
+                data = cast(object, response.json())
+        except httpx.RequestError as exc:
+            span.set_attribute("remote_status", "failed")
+            raise click.ClickException(
+                f"Failed to cleanup remote workspace: {exc}"
+            ) from exc
+        data = dict(_expect_mapping(data, "Remote workspace cleanup response"))
+        span.set_attribute("remote_status", "completed")
+        return data
 
 
 def download_workspace_manifest(
@@ -544,17 +582,30 @@ def download_workspace_manifest(
     base_url: str,
     session_id: str,
     headers: dict[str, str],
+    observation_sink: ObservationSink | None = None,
 ) -> dict[str, object]:
-    try:
-        with httpx.Client(base_url=base_url, headers=headers, timeout=60.0) as client:
-            response = client.get(f"/sessions/{session_id}/workspace/archive/manifest")
-            _raise_remote_http_error(response, "download remote workspace manifest")
-            data = cast(object, response.json())
-    except httpx.RequestError as exc:
-        raise click.ClickException(
-            f"Failed to download remote workspace manifest: {exc}"
-        ) from exc
-    return dict(_expect_mapping(data, "Remote workspace manifest response"))
+    with record_span(
+        "result.archive",
+        sink=observation_sink,
+        attributes={"session_id": session_id, "remote_status": "started"},
+    ) as span:
+        try:
+            with httpx.Client(
+                base_url=base_url, headers=headers, timeout=60.0
+            ) as client:
+                response = client.get(
+                    f"/sessions/{session_id}/workspace/archive/manifest"
+                )
+                _raise_remote_http_error(response, "download remote workspace manifest")
+                data = cast(object, response.json())
+        except httpx.RequestError as exc:
+            span.set_attribute("remote_status", "failed")
+            raise click.ClickException(
+                f"Failed to download remote workspace manifest: {exc}"
+            ) from exc
+        data = dict(_expect_mapping(data, "Remote workspace manifest response"))
+        span.set_attribute("remote_status", "completed")
+        return data
 
 
 def download_workspace_archive(
@@ -562,32 +613,54 @@ def download_workspace_archive(
     base_url: str,
     session_id: str,
     headers: dict[str, str],
+    observation_sink: ObservationSink | None = None,
 ) -> str:
-    try:
-        with httpx.Client(base_url=base_url, headers=headers, timeout=60.0) as client:
-            response = client.get(f"/sessions/{session_id}/workspace/archive")
-            _raise_remote_http_error(response, "download remote workspace")
-            data = cast(object, response.json())
-    except httpx.RequestError as exc:
-        raise click.ClickException(
-            f"Failed to download remote workspace: {exc}"
-        ) from exc
-    if not isinstance(data, Mapping):
-        raise click.ClickException("Remote workspace response must be a JSON object")
-    payload = cast(Mapping[str, object], data)
-    archive_base64 = payload.get("archive_base64")
-    if not isinstance(archive_base64, str) or not archive_base64:
-        raise click.ClickException("Remote workspace response missing archive_base64")
-    return archive_base64
+    with record_span(
+        "result.archive",
+        sink=observation_sink,
+        attributes={"session_id": session_id, "remote_status": "started"},
+    ) as span:
+        try:
+            with httpx.Client(
+                base_url=base_url, headers=headers, timeout=60.0
+            ) as client:
+                response = client.get(f"/sessions/{session_id}/workspace/archive")
+                _raise_remote_http_error(response, "download remote workspace")
+                data = cast(object, response.json())
+        except httpx.RequestError as exc:
+            span.set_attribute("remote_status", "failed")
+            raise click.ClickException(
+                f"Failed to download remote workspace: {exc}"
+            ) from exc
+        if not isinstance(data, Mapping):
+            span.set_attribute("remote_status", "failed")
+            raise click.ClickException(
+                "Remote workspace response must be a JSON object"
+            )
+        payload = cast(Mapping[str, object], data)
+        archive_base64 = payload.get("archive_base64")
+        if not isinstance(archive_base64, str) or not archive_base64:
+            span.set_attribute("remote_status", "failed")
+            raise click.ClickException(
+                "Remote workspace response missing archive_base64"
+            )
+        span.set_attribute("remote_status", "completed")
+        return archive_base64
 
 
 def download_workspace_diff(
-    endpoint: RemoteEndpoint, session_id: str
+    endpoint: RemoteEndpoint,
+    session_id: str,
+    *,
+    observation_sink: ObservationSink | None = None,
 ) -> dict[str, object]:
     data = _get_remote_json(
         endpoint,
         f"/sessions/{session_id}/workspace/diff",
         "download remote workspace diff",
+        observation_sink=observation_sink,
+        span_name="result.diff",
+        span_attributes={"session_id": session_id},
     )
     files = data.get("files")
     additions = data.get("additions")
@@ -599,11 +672,19 @@ def download_workspace_diff(
     return dict(data)
 
 
-def download_workspace_patch(endpoint: RemoteEndpoint, session_id: str) -> str:
+def download_workspace_patch(
+    endpoint: RemoteEndpoint,
+    session_id: str,
+    *,
+    observation_sink: ObservationSink | None = None,
+) -> str:
     data = _get_remote_json(
         endpoint,
         f"/sessions/{session_id}/workspace/patch",
         "download remote workspace patch",
+        observation_sink=observation_sink,
+        span_name="result.patch",
+        span_attributes={"session_id": session_id},
     )
     patch_format = data.get("format")
     patch = data.get("patch")
@@ -618,9 +699,15 @@ def publish_remote_branch(
     endpoint: RemoteEndpoint,
     session_id: str,
     branch_name: str,
+    *,
+    observation_sink: ObservationSink | None = None,
 ) -> dict[str, object]:
     return publish_remote_result(
-        endpoint, session_id, mode="branch", branch_name=branch_name
+        endpoint,
+        session_id,
+        mode="branch",
+        branch_name=branch_name,
+        observation_sink=observation_sink,
     )
 
 
@@ -630,12 +717,17 @@ def publish_remote_result(
     *,
     mode: str,
     branch_name: str,
+    observation_sink: ObservationSink | None = None,
 ) -> dict[str, object]:
+    span_name = "result.publish_pr" if mode == "pr" else "result.publish_branch"
     data = _post_remote_json(
         endpoint,
         f"/sessions/{session_id}/publish",
         "publish remote workspace result",
         json={"mode": mode, "branch_name": branch_name},
+        observation_sink=observation_sink,
+        span_name=span_name,
+        span_attributes={"session_id": session_id, "publication_mode": mode},
     )
     if data.get("status") not in {"published", "partial", "unsupported", "failed"}:
         raise click.ClickException(
@@ -648,19 +740,31 @@ def _get_remote_json(
     endpoint: RemoteEndpoint,
     path: str,
     action: str,
+    *,
+    observation_sink: ObservationSink | None = None,
+    span_name: str = "remote.request",
+    span_attributes: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    try:
-        with httpx.Client(
-            base_url=endpoint.url,
-            headers=auth_headers(endpoint),
-            timeout=30.0,
-        ) as client:
-            response = client.get(path)
-            _raise_remote_http_error(response, action)
-            data = _response_json(response, action)
-    except httpx.RequestError as exc:
-        raise click.ClickException(f"Failed to {action}: {exc}") from exc
-    return dict(_expect_mapping(data, f"Remote {action} response"))
+    with record_span(
+        span_name,
+        sink=observation_sink,
+        attributes={**(span_attributes or {}), "remote_status": "started"},
+    ) as span:
+        try:
+            with httpx.Client(
+                base_url=endpoint.url,
+                headers=auth_headers(endpoint),
+                timeout=30.0,
+            ) as client:
+                response = client.get(path)
+                _raise_remote_http_error(response, action)
+                data = _response_json(response, action)
+        except httpx.RequestError as exc:
+            span.set_attribute("remote_status", "failed")
+            raise click.ClickException(f"Failed to {action}: {exc}") from exc
+        data = dict(_expect_mapping(data, f"Remote {action} response"))
+        span.set_attribute("remote_status", "completed")
+        return data
 
 
 def _post_remote_json(
@@ -669,21 +773,51 @@ def _post_remote_json(
     action: str,
     *,
     json: dict[str, object] | None = None,
+    observation_sink: ObservationSink | None = None,
+    span_name: str = "remote.request",
+    span_attributes: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    try:
-        with httpx.Client(
-            base_url=endpoint.url,
-            headers=auth_headers(endpoint),
-            timeout=30.0,
-        ) as client:
-            response = (
-                client.post(path, json=json) if json is not None else client.post(path)
+    with record_span(
+        span_name,
+        sink=observation_sink,
+        attributes={**(span_attributes or {}), "remote_status": "started"},
+    ) as span:
+        try:
+            with httpx.Client(
+                base_url=endpoint.url,
+                headers=auth_headers(endpoint),
+                timeout=30.0,
+            ) as client:
+                response = (
+                    client.post(path, json=json)
+                    if json is not None
+                    else client.post(path)
+                )
+                _raise_remote_http_error(response, action)
+                data = _response_json(response, action)
+        except httpx.RequestError as exc:
+            span.set_attribute("remote_status", "failed")
+            raise click.ClickException(f"Failed to {action}: {exc}") from exc
+        data = dict(_expect_mapping(data, f"Remote {action} response"))
+        if span_attributes and "publication_mode" in span_attributes:
+            status = data.get("status")
+            span.set_attribute(
+                "publication_status",
+                status if isinstance(status, str) else "unknown",
             )
-            _raise_remote_http_error(response, action)
-            data = _response_json(response, action)
-    except httpx.RequestError as exc:
-        raise click.ClickException(f"Failed to {action}: {exc}") from exc
-    return dict(_expect_mapping(data, f"Remote {action} response"))
+        span.set_attribute("remote_status", "completed")
+        return data
+
+
+def _workspace_ref_kind(workspace_source: Mapping[str, object]) -> str:
+    kind = workspace_source.get("kind")
+    if not isinstance(kind, str):
+        return "unknown"
+    if kind == "docker" and "snapshot_archive_base64" in workspace_source:
+        return "snapshot"
+    if kind in {"docker", "external_worker_ref", "git", "local_path", "snapshot"}:
+        return kind
+    return "unknown"
 
 
 def _expect_mapping(value: object, description: str) -> Mapping[str, object]:

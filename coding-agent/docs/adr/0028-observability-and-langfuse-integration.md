@@ -1,6 +1,6 @@
 # ADR-0028: Add layered observability with optional Langfuse export
 
-**Status**: Proposed
+**Status**: Accepted
 **Date**: 2026-05-16
 **Decision owner**: repository maintainer / current product owner
 
@@ -272,6 +272,34 @@ generation/session grouping, it may be used inside the adapter only.
 - Redaction and attribute cardinality become part of review criteria for any
   future observability PR.
 
+## Implementation Status
+
+Implemented. AgentKit now exposes provider-neutral observation primitives,
+runtime/tool/LLM instrumentation, and fail-open span recording. Coding Agent
+now owns OTLP/Langfuse sink construction, Prometheus metrics fan-out, exporter
+redaction, local observability stack docs, sanitized turn observations, and
+remote workspace/result spans.
+
+Remote client helpers emit metadata-only spans for workspace provisioning,
+archive/diff/patch readback, branch/PR publication, cleanup, and GC when an
+`ObservationSink` is supplied. Attached executor workers automatically record
+`remote.workspace.agent_phase` from the configured agent observation sink during
+claimed run execution. These spans carry safe correlation attributes such as
+`session_id`, `run_id`, and `workspace_id`, plus low-cardinality labels such as
+`workspace_ref_kind`, `publication_mode`, `publication_status`, and
+`remote_status`; they do not export prompts, patch contents, archive payloads,
+branch names, remote URLs, command output, or secrets.
+
+Executable coverage includes:
+
+- `tests/agentkit/observability/test_core.py`
+- `tests/agentkit/runtime/test_pipeline.py -k "span"`
+- `tests/agentkit/tools/test_toolset.py -k "span"`
+- `tests/coding_agent/test_observability.py`
+- `tests/coding_agent/test_observability_platform_smoke.py`
+- `tests/coding_agent/test_release_observability_contract.py`
+- `tests/cli/test_remote_client.py -k "provision_span or publication_span or agent_phase_span"`
+
 ## Implementation Plan
 
 ### PR 1: Add ADR only
@@ -389,20 +417,21 @@ Add dogfood docs/config examples proving:
 
 ## Acceptance Criteria
 
-- [ ] ADR exists at
+- [x] ADR exists at
   `docs/adr/0028-observability-and-langfuse-integration.md`.
-- [ ] ADR states the `agentkit` / `coding_agent` / Langfuse layering boundary.
-- [ ] ADR states that AgentKit avoids sensitive collection by default while
+- [x] ADR states the `agentkit` / `coding_agent` / Langfuse layering boundary.
+- [x] ADR states that AgentKit avoids sensitive collection by default while
   Coding Agent enforces final egress redaction.
-- [ ] ADR states fail-open sink/exporter behavior.
-- [ ] ADR states one-turn-one-trace for P0 and remote session correlation by
+- [x] ADR states fail-open sink/exporter behavior.
+- [x] ADR states one-turn-one-trace for P0 and remote session correlation by
   metadata/linked spans instead of one unbounded trace.
-- [ ] ADR splits implementation into core, instrumentation, exporter, remote
+- [x] ADR splits implementation into core, instrumentation, exporter, remote
   spans, and dogfood phases.
-- [ ] P0 implementation has no external dependency and is no-op by default.
-- [ ] Runtime/tool/LLM instrumentation tests verify spans through a fake sink.
-- [ ] Exporter tests verify failures do not fail agent turns or server shutdown.
-- [ ] Dogfood trace verifies session grouping and default redaction.
+- [x] P0 implementation has no external dependency and is no-op by default.
+- [x] Runtime/tool/LLM instrumentation tests verify spans through a fake sink.
+- [x] Exporter tests verify failures do not fail agent turns or server shutdown.
+- [x] Dogfood trace verifies session grouping and default redaction through the
+  local OTLP/Prometheus smoke and release no-leak contract tests.
 
 ## References
 

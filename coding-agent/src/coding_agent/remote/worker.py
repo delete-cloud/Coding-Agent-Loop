@@ -13,6 +13,7 @@ from typing import Any, cast
 import httpx
 from httpx_sse import aconnect_sse
 
+from agentkit.observability import ObservationSink, record_span
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.app import create_agent
 from coding_agent.adapter_types import TurnOutcome
@@ -362,75 +363,89 @@ async def _execute_claimed_run(
     )
     ctx.config["wire_consumer"] = consumer
     adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx, consumer=consumer)
-    status = "completed"
-    result: dict[str, Any] = {}
-    error: str | None = None
-    run_task = asyncio.create_task(adapter.run_turn(prompt))
-    heartbeat_task = asyncio.create_task(
-        _heartbeat_until_complete(
-            client=client,
-            run_id=run_id,
-            worker_id=worker_id,
-            worker_instance_id=worker_instance_id,
-            claim_token=claim_token,
-            run_task=run_task,
-            repo_path=repo_path,
-        )
-    )
-    try:
-        outcome = await run_task
-        if isinstance(outcome, TurnOutcome):
-            result = {
-                "stop_reason": outcome.stop_reason.value,
-                "steps_taken": outcome.steps_taken,
-            }
-            if outcome.error is not None:
-                status = "failed"
-                error = outcome.error
-    except asyncio.CancelledError:
-        status = "cancelled"
-        error = "cancelled"
-    except Exception as exc:
-        status = "failed"
-        error = str(exc)
-    finally:
-        heartbeat_task.cancel()
-        try:
-            await heartbeat_task
-        except asyncio.CancelledError:
-            pass
-        except Exception as exc:
-            heartbeat_error = f"heartbeat failed: {exc}"
-            if status == "completed":
-                status = "failed"
-                error = heartbeat_error
-            elif error is None:
-                error = heartbeat_error
-            else:
-                error = f"{error}; {heartbeat_error}"
-        if status != "completed":
-            await consumer.emit(
-                TurnEnd(
-                    session_id=session_id,
-                    agent_id="",
-                    turn_id=run_id,
-                    completion_status=_completion_status_for_executor_status(status),
-                )
+    with record_span(
+        "remote.workspace.agent_phase",
+        sink=_observation_sink_from_context(ctx),
+        attributes={
+            "session_id": session_id,
+            "run_id": run_id,
+            "executor_kind": "local",
+            "workspace_ref_kind": "local_path",
+            "remote_status": "started",
+        },
+    ) as span:
+        status = "completed"
+        result: dict[str, Any] = {}
+        error: str | None = None
+        run_task = asyncio.create_task(adapter.run_turn(prompt))
+        heartbeat_task = asyncio.create_task(
+            _heartbeat_until_complete(
+                client=client,
+                run_id=run_id,
+                worker_id=worker_id,
+                worker_instance_id=worker_instance_id,
+                claim_token=claim_token,
+                run_task=run_task,
+                repo_path=repo_path,
             )
-        response = await client.post(
-            f"/executor/runs/{run_id}/complete",
-            json={
-                "executor_id": worker_id,
-                "claim_token": claim_token,
-                "status": status,
-                "result": result,
-                "error": error,
-                "tape_id": getattr(ctx.tape, "tape_id", None),
-                "tape_entries": ctx.tape.to_list(),
-            },
         )
-        response.raise_for_status()
-    return 0 if status == "completed" else 1
+        try:
+            outcome = await run_task
+            if isinstance(outcome, TurnOutcome):
+                result = {
+                    "stop_reason": outcome.stop_reason.value,
+                    "steps_taken": outcome.steps_taken,
+                }
+                if outcome.error is not None:
+                    status = "failed"
+                    error = outcome.error
+        except asyncio.CancelledError:
+            status = "cancelled"
+            error = "cancelled"
+        except Exception as exc:
+            status = "failed"
+            error = str(exc)
+        finally:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                heartbeat_error = f"heartbeat failed: {exc}"
+                if status == "completed":
+                    status = "failed"
+                    error = heartbeat_error
+                elif error is None:
+                    error = heartbeat_error
+                else:
+                    error = f"{error}; {heartbeat_error}"
+            if status != "completed":
+                await consumer.emit(
+                    TurnEnd(
+                        session_id=session_id,
+                        agent_id="",
+                        turn_id=run_id,
+                        completion_status=_completion_status_for_executor_status(
+                            status
+                        ),
+                    )
+                )
+            span.set_attribute("remote_status", status)
+            response = await client.post(
+                f"/executor/runs/{run_id}/complete",
+                json={
+                    "executor_id": worker_id,
+                    "claim_token": claim_token,
+                    "status": status,
+                    "result": result,
+                    "error": error,
+                    "tape_id": getattr(ctx.tape, "tape_id", None),
+                    "tape_entries": ctx.tape.to_list(),
+                },
+            )
+            response.raise_for_status()
+        return 0 if status == "completed" else 1
 
 
 def _completion_status_for_executor_status(status: str) -> CompletionStatus:
@@ -491,6 +506,18 @@ def _workspace_sync_metadata(repo_path: Path) -> dict[str, Any]:
         "workspace_ref_kind": "local_path",
         "display_path": str(repo_path),
     }
+
+
+def _observation_sink_from_context(ctx: Any) -> ObservationSink | None:
+    config = getattr(ctx, "config", None)
+    if not isinstance(config, dict):
+        return None
+    sink = config.get("observation_sink")
+    if sink is None:
+        return None
+    if not isinstance(sink, ObservationSink):
+        raise TypeError("observation_sink must implement ObservationSink")
+    return sink
 
 
 def _required_claim_str(claim: dict[str, Any], key: str) -> str:
