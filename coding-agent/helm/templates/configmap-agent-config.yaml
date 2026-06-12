@@ -32,13 +32,15 @@ data:
     ]
 
     [storage]
-    tape_backend = "jsonl"
+    tape_backend = "sqlite"
+    http_session_backend = "sqlite"
+    checkpoint_backend = "sqlite"
+    runtime_backend = "sqlite"
     doc_backend = "lancedb"
 
     [storage.paths]
-    tapes = "./data/tapes"
-    docs = "./data/docs"
-    sessions = "./data/sessions"
+    local = {{ printf "%s/local.sqlite3" .Values.persistence.data.mountPath | quote }}
+    docs = {{ printf "%s/docs" .Values.persistence.data.mountPath | quote }}
 
     [approval]
     policy = {{ .Values.agent.config.approvalPolicy | quote }}
