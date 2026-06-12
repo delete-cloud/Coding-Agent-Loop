@@ -315,6 +315,80 @@ class TestKBIndexing:
         assert results[0].chunk.metadata["repo_path"] == "src/app.py"
 
     @pytest.mark.asyncio
+    async def test_index_directory_prunes_deleted_files(
+        self, tmp_path, mock_embedding_fn
+    ):
+        repo_root = tmp_path / "repo"
+        keep_path = repo_root / "keep.md"
+        remove_path = repo_root / "remove.md"
+        repo_root.mkdir()
+        keep_path.write_text("keep content")
+        remove_path.write_text("remove content")
+        kb = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_fn=mock_embedding_fn,
+            chunk_size=1000,
+            chunk_overlap=0,
+        )
+
+        await kb.index_directory(repo_root, show_progress=False)
+        remove_path.unlink()
+        await kb.index_directory(repo_root, show_progress=False, prune=True)
+
+        rows = kb._get_table().to_arrow().to_pylist()
+        assert {Path(row["source"]).name for row in rows} == {"keep.md"}
+
+    @pytest.mark.asyncio
+    async def test_index_directory_prune_does_not_delete_other_roots(
+        self, tmp_path, mock_embedding_fn
+    ):
+        first_root = tmp_path / "first"
+        second_root = tmp_path / "second"
+        first_path = first_root / "shared.md"
+        first_keep = first_root / "keep.md"
+        second_path = second_root / "shared.md"
+        first_root.mkdir()
+        second_root.mkdir()
+        first_path.write_text("first content")
+        first_keep.write_text("first keep")
+        second_path.write_text("second content")
+        kb = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_fn=mock_embedding_fn,
+            chunk_size=1000,
+            chunk_overlap=0,
+        )
+        await kb.index_directory(first_root, show_progress=False)
+        await kb.index_directory(second_root, show_progress=False)
+
+        first_path.unlink()
+        await kb.index_directory(first_root, show_progress=False, prune=True)
+
+        rows = kb._get_table().to_arrow().to_pylist()
+        assert {row["source"] for row in rows} == {str(first_keep), str(second_path)}
+
+    @pytest.mark.asyncio
+    async def test_index_directory_prunes_when_root_has_no_indexable_files(
+        self, tmp_path, mock_embedding_fn
+    ):
+        repo_root = tmp_path / "repo"
+        source_path = repo_root / "deleted.md"
+        repo_root.mkdir()
+        source_path.write_text("deleted content")
+        kb = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_fn=mock_embedding_fn,
+            chunk_size=1000,
+            chunk_overlap=0,
+        )
+        await kb.index_directory(repo_root, show_progress=False)
+
+        source_path.unlink()
+        await kb.index_directory(repo_root, show_progress=False, prune=True)
+
+        assert kb._get_table().to_arrow().to_pylist() == []
+
+    @pytest.mark.asyncio
     async def test_index_file_rejects_path_outside_repo_root(
         self, tmp_path, mock_embedding_fn
     ):
@@ -369,11 +443,10 @@ class TestKBIndexing:
 
         rows = kb._get_table().to_arrow().to_pylist()
         metadata = [json.loads(row["metadata"]) for row in rows]
-        assert len(metadata) == 2
+        assert len(metadata) == 1
         assert {item["repo_path"] for item in metadata} == {"src/app.py"}
         assert len({item["source_id"] for item in metadata}) == 1
         assert {item["document_sha256"] for item in metadata} == {
-            hashlib.sha256(first_content.encode("utf-8")).hexdigest(),
             hashlib.sha256(second_content.encode("utf-8")).hexdigest(),
         }
 
@@ -458,12 +531,128 @@ class TestKBIndexing:
 
         await kb.index_file(Path("/test/file.py"), content)
 
-        # Should index the same content (no deduplication in current implementation)
         second_count = len(table.to_pandas())
-        assert second_count > first_count
+        assert second_count == first_count
 
-        # But the chunking should be the same
         assert mock_embedding_fn.last_texts == first_call_texts
+
+    @pytest.mark.asyncio
+    async def test_index_file_skips_unchanged_document(
+        self, tmp_path, mock_embedding_fn
+    ):
+        repo_root = tmp_path / "repo"
+        source_path = repo_root / "docs" / "guide.md"
+        source_path.parent.mkdir(parents=True)
+        content = "same document content"
+        source_path.write_text(content)
+        kb = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_fn=mock_embedding_fn,
+            chunk_size=1000,
+            chunk_overlap=0,
+        )
+
+        await kb.index_file(source_path, content, repo_root=repo_root)
+        assert mock_embedding_fn.call_count == 1
+
+        await kb.index_file(source_path, content, repo_root=repo_root)
+
+        assert mock_embedding_fn.call_count == 1
+        rows = kb._get_table().to_arrow().to_pylist()
+        assert len(rows) == 1
+
+    @pytest.mark.asyncio
+    async def test_index_file_removes_stale_chunks_when_document_shrinks(
+        self, tmp_path, mock_embedding_fn
+    ):
+        repo_root = tmp_path / "repo"
+        source_path = repo_root / "docs" / "guide.md"
+        source_path.parent.mkdir(parents=True)
+        kb = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_fn=mock_embedding_fn,
+            chunk_size=2,
+            chunk_overlap=0,
+        )
+
+        await kb.index_file(source_path, "A" * 40, repo_root=repo_root)
+        initial_rows = kb._get_table().to_arrow().to_pylist()
+        assert len(initial_rows) > 1
+
+        await kb.index_file(source_path, "short", repo_root=repo_root)
+
+        rows = kb._get_table().to_arrow().to_pylist()
+        assert len(rows) == 1
+        assert rows[0]["content"] == "short"
+
+    @pytest.mark.asyncio
+    async def test_index_file_clears_legacy_uuid_chunks_for_source(
+        self, tmp_path, mock_embedding_fn
+    ):
+        repo_root = tmp_path / "repo"
+        source_path = repo_root / "docs" / "guide.md"
+        source_path.parent.mkdir(parents=True)
+        content = "new content"
+        kb = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_fn=mock_embedding_fn,
+            chunk_size=1000,
+            chunk_overlap=0,
+        )
+        table = kb._get_table()
+        source_id = kb_module._source_id(
+            source_kind="repo_file",
+            repo_path="docs/guide.md",
+            source=str(source_path),
+        )
+        table.add(
+            [
+                {
+                    "id": "deadbeef_legacychunk",
+                    "content": "old content",
+                    "source": str(source_path),
+                    "metadata": json.dumps(
+                        {
+                            "metadata_version": 1,
+                            "source_kind": "repo_file",
+                            "source_id": source_id,
+                            "repo_path": "docs/guide.md",
+                            "document_sha256": "old",
+                            "chunk_index": 0,
+                        }
+                    ),
+                    "vector": [0.0] * 1536,
+                }
+            ]
+        )
+
+        await kb.index_file(source_path, content, repo_root=repo_root)
+
+        rows = kb._get_table().to_arrow().to_pylist()
+        assert {row["content"] for row in rows} == {content}
+        assert all(not row["id"].startswith("deadbeef_") for row in rows)
+
+    @pytest.mark.asyncio
+    async def test_index_file_handles_single_quote_in_source_path(
+        self, tmp_path, mock_embedding_fn
+    ):
+        repo_root = tmp_path / "repo"
+        source_path = repo_root / "docs" / "kina's guide.md"
+        source_path.parent.mkdir(parents=True)
+        content = "quoted path content"
+        kb = KB(
+            db_path=tmp_path / "kb_db",
+            embedding_fn=mock_embedding_fn,
+            chunk_size=1000,
+            chunk_overlap=0,
+        )
+
+        await kb.index_file(source_path, content, repo_root=repo_root)
+        await kb.index_file(source_path, "updated quoted path", repo_root=repo_root)
+
+        rows = kb._get_table().to_arrow().to_pylist()
+        assert len(rows) == 1
+        assert rows[0]["content"] == "updated quoted path"
 
     @pytest.mark.asyncio
     async def test_index_directory(self, temp_db_path, mock_embedding_fn):
