@@ -1,6 +1,6 @@
 # ADR-0068: Local SQLite transactional durable fencing
 
-**Status**: Proposed
+**Status**: Accepted
 **Date**: 2026-06-05
 
 Supersedes ADR-0067. ADR-0067 remains the record of the first ACP SQLite
@@ -208,6 +208,22 @@ PR 4 adds PG/cloud parity. It is not required to block the local SQLite
 implementation, but the PR 3 interfaces must already support a PG transaction
 implementation.
 
+## Implementation Status
+
+Accepted and implemented for the local SQLite and PostgreSQL durable fencing
+paths.
+
+Implementation references:
+
+- `7911839` — `feat(storage): default local runtime to sqlite bundle (#559)`
+- `3c5a2f6` — `feat(storage): add sqlite durable fencing`
+- `40a3110` — `feat(storage): add pg durable fencing`
+- `4d8cafe` — `fix(storage): restore sqlite checkpoint snapshots`
+
+Operational follow-up: startup diagnostics now reject mixed local SQLite
+backend/path configurations instead of silently disabling durable fencing, and
+warn when custom in-process stores intentionally disable local or PG fencing.
+
 ## Alternatives Rejected
 
 - Keep ADR-0067 as the target architecture — rejected because filesystem
@@ -234,28 +250,28 @@ implementation.
 
 ## Acceptance Criteria
 
-- [ ] `test_adr_0068_supersedes_adr_0067_without_conflicting_target_architecture`
-- [ ] `test_adr_0068_defines_single_db_epoch_and_transactional_fencing_contract`
-- [ ] `test_adr_0068_rejects_attach_as_the_durable_fencing_foundation`
-- [ ] `test_adr_0068_requires_same_session_target_ownership_for_protected_writes`
-- [ ] `test_adr_0068_covers_worker_maintenance_and_cleanup_authority`
-- [ ] `test_adr_0068_records_full_write_path_inventory_and_future_pr_sequence`
-- [ ] Future PR 3: owner of session A cannot mutate run, checkpoint, tape,
+- [x] `test_adr_0068_supersedes_adr_0067_without_conflicting_target_architecture`
+- [x] `test_adr_0068_defines_single_db_epoch_and_transactional_fencing_contract`
+- [x] `test_adr_0068_rejects_attach_as_the_durable_fencing_foundation`
+- [x] `test_adr_0068_requires_same_session_target_ownership_for_protected_writes`
+- [x] `test_adr_0068_covers_worker_maintenance_and_cleanup_authority`
+- [x] `test_adr_0068_records_full_write_path_inventory_and_future_pr_sequence`
+- [x] Future PR 3: owner of session A cannot mutate run, checkpoint, tape,
   interaction, snapshot, or event target of session B.
-- [ ] Future PR 3: A acquires epoch N, A writes own session target, and the
+- [x] Future PR 3: A acquires epoch N, A writes own session target, and the
   write succeeds.
-- [ ] Future PR 3: A lease expires, B takes over with epoch N+1, A write fails,
+- [x] Future PR 3: A lease expires, B takes over with epoch N+1, A write fails,
   and B write succeeds.
-- [ ] Future PR 3: A renews and keeps epoch N, and A write succeeds.
-- [ ] Future PR 3: expired same owner without live lease cannot write until the
+- [x] Future PR 3: A renews and keeps epoch N, and A write succeeds.
+- [x] Future PR 3: expired same owner without live lease cannot write until the
   reacquire/takeover policy grants a live epoch.
-- [ ] Future PR 3: stale owner cancellation cleanup cannot persist final
+- [x] Future PR 3: stale owner cancellation cleanup cannot persist final
   status, result, or session metadata through the normal write path.
-- [ ] Future PR 3: worker claim, heartbeat, and finalize cannot bypass session
+- [x] Future PR 3: worker claim, heartbeat, and finalize cannot bypass session
   takeover or target ownership rules.
-- [ ] Future PR 3: checkpoint restore is atomic or has an explicit recovery
+- [x] Future PR 3: checkpoint restore is atomic or has an explicit recovery
   contract.
-- [ ] `uv run pytest tests/coding_agent/test_durable_fencing_adr_contract.py -q`
+- [x] `uv run pytest tests/coding_agent/test_durable_fencing_adr_contract.py -q`
 
 ## References
 

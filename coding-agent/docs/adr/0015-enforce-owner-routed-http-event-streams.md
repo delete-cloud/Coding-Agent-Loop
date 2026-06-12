@@ -1,6 +1,6 @@
 # ADR-0015: Enforce owner-routed HTTP event streams for Phase 2 sticky routing
 
-**Status**: Proposed
+**Status**: Accepted
 **Date**: 2026-04-21
 
 ## Context
@@ -25,6 +25,22 @@ Specifically:
 
 This ADR intentionally keeps approval metadata persistence out of scope. It closes the narrowest, clearest routing gap first: only the current owner may serve the live SSE stream for a session.
 
+## Implementation Status
+
+The sticky-owner first cut is implemented. `GET /sessions/{session_id}/events`
+and `/sessions/{session_id}/display-events` authorize ownership before queue
+registration, register through the owned queue path, and re-check ownership
+inside the stream before delivering queued events or keepalive pings.
+
+Covered regressions live in `tests/ui/test_http_server_failover.py`, including
+stale-owner rejection before queue registration, owner-change stream shutdown,
+queued-event drop after owner change, disappearing-session races, owner change
+after queue registration, the append-to-recheck race window, and current-owner
+keepalive behavior.
+
+Brokered cross-instance stream routing, redirect payloads, and queue transfer
+remain intentionally out of scope for this ADR.
+
 ## Alternatives Rejected
 
 - Keep `/events` unfenced and rely on load-balancer stickiness alone — rejected because it leaves stale instances free to attach live streams even when PostgreSQL ownership already says they are not authoritative.
@@ -34,17 +50,18 @@ This ADR intentionally keeps approval metadata persistence out of scope. It clos
 
 ## Acceptance Criteria
 
-- [ ] `test_get_events_rejects_stale_owner_before_stream_registration`
-- [ ] `test_get_events_stops_stream_after_owner_change`
-- [ ] `test_get_events_keeps_stream_alive_for_current_owner`
-- [ ] `test_get_events_returns_404_before_owner_check_for_missing_session`
-- [ ] `uv run pytest tests/ui/test_http_server_failover.py -v`
-- [ ] `uv run pytest tests/ui/test_http_server.py tests/ui/test_http_server_failover.py tests/ui/test_session_manager_owner_checks.py -k "events or owner or failover" -v`
+- [x] `test_get_events_rejects_stale_owner_before_stream_registration`
+- [x] `test_get_events_stops_stream_after_owner_change`
+- [x] `test_get_events_keeps_stream_alive_for_current_owner`
+- [x] `test_get_events_returns_404_before_owner_check_for_missing_session`
+- [x] `uv run pytest tests/ui/test_http_server_failover.py -v`
+- [x] `uv run pytest tests/ui/test_http_server.py tests/ui/test_http_server_failover.py tests/ui/test_session_manager_owner_checks.py -k "events or owner or failover" -v`
 
 ## References
 
 - `docs/adr/0013-define-phase2-multi-instance-session-ownership-for-pg-http-sessions.md`
 - `docs/pg-phase2-multi-instance-checklist.md`
-- `src/coding_agent/ui/http_server.py`
-- `src/coding_agent/ui/session_manager.py`
+- `src/coding_agent/server/http_server.py`
+- `src/coding_agent/server/session_manager.py`
 - `tests/ui/test_http_server.py`
+- `tests/ui/test_http_server_failover.py`

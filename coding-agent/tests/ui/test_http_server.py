@@ -60,6 +60,7 @@ from coding_agent.runs import (
     LocalDaemonExecutorRef,
     LocalPathWorkspaceRef,
     RunTarget,
+    RuntimeContextBindingService,
 )
 from coding_agent.wire.local import LocalWire
 from coding_agent.server.session_manager import Session, SessionManager
@@ -177,8 +178,18 @@ def _test_runtime_profile_config(image: str = "python:3.11-slim") -> dict[str, o
 
 
 @pytest.fixture(autouse=True)
-async def clear_sessions():
-    """Clear sessions before each test."""
+async def clear_sessions(tmp_path: Path):
+    """Provide each test with an isolated unfenced session manager."""
+    global session_manager
+    original_session_manager = session_manager
+    original_http_session_manager = http_server.session_manager
+    test_session_manager = SessionManager(
+        storage_config=local_sqlite_storage_config(tmp_path),
+        provisioned_cloud_binding_cleanup=http_server._cleanup_provisioned_cloud_binding,
+    )
+    session_manager = test_session_manager
+    http_server.session_manager = test_session_manager
+
     reset_prometheus_metrics()
     session_manager.configure_owner_leases(
         owner_store=None,
@@ -190,28 +201,22 @@ async def clear_sessions():
     session_manager.clear_sessions()
     # Clear rate limit storage to prevent 429 errors
     limiter.reset()
-    # Also close any sessions in session_manager
-    for session_id in list(session_manager.list_sessions()):
-        try:
-            await session_manager.close_session(session_id)
-        except Exception:
-            pass
-    yield
-    session_manager.configure_owner_leases(
-        owner_store=None,
-        owner_id=None,
-        fencing_token=None,
-    )
-    session_manager.configure_workspace_metadata_store(None)
-    session_manager.configure_runtime_store(None)
-    session_manager.clear_sessions()
-    reset_prometheus_metrics()
-    # Cleanup session_manager
-    for session_id in list(session_manager.list_sessions()):
-        try:
-            await session_manager.close_session(session_id)
-        except Exception:
-            pass
+    try:
+        yield
+    finally:
+        session_manager.configure_owner_leases(
+            owner_store=None,
+            owner_id=None,
+            fencing_token=None,
+        )
+        session_manager.configure_workspace_metadata_store(None)
+        session_manager.configure_runtime_store(None)
+        SessionManager.clear_sessions(test_session_manager)
+        reset_prometheus_metrics()
+        limiter.reset()
+        await SessionManager.close(test_session_manager)
+        session_manager = original_session_manager
+        http_server.session_manager = original_http_session_manager
 
 
 def register_session(
@@ -2061,6 +2066,24 @@ max_turns = 17
         finally:
             asyncio.run(manager.close())
 
+    def test_build_session_manager_enables_owner_store_for_default_sqlite_bundle(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("AGENT_DATA_DIR", str(tmp_path))
+        monkeypatch.setattr(
+            "coding_agent.server.http_server._load_storage_config",
+            lambda: {},
+        )
+
+        manager = _build_session_manager()
+        try:
+            assert manager._owner_store is not None
+            assert type(manager._owner_store).__name__ == "SQLiteSessionOwnerStore"
+            assert manager._owner_id is not None
+            assert manager._local_durable_store is not None
+        finally:
+            asyncio.run(manager.close())
+
     def test_build_session_manager_enables_owner_store_for_equivalent_local_sqlite_bundle_paths(
         self, monkeypatch, tmp_path
     ):
@@ -3739,6 +3762,28 @@ class TestPromptStreaming:
             session_manager,
             "publish_subagent_message",
             fatal_publish_subagent_message,
+        )
+        session_manager._runtime_context_binding_service = RuntimeContextBindingService(
+            publish_subagent_message=fatal_publish_subagent_message
+        )
+        session_manager._local_daemon_runtime_preparation = replace(
+            session_manager._local_daemon_runtime_preparation,
+            bind_subagent_message_publisher=(
+                session_manager._runtime_context_binding_service.bind_subagent_message_publisher
+            ),
+        )
+        session_manager._runtime_turn_service_factory = replace(
+            session_manager._runtime_turn_service_factory,
+            prepare_runtime=session_manager._local_daemon_runtime_preparation.prepare_runtime,
+            bind_root_run_identity=(
+                session_manager._runtime_context_binding_service.bind_root_run_identity
+            ),
+            bind_subagent_message_publisher=(
+                session_manager._runtime_context_binding_service.bind_subagent_message_publisher
+            ),
+        )
+        session_manager._runtime_turn_service = (
+            session_manager._build_runtime_turn_service()
         )
         session.runtime_pipeline = None
         session.runtime_ctx = None
@@ -8001,6 +8046,40 @@ local = "{local_path}"
         assert manager._runtime_store._path == local_path
     finally:
         asyncio.run(manager.close())
+
+
+def test_build_session_manager_partial_sqlite_storage_fails_loudly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_path = tmp_path / "local.sqlite3"
+    runtime_path = tmp_path / "runtime"
+    config_path = tmp_path / "agent.toml"
+    config_path.write_text(
+        _minimal_agent_toml(
+            f"""
+
+[storage]
+http_session_backend = "sqlite"
+http_session_path = "{local_path}"
+tape_backend = "sqlite"
+tape_path = "{local_path}"
+checkpoint_backend = "sqlite"
+checkpoint_path = "{local_path}"
+runtime_backend = "jsonl"
+runtime_path = "{runtime_path}"
+"""
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODING_AGENT_SERVER_CONFIG", str(config_path))
+
+    with pytest.raises(ConfigError) as exc_info:
+        http_server._build_session_manager()
+
+    message = str(exc_info.value)
+    assert "durable fencing requires all local sqlite backends" in message
+    assert "runtime_backend='jsonl'" in message
 
 
 def test_http_server_import_raises_on_invalid_agent_toml(monkeypatch) -> None:

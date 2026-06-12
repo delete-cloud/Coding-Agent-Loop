@@ -20,6 +20,9 @@ from coding_agent.server.http_server import (
     limiter,
     session_manager,
 )
+import coding_agent.server.http_server as http_server
+from coding_agent.local_storage import local_sqlite_storage_config
+from coding_agent.server.session_manager import SessionManager
 from coding_agent.server.stores.session_owner_store import SessionOwnerRecord
 from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictError
 from coding_agent.server.stores.session_owner_store import (
@@ -85,12 +88,26 @@ class FakeOwnerStore:
 
 
 @pytest.fixture(autouse=True)
-async def clear_sessions():
+async def clear_sessions(tmp_path):
+    global session_manager
+    original_session_manager = session_manager
+    original_http_session_manager = http_server.session_manager
+    test_session_manager = SessionManager(
+        storage_config=local_sqlite_storage_config(tmp_path)
+    )
+    session_manager = test_session_manager
+    http_server.session_manager = test_session_manager
+
     session_manager.clear_sessions()
     limiter.reset()
-    yield
-    session_manager.clear_sessions()
-    limiter.reset()
+    try:
+        yield
+    finally:
+        SessionManager.clear_sessions(test_session_manager)
+        limiter.reset()
+        await SessionManager.close(test_session_manager)
+        session_manager = original_session_manager
+        http_server.session_manager = original_http_session_manager
 
 
 @pytest.fixture
@@ -139,11 +156,13 @@ class FakeEventSourceResponse:
 @pytest.mark.asyncio
 async def test_clear_sessions_fixture_resets_limiter_in_teardown(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
 ):
     session_clear_calls = 0
     limiter_reset_calls = 0
 
-    def fake_clear_sessions() -> None:
+    def fake_clear_sessions(self: SessionManager) -> None:
+        del self
         nonlocal session_clear_calls
         session_clear_calls += 1
 
@@ -151,14 +170,14 @@ async def test_clear_sessions_fixture_resets_limiter_in_teardown(
         nonlocal limiter_reset_calls
         limiter_reset_calls += 1
 
-    monkeypatch.setattr(session_manager, "clear_sessions", fake_clear_sessions)
+    monkeypatch.setattr(SessionManager, "clear_sessions", fake_clear_sessions)
     monkeypatch.setattr(limiter, "reset", fake_limiter_reset)
 
     fixture_factory = cast(
-        "Callable[[], AsyncGenerator[None, None]]",
+        "Callable[[object], AsyncGenerator[None, None]]",
         getattr(clear_sessions, "__wrapped__"),
     )
-    fixture_gen = fixture_factory()
+    fixture_gen = fixture_factory(tmp_path)
     await anext(fixture_gen)
 
     assert session_clear_calls == 1
