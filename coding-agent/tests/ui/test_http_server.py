@@ -20,6 +20,7 @@ from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
 from httpx import AsyncClient, ASGITransport
 from httpx_sse import aconnect_sse
 from starlette.requests import Request
@@ -63,6 +64,7 @@ from coding_agent.runs import (
 )
 from coding_agent.wire.local import LocalWire
 from coding_agent.server.session_manager import Session, SessionManager
+from coding_agent.server.auth import AuthContext
 from coding_agent.server.stores.workspace_store import JSONValue, WorkspaceRecord
 from coding_agent.server.stores.session_owner_store import SessionOwnerRecord
 from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictError
@@ -4286,7 +4288,7 @@ class TestEventsFanOut:
                 "headers": [],
             }
         )
-        response = await get_session_display_events(request, session_id, None)
+        response = await get_session_display_events(request, session_id, None, None)
         event_generator = cast(AsyncIterator[dict[str, str]], response.body_iterator)
         assert len(session.event_queues) == 1
 
@@ -4319,6 +4321,48 @@ class TestEventsFanOut:
         await event_generator.aclose()
         assert session.event_queues == []
 
+    async def test_session_display_events_rejects_non_owner(self, client, monkeypatch):
+        create_resp = await client.post("/sessions", json={})
+        session_id = create_resp.json()["session_id"]
+        session = session_manager.get_session(session_id)
+        session.origin = {"owner_label": "owner:a"}
+
+        class FakeEventSourceResponse:
+            def __init__(self, body_iterator):
+                self.body_iterator = body_iterator
+
+        monkeypatch.setattr(
+            "coding_agent.server.http_server.EventSourceResponse",
+            FakeEventSourceResponse,
+        )
+
+        request = Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": f"/sessions/{session_id}/display-events",
+                "headers": [],
+            }
+        )
+        auth_context = AuthContext(
+            scope="user",
+            token="token-b",
+            token_digest="digest-b",
+            owner_label="owner:b",
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await get_session_display_events(
+                request,
+                session_id,
+                None,
+                auth_context,
+            )
+
+        assert exc_info.value.status_code == 404
+        assert exc_info.value.detail == "Session not found"
+        assert session.event_queues == []
+
     async def test_session_display_events_redacts_live_tool_result_payload(
         self, client, monkeypatch
     ):
@@ -4344,7 +4388,7 @@ class TestEventsFanOut:
                 "headers": [],
             }
         )
-        response = await get_session_display_events(request, session_id, None)
+        response = await get_session_display_events(request, session_id, None, None)
         event_generator = cast(AsyncIterator[dict[str, str]], response.body_iterator)
         await session.event_queues[0].put(
             _wire_message_to_event(

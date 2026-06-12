@@ -3137,13 +3137,11 @@ async def get_session_display_events(
     request: Request,
     session_id: str,
     api_key: str | None = Depends(verify_api_key),
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
 ) -> EventSourceResponse:
     """Persistent SSE stream of projected user-facing display events."""
     del request, api_key
-    try:
-        session = await session_manager.get_session_async(session_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
+    session = await _get_visible_session(session_id, auth_context)
 
     try:
         await session_manager.authorize_event_stream(session_id)
