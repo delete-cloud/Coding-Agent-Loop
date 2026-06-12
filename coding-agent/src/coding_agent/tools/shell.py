@@ -93,7 +93,7 @@ def _load_sandbox_module() -> ModuleType:
 
 
 def _sandbox_mode(shell_config: dict[str, object]) -> str:
-    mode_value = shell_config.get("sandbox_mode", "none")
+    mode_value = shell_config.get("sandbox_mode", "native")
     if not isinstance(mode_value, str):
         raise ValueError("sandbox_mode must be a string")
     # ADR-0060: converged user-visible modes; nsjail dropped from validation.
@@ -145,7 +145,7 @@ def _default_shell_config_for_execution(
 
 def _uses_unsupported_default_memory_limit(shell_config: dict[str, object]) -> bool:
     return (
-        shell_config.get("sandbox_mode", "none") == "none"
+        shell_config.get("sandbox_mode", "native") == "none"
         and shell_config.get("memory_limit_mb") is not None
         and platform.system() == "Darwin"
     )

@@ -22,7 +22,7 @@ def test_sandboxed_environment_wraps_local_environment_tool_config(
     assert environment.kind == "sandboxed:local"
     assert environment.tool_config() == {
         "workspace_root": str(tmp_path.resolve()),
-        "shell": {"sandbox_mode": "none"},
+        "shell": {"sandbox_mode": "native"},
         "isolation_policy": _isolation().to_dict(),
     }
 
@@ -40,5 +40,5 @@ def test_create_agent_merges_sandboxed_environment_tool_config(
 
     assert ctx.config["environment"] is environment
     assert ctx.config["workspace_root"] == str(tmp_path.resolve())
-    assert ctx.config["shell"]["sandbox_mode"] == "none"
+    assert ctx.config["shell"]["sandbox_mode"] == "native"
     assert ctx.config["isolation_policy"] == _isolation().to_dict()

@@ -78,23 +78,23 @@ generalization is out of scope.
 When a `native` backend's required binary is unavailable, runners fail closed
 with `SandboxUnavailableError` — they must never silently downgrade to `none`.
 
-The default config value stays `sandbox_mode = "none"` in this change.
-Switching the default to `native` is deferred to a separate, final PR after the
-native backends are implemented and verified, to keep blast radius minimal.
+The default config value initially stayed `sandbox_mode = "none"` while the
+native backends and structured retry signal were staged. The final PR switches
+the default to `native`.
 
 ## Implementation Status
 
 Implemented. The user-visible `sandbox_mode` values are now converged to
 `none`, `native`, `podman`, and `docker`; `nsjail` is rejected by validation.
 Native sandbox resolution fails closed when the required platform backend is
-unavailable, and the default remains `none`.
+unavailable, and the default is now `native`.
 
 The default switch is staged behind a structured retry signal: when
 `structured_results` is enabled, `bash_run` classifies native sandbox failures
 as `sandbox_denied` or `sandbox_unavailable` with
 `retry_hint = "request_unfenced_retry"`. This lets the model distinguish a
 recoverable sandbox boundary from an ordinary command failure and request an
-approved unfenced retry before `native` becomes the default.
+approved unfenced retry.
 
 Verification is captured by `tests/tools/test_shell.py` and the acceptance
 criteria below.

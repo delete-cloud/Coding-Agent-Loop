@@ -42,7 +42,7 @@ class SandboxedEnvironment(LocalEnvironment):
             raise ValueError("environment shell tool config must be a dict")
         merged_shell_config = dict(shell_config)
         if self.isolation.filesystem == "workspace_scoped":
-            merged_shell_config.setdefault("sandbox_mode", "none")
+            merged_shell_config.setdefault("sandbox_mode", "native")
         config["shell"] = merged_shell_config
         config["isolation_policy"] = self.isolation.to_dict()
         return config

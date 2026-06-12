@@ -188,7 +188,7 @@ async def test_runtime_preparation_service_builds_local_daemon_runtime(
     assert created["workspace_root"] == workspace.resolve()
     assert isinstance(created["environment"], SandboxedEnvironment)
     assert created["environment"].workspace_root == workspace.resolve()
-    assert created["environment"].tool_config()["shell"] == {"sandbox_mode": "none"}
+    assert created["environment"].tool_config()["shell"] == {"sandbox_mode": "native"}
     assert created["environment"].tool_config()["isolation_policy"] == (
         _request(workspace).target.isolation.to_dict()
     )
