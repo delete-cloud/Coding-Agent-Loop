@@ -69,10 +69,6 @@ spec:
             - name: AGENT_SESSION_REDIS_URL
               value: {{ default (printf "redis://127.0.0.1:%v/0" .Values.redis.sidecar.port) .Values.redis.url | quote }}
             {{- end }}
-            {{- if .Values.sandbox.sidecar.enabled }}
-            - name: SANDBOX_NSJAIL_CONFIG_PATH
-              value: {{ .Values.sandbox.sidecar.configPath | quote }}
-            {{- end }}
             {{- range .Values.agent.extraEnv }}
             - name: {{ .name }}
               value: {{ .value | quote }}
@@ -96,11 +92,6 @@ spec:
             {{- if .Values.persistence.data.enabled }}
             - name: data-storage
               mountPath: {{ .Values.persistence.data.mountPath }}
-            {{- end }}
-            {{- if .Values.sandbox.sidecar.enabled }}
-            - name: sandbox-config
-              mountPath: /etc/nsjail
-              readOnly: true
             {{- end }}
           readinessProbe:
             httpGet:
@@ -141,17 +132,6 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
         {{- end }}
-        {{- if .Values.sandbox.sidecar.enabled }}
-        - name: sandbox
-          image: {{ .Values.sandbox.sidecar.image | quote }}
-          imagePullPolicy: IfNotPresent
-          command:
-            {{- toYaml .Values.sandbox.sidecar.command | nindent 12 }}
-          volumeMounts:
-            - name: sandbox-config
-              mountPath: /etc/nsjail
-              readOnly: true
-        {{- end }}
       volumes:
         - name: agent-config
           configMap:
@@ -165,9 +145,4 @@ spec:
         - name: data-storage
           persistentVolumeClaim:
             claimName: {{ default (printf "%s-data" (include "coding-agent.fullname" .)) .Values.persistence.data.existingClaim }}
-        {{- end }}
-        {{- if .Values.sandbox.sidecar.enabled }}
-        - name: sandbox-config
-          configMap:
-            name: {{ include "coding-agent.fullname" . }}-sandbox-config
         {{- end }}

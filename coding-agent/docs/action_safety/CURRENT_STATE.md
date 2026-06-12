@@ -47,9 +47,9 @@ Current safety behavior:
 - validates explicit `cwd` against the workspace root,
 - rejects absolute path arguments outside the workspace in `sandbox_mode = "none"`,
 - supports structured stdout/stderr/exit-code results inside its structured-results scope,
-- delegates to `coding_agent.tools.sandbox` for `none`, `nsjail`, or `docker` sandbox modes.
+- delegates to `coding_agent.tools.sandbox` for `none`, `native`, `podman`, or `docker` sandbox modes.
 
-`src/coding_agent/tools/sandbox.py` provides local runner implementations and guards for cwd, Docker env names, resource limits, and command path escape detection. Docker and nsjail modes are present but this phase explicitly does not implement a full Docker sandbox product.
+`src/coding_agent/tools/sandbox.py` provides local runner implementations and guards for cwd, Docker/Podman env names, resource limits, and command path escape detection. Docker and Podman are explicit container modes; `native` resolves to macOS Seatbelt or Linux bubblewrap and `nsjail` is rejected.
 
 `src/coding_agent/environment/cloud.py` defines a separate cloud `bash_run` wrapper. It supports `cd` and `export` session-style responses, validates cwd under the cloud workspace default cwd, and delegates the raw command string to `CloudWorkspaceClient.run_command`. It does not use the local `_parse_command`, local shell-metacharacter rejection, local sandbox modes, local absolute-path argument escape checks, or local structured shell result scope.
 

@@ -62,6 +62,10 @@ def _service(docs: list[dict[str, Any]]) -> dict[str, Any]:
     return _object_named(docs, "Service", "coding-agent")
 
 
+def _objects_of_kind(docs: list[dict[str, Any]], kind: str) -> list[dict[str, Any]]:
+    return [doc for doc in docs if doc.get("kind") == kind]
+
+
 def _agent_toml(docs: list[dict[str, Any]]) -> dict[str, Any]:
     config = _object_named(docs, "ConfigMap", "-agent-config")
     return tomllib.loads(config["data"]["agent.toml"])
@@ -198,6 +202,27 @@ def test_helm_workspace_mount_override_sets_working_dir() -> None:
 def test_helm_data_mount_override_updates_sqlite_bundle_path() -> None:
     docs = _render("--set", "persistence.data.mountPath=/data2")
     _assert_storage(docs, "/data2")
+
+
+def test_helm_chart_ignores_legacy_sandbox_sidecar_values() -> None:
+    docs = _render("--set", "sandbox.sidecar.enabled=true")
+    assert all(
+        not doc.get("metadata", {}).get("name", "").endswith("-sandbox-config")
+        for doc in _objects_of_kind(docs, "ConfigMap")
+    )
+
+    pod_spec = _deployment(docs)["spec"]["template"]["spec"]
+    assert [container["name"] for container in pod_spec["containers"]] == [
+        "coding-agent"
+    ]
+    main = _container(docs)
+    assert all(
+        env.get("name") != "SANDBOX_NSJAIL_CONFIG_PATH" for env in main.get("env", [])
+    )
+    assert all(
+        mount.get("name") != "sandbox-config" for mount in main.get("volumeMounts", [])
+    )
+    assert all(volume.get("name") != "sandbox-config" for volume in pod_spec["volumes"])
 
 
 def test_runtime_image_installs_native_linux_sandbox_binary() -> None:

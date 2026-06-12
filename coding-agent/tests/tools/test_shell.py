@@ -627,6 +627,11 @@ class TestNativeSandboxResolution:
         with pytest.raises(ValueError, match="(?i)unsupported sandbox mode"):
             _sandbox_mode({"sandbox_mode": "nsjail"})
 
+    def test_nsjail_runner_is_removed(self):
+        sandbox_module = importlib.import_module("coding_agent.tools.sandbox")
+
+        assert not hasattr(sandbox_module, "NsjailSandboxRunner")
+
     def test_existing_none_and_docker_modes_unchanged(self, tmp_path: Path):
         from coding_agent.tools.shell import _sandbox_mode
 

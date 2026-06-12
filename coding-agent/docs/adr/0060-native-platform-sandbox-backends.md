@@ -5,13 +5,14 @@
 
 ## Context
 
-`bash_run` resolves command isolation through a single `sandbox_mode` selector
-that maps one-to-one to a backend: `none`, `nsjail`, or `docker`
-(`src/coding_agent/tools/sandbox.py`, `src/coding_agent/tools/shell.py`). This
-couples the user-visible policy to a specific implementation and offers no
-host-native isolation: `none` runs commands directly under host-execution
-guards, `nsjail` is Linux-only and rarely deployed, and `docker` requires a
-container runtime. On macOS there is no isolation option at all beyond `none`.
+Before this ADR, `bash_run` resolved command isolation through a single
+`sandbox_mode` selector that mapped one-to-one to a backend: `none`, `nsjail`,
+or `docker` (`src/coding_agent/tools/sandbox.py`,
+`src/coding_agent/tools/shell.py`). That coupled the user-visible policy to a
+specific implementation and offered no host-native isolation: `none` ran
+commands directly under host-execution guards, `nsjail` was Linux-only and
+rarely deployed, and `docker` required a container runtime. On macOS there was
+no isolation option at all beyond `none`.
 
 ADR-0058 established that sandbox is a wrapper policy applied to an executor
 environment derived from `RunTarget.isolation`, not an environment type. This
@@ -65,8 +66,7 @@ no-new-privileges, rootless preferred).
 
 `nsjail` is dropped from the allowed `sandbox_mode` values. Configs that set
 `sandbox_mode = "nsjail"` are now rejected at validation. `NsjailSandboxRunner`
-may remain in `sandbox.py` temporarily but is unreachable through config and is
-slated for removal in a follow-up; it is not extended.
+and the Helm nsjail sidecar template were removed in the follow-up cleanup.
 
 Native backends preserve the existing safety contract used by `none`/`docker`:
 workspace is read-write, required system paths are read-only, network is denied
@@ -87,7 +87,8 @@ the default to `native`.
 Implemented. The user-visible `sandbox_mode` values are now converged to
 `none`, `native`, `podman`, and `docker`; `nsjail` is rejected by validation.
 Native sandbox resolution fails closed when the required platform backend is
-unavailable, and the default is now `native`.
+unavailable, and the default is now `native`. The temporary nsjail runner and
+Helm sidecar scaffolding have been removed.
 
 The default switch is staged behind a structured retry signal: when
 `structured_results` is enabled, `bash_run` classifies native sandbox failures
@@ -109,8 +110,8 @@ criteria below.
   intentionally copying.
 - Keep `nsjail` as an accepted legacy `sandbox_mode` value — rejected in favor
   of dropping it from validation now; keeping a fourth half-supported backend in
-  the user-visible surface contradicts the convergence goal. The runner class is
-  left temporarily only to stage its removal.
+  the user-visible surface contradicts the convergence goal. The runner class
+  was retained temporarily only to stage removal; that cleanup is now complete.
 - Silently fall back to `none` when a native backend binary is missing —
   rejected because it defeats the isolation contract; runners must fail closed.
 - Flip the default to `native` in the same change that adds the backends —

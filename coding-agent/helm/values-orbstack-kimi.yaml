@@ -22,7 +22,3 @@ agent:
 
 redis:
   enabled: false
-
-sandbox:
-  sidecar:
-    enabled: false

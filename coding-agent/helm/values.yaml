@@ -92,19 +92,3 @@ redis:
       - --appendonly
       - "no"
     resources: {}
-
-sandbox:
-  sidecar:
-    enabled: false
-    image: busybox:1.36
-    command:
-      - sh
-      - -c
-      - sleep infinity
-    configPath: /etc/nsjail/nsjail.cfg
-    config: |
-      name: "coding-agent"
-      mode: o
-      cwd: "/workspace"
-      bindmount: ["/workspace:/workspace"]
-      time_limit: 10
