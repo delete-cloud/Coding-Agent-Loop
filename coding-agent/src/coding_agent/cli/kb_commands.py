@@ -51,7 +51,9 @@ def kb_index(path: Path, db_path: str | None):
     resolved_db, kb_cfg = _load_kb_cli_settings(config_path, db_path)
 
     probe_kb = KB(
-        db_path=resolved_db, embedding_dim=int(kb_cfg.get("embedding_dim", 1536))
+        db_path=resolved_db,
+        embedding_base_url=kb_cfg.get("embedding_base_url"),
+        embedding_dim=int(kb_cfg.get("embedding_dim", 1536)),
     )
     if probe_kb.has_table():
         click.echo(
@@ -69,6 +71,7 @@ def kb_index(path: Path, db_path: str | None):
     kb_instance = KB(
         db_path=resolved_db,
         embedding_model=str(kb_cfg.get("embedding_model", "text-embedding-3-small")),
+        embedding_base_url=kb_cfg.get("embedding_base_url"),
         embedding_dim=int(kb_cfg.get("embedding_dim", 1536)),
         chunk_size=int(kb_cfg.get("chunk_size", 1200)),
         chunk_overlap=int(kb_cfg.get("chunk_overlap", 200)),
@@ -96,6 +99,7 @@ def kb_search(query: str, k: int, db_path: str | None):
     kb_instance = KB(
         db_path=resolved_db,
         embedding_model=str(kb_cfg.get("embedding_model", "text-embedding-3-small")),
+        embedding_base_url=kb_cfg.get("embedding_base_url"),
         embedding_dim=int(kb_cfg.get("embedding_dim", 1536)),
         chunk_size=int(kb_cfg.get("chunk_size", 1200)),
         chunk_overlap=int(kb_cfg.get("chunk_overlap", 200)),
