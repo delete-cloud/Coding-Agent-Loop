@@ -11,6 +11,7 @@ from typing import cast
 import pytest
 
 from coding_agent.tools.shell import bash_run
+from coding_agent.tools.shell import structured_results_scope
 from coding_agent.tools import sandbox as sandbox_module
 
 
@@ -321,6 +322,90 @@ class TestShellTool:
             ),
         )
         assert _as_text(result) == "ok"
+
+    def test_structured_result_marks_sandbox_unavailable(self, monkeypatch):
+        class FakeSandboxRequest:
+            def __init__(self, *, args, cwd, env, timeout_seconds):
+                del args, cwd, env, timeout_seconds
+
+        class FakeSandboxUnavailableError(RuntimeError):
+            pass
+
+        fake_module = SimpleNamespace(
+            SandboxRequest=FakeSandboxRequest,
+            build_sandbox=lambda config: (_ for _ in ()).throw(
+                FakeSandboxUnavailableError("native backend missing")
+            ),
+            SandboxUnavailableError=FakeSandboxUnavailableError,
+            SandboxError=RuntimeError,
+            SandboxLimits=lambda **kwargs: SimpleNamespace(**kwargs),
+            SandboxConfig=lambda **kwargs: SimpleNamespace(**kwargs),
+            _validate_cwd=lambda cwd, workspace_root, additional_roots=(): None,
+        )
+        monkeypatch.setattr(
+            "coding_agent.tools.shell._load_sandbox_module", lambda: fake_module
+        )
+
+        with structured_results_scope(True):
+            result = bash_run(
+                command="echo hello",
+                __pipeline_ctx__=SimpleNamespace(
+                    config={"shell": {"sandbox_mode": "native"}}
+                ),
+            )
+
+        assert result == {
+            "stdout": "",
+            "stderr": "native backend missing",
+            "exit_code": 126,
+            "error_type": "sandbox_unavailable",
+            "retry_hint": "request_unfenced_retry",
+        }
+
+    def test_structured_result_marks_sandbox_denied(self, monkeypatch):
+        class FakeSandboxRequest:
+            def __init__(self, *, args, cwd, env, timeout_seconds):
+                del args, cwd, env, timeout_seconds
+
+        class FakeSandboxError(RuntimeError):
+            pass
+
+        class FakeSandboxUnavailableError(FakeSandboxError):
+            pass
+
+        class FakeSandbox:
+            def run(self, request):
+                del request
+                raise FakeSandboxError("network access denied by sandbox")
+
+        fake_module = SimpleNamespace(
+            SandboxRequest=FakeSandboxRequest,
+            build_sandbox=lambda config: FakeSandbox(),
+            SandboxUnavailableError=FakeSandboxUnavailableError,
+            SandboxError=FakeSandboxError,
+            SandboxLimits=lambda **kwargs: SimpleNamespace(**kwargs),
+            SandboxConfig=lambda **kwargs: SimpleNamespace(**kwargs),
+            _validate_cwd=lambda cwd, workspace_root, additional_roots=(): None,
+        )
+        monkeypatch.setattr(
+            "coding_agent.tools.shell._load_sandbox_module", lambda: fake_module
+        )
+
+        with structured_results_scope(True):
+            result = bash_run(
+                command="python3 -m pip install sampleproject",
+                __pipeline_ctx__=SimpleNamespace(
+                    config={"shell": {"sandbox_mode": "native"}}
+                ),
+            )
+
+        assert result == {
+            "stdout": "",
+            "stderr": "network access denied by sandbox",
+            "exit_code": 126,
+            "error_type": "sandbox_denied",
+            "retry_hint": "request_unfenced_retry",
+        }
 
     def test_docker_sandbox_request_env_is_explicit_only(
         self, monkeypatch, tmp_path: Path
