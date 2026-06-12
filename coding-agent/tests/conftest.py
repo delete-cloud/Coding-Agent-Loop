@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+import os
 from pathlib import Path
 from types import ModuleType
 
@@ -10,6 +11,26 @@ import coding_agent.server.http_server as http_server
 from coding_agent.local_storage import local_sqlite_storage_config
 from coding_agent.observability import reset_prometheus_metrics
 from coding_agent.server.session_manager import SessionManager
+
+
+@pytest.fixture(autouse=True)
+def ci_shell_sandbox_mode_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    mode = os.environ.get("CODING_AGENT_TEST_SHELL_SANDBOX_MODE")
+    if mode is None:
+        return
+    if mode not in {"none", "native", "podman", "docker"}:
+        raise ValueError(f"Unsupported test shell sandbox mode: {mode}")
+
+    from coding_agent.tools import shell as shell_module
+
+    cache_clear = getattr(shell_module._default_shell_config, "cache_clear", None)
+    if callable(cache_clear):
+        cache_clear()
+
+    def default_shell_config() -> dict[str, object]:
+        return {"sandbox_mode": mode}
+
+    monkeypatch.setattr(shell_module, "_default_shell_config", default_shell_config)
 
 
 @pytest.fixture

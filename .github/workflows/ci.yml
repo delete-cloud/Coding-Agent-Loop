@@ -24,6 +24,8 @@ jobs:
     name: test
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      CODING_AGENT_TEST_SHELL_SANDBOX_MODE: none
 
     steps:
       - name: Check out repository
@@ -38,11 +40,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      - name: Install system test dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y bubblewrap
 
       - name: Install dependencies
         run: uv sync --locked --all-extras --dev

@@ -18,9 +18,11 @@ Ruff checks are still useful local targeted checks for files changed by a PR.
 They are not yet a repository-wide required check because the current tree has
 pre-existing lint and format debt outside this gate.
 
-Linux environments that run the full suite need `bubblewrap` on `PATH` because
-the default shell sandbox resolves `sandbox_mode = "native"` to the Linux
-native backend.
+GitHub-hosted runners run the suite with
+`CODING_AGENT_TEST_SHELL_SANDBOX_MODE=none` because they do not allow the
+`bubblewrap` network namespace setup used by the Linux native sandbox. Product
+defaults are unchanged; native sandbox selection and command construction remain
+covered by focused tests.
 
 Commit messages and pull request descriptions should report verification from a
 clean tree that matches the committed content. If a command was run before a
