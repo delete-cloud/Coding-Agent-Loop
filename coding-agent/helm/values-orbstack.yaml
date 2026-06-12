@@ -10,6 +10,3 @@ server:
     enabled: false
 redis:
   enabled: false
-sandbox:
-  sidecar:
-    enabled: false

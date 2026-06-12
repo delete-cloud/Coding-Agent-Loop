@@ -230,60 +230,6 @@ class LinuxNativeSandboxRunner:
         return command
 
 
-class NsjailSandboxRunner:
-    # ADR-0060: nsjail is dropped from accepted sandbox_mode values and is no
-    # longer reachable through build_sandbox(). This class is retained only to
-    # stage its removal and must not be extended.
-    def __init__(self, config: SandboxConfig) -> None:
-        self._config: SandboxConfig = config
-
-    def run(self, request: SandboxRequest) -> subprocess.CompletedProcess[str]:
-        if platform.system() != "Linux":
-            raise SandboxUnavailableError(
-                "nsjail sandbox mode is only supported on Linux"
-            )
-        if which("nsjail") is None:
-            raise SandboxUnavailableError("nsjail binary not found on PATH")
-
-        cwd = _validate_cwd(
-            request.cwd,
-            self._config.workspace_root,
-            additional_roots=self._config.additional_roots,
-        )
-        command = self._nsjail_command(request, cwd)
-        return subprocess.run(
-            command,
-            shell=False,
-            capture_output=True,
-            text=True,
-            timeout=request.timeout_seconds,
-            env=request.env,
-        )
-
-    def _nsjail_command(self, request: SandboxRequest, cwd: Path) -> list[str]:
-        command = [
-            "nsjail",
-            "--mode",
-            "o",
-            "--cwd",
-            str(cwd),
-            "--bindmount",
-            f"{self._config.workspace_root}:{self._config.workspace_root}",
-            "--disable_proc",
-            "--iface_no_lo",
-            "--",
-        ]
-        if self._config.limits.cpu_limit_seconds is not None:
-            command[1:1] = ["--time_limit", str(self._config.limits.cpu_limit_seconds)]
-        if self._config.limits.memory_limit_mb is not None:
-            command[1:1] = [
-                "--rlimit_as",
-                str(self._config.limits.memory_limit_mb * 1024 * 1024),
-            ]
-        command.extend(request.args)
-        return command
-
-
 class DockerSandboxRunner:
     def __init__(self, config: SandboxConfig) -> None:
         self._config: SandboxConfig = config
