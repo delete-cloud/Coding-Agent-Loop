@@ -585,4 +585,91 @@ describe("App session switching", () => {
 
     expect(await screen.findByText(/streaming · reconnect-model/)).toBeTruthy();
   });
+
+  it("posts approval decisions from streamed approval prompts", async () => {
+    const active = session("session-approval-0001", "model-approval");
+    let approveBody: Record<string, unknown> | null = null;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/sessions")) {
+          return jsonResponse({ sessions: [active] });
+        }
+        if (url.endsWith(`/sessions/${active.session_id}`)) {
+          return jsonResponse(active);
+        }
+        if (url.endsWith(`/sessions/${active.session_id}/runs`)) {
+          return jsonResponse({ session_id: active.session_id, runs: [] });
+        }
+        if (url.includes(`/sessions/${active.session_id}/prompt?event_format=display`)) {
+          const payload = {
+            source_event_id: "event-approval",
+            run_id: "run-approval",
+            sequence: 1,
+            display_kind: "approval_prompt",
+            payload: {
+              agent_id: "",
+              request_id: "approval-1",
+              timeout_seconds: 60,
+              tool_call: {
+                call_id: "call-1",
+                tool_name: "bash",
+                arguments: { cmd: "pwd" },
+              },
+            },
+            created_at: "2026-06-12T00:00:00Z",
+          };
+          return new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(
+                  new TextEncoder().encode(
+                    `event: approval_prompt\ndata: ${JSON.stringify(payload)}\n\n`,
+                  ),
+                );
+                controller.close();
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "text/event-stream" } },
+          );
+        }
+        if (url.endsWith(`/sessions/${active.session_id}/approve`)) {
+          approveBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return jsonResponse({
+            status: "approved",
+            request_id: "approval-1",
+            decision: "approved",
+          });
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /model-approval/i }));
+    await screen.findByText("idle");
+    fireEvent.change(screen.getByPlaceholderText(/ask the agent/i), {
+      target: { value: "run a tool" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(await screen.findByText("Approval Required")).toBeTruthy();
+    fireEvent.change(screen.getByPlaceholderText(/feedback/i), {
+      target: { value: "looks safe" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+
+    await waitFor(() =>
+      expect(approveBody).toEqual({
+        request_id: "approval-1",
+        approved: true,
+        feedback: "looks safe",
+        scope: "once",
+      }),
+    );
+    expect(screen.getByText("→ approved")).toBeTruthy();
+  });
 });
