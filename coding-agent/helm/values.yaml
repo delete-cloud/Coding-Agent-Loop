@@ -30,6 +30,54 @@ service:
   type: ClusterIP
   port: 8080
 
+enableServiceLinks: false
+
+serviceAccount:
+  create: true
+  name: ""
+  automountServiceAccountToken: false
+  annotations: {}
+
+networkPolicy:
+  enabled: true
+  ingress:
+    enabled: true
+    # null allows any source to the HTTP port. Set [] to deny all ingress or
+    # provide NetworkPolicyPeer entries to allow only a gateway/controller.
+    from: null
+  egress:
+    enabled: true
+    dns:
+      enabled: true
+      namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchExpressions:
+          - key: k8s-app
+            operator: In
+            values:
+              - kube-dns
+              - coredns
+    publicHttps:
+      enabled: true
+      cidr: 0.0.0.0/0
+      except:
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+        - 100.64.0.0/10
+        - 169.254.0.0/16
+        - 127.0.0.0/8
+  extraIngress: []
+  extraEgress: []
+
+httpRoute:
+  enabled: false
+  parentRefs: []
+  hostnames: []
+  path: /
+
 agent:
   dataDir: /var/lib/coding-agent/data
   extraEnv: []

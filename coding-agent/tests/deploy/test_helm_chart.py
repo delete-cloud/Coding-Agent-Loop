@@ -62,6 +62,14 @@ def _service(docs: list[dict[str, Any]]) -> dict[str, Any]:
     return _object_named(docs, "Service", "coding-agent")
 
 
+def _service_account(docs: list[dict[str, Any]]) -> dict[str, Any]:
+    return _object_named(docs, "ServiceAccount", "coding-agent")
+
+
+def _network_policy(docs: list[dict[str, Any]]) -> dict[str, Any]:
+    return _object_named(docs, "NetworkPolicy", "coding-agent")
+
+
 def _objects_of_kind(docs: list[dict[str, Any]], kind: str) -> list[dict[str, Any]]:
     return [doc for doc in docs if doc.get("kind") == kind]
 
@@ -131,6 +139,9 @@ def test_helm_default_runtime_contract_is_runnable() -> None:
     _assert_storage(docs, "/var/lib/coding-agent/data")
     pod_spec = _deployment(docs)["spec"]["template"]["spec"]
     assert pod_spec["securityContext"]["fsGroup"] == 10001
+    assert pod_spec["serviceAccountName"] == "coding-agent-coding-agent"
+    assert pod_spec["automountServiceAccountToken"] is False
+    assert pod_spec["enableServiceLinks"] is False
 
     main = _container(docs)
     assert main["securityContext"] == {
@@ -145,6 +156,227 @@ def test_helm_default_runtime_contract_is_runnable() -> None:
         == "/app/src/coding_agent/agent.toml"
     )
     assert "--allow-unauthenticated" not in main["command"]
+
+
+def test_helm_default_creates_unprivileged_service_account_without_rbac() -> None:
+    docs = _render()
+
+    service_account = _service_account(docs)
+    assert service_account["apiVersion"] == "v1"
+    assert service_account["automountServiceAccountToken"] is False
+
+    assert not _objects_of_kind(docs, "Role")
+    assert not _objects_of_kind(docs, "ClusterRole")
+    assert not _objects_of_kind(docs, "RoleBinding")
+    assert not _objects_of_kind(docs, "ClusterRoleBinding")
+
+
+def test_helm_service_account_can_be_reused_without_creation() -> None:
+    docs = _render(
+        "--set",
+        "serviceAccount.create=false",
+        "--set",
+        "serviceAccount.name=existing-agent-sa",
+    )
+
+    assert not _objects_of_kind(docs, "ServiceAccount")
+    pod_spec = _deployment(docs)["spec"]["template"]["spec"]
+    assert pod_spec["serviceAccountName"] == "existing-agent-sa"
+    assert pod_spec["automountServiceAccountToken"] is False
+
+
+def test_helm_default_network_policy_limits_ingress_and_egress() -> None:
+    docs = _render()
+    policy = _network_policy(docs)
+    spec = policy["spec"]
+
+    assert spec["podSelector"]["matchLabels"] == {
+        "app.kubernetes.io/name": "coding-agent",
+        "app.kubernetes.io/instance": "coding-agent",
+    }
+    assert spec["policyTypes"] == ["Ingress", "Egress"]
+    assert spec["ingress"] == [
+        {
+            "ports": [
+                {
+                    "port": 8080,
+                    "protocol": "TCP",
+                }
+            ]
+        }
+    ]
+
+    dns_rule = spec["egress"][0]
+    assert dns_rule["to"] == [
+        {
+            "namespaceSelector": {
+                "matchLabels": {"kubernetes.io/metadata.name": "kube-system"}
+            },
+            "podSelector": {
+                "matchExpressions": [
+                    {
+                        "key": "k8s-app",
+                        "operator": "In",
+                        "values": ["kube-dns", "coredns"],
+                    }
+                ]
+            },
+        }
+    ]
+    assert dns_rule["ports"] == [
+        {"port": 53, "protocol": "UDP"},
+        {"port": 53, "protocol": "TCP"},
+    ]
+
+    https_rule = spec["egress"][1]
+    assert https_rule["to"] == [
+        {
+            "ipBlock": {
+                "cidr": "0.0.0.0/0",
+                "except": [
+                    "10.0.0.0/8",
+                    "172.16.0.0/12",
+                    "192.168.0.0/16",
+                    "100.64.0.0/10",
+                    "169.254.0.0/16",
+                    "127.0.0.0/8",
+                ],
+            }
+        }
+    ]
+    assert https_rule["ports"] == [{"port": 443, "protocol": "TCP"}]
+
+
+def test_helm_network_policy_can_be_disabled() -> None:
+    docs = _render("--set", "networkPolicy.enabled=false")
+
+    assert not _objects_of_kind(docs, "NetworkPolicy")
+
+
+def test_helm_network_policy_requires_at_least_one_direction_when_enabled() -> None:
+    result = subprocess.run(
+        [
+            _helm(),
+            "template",
+            "coding-agent",
+            str(CHART),
+            "--set",
+            "networkPolicy.ingress.enabled=false",
+            "--set",
+            "networkPolicy.egress.enabled=false",
+        ],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    assert result.returncode != 0
+    assert (
+        "networkPolicy.ingress.enabled or networkPolicy.egress.enabled must be true "
+        "when networkPolicy.enabled=true"
+    ) in result.stderr
+
+
+def test_helm_network_policy_preserves_explicit_empty_ingress_sources() -> None:
+    docs = _render("--set-json", "networkPolicy.ingress.from=[]")
+    policy = _network_policy(docs)
+
+    assert policy["spec"]["ingress"][0]["from"] == []
+
+
+def test_helm_network_policy_renders_extra_rules() -> None:
+    docs = _render(
+        "--set-json",
+        'networkPolicy.extraIngress[0]={"from":[{"namespaceSelector":{"matchLabels":{"gateway":"public"}}}],"ports":[{"protocol":"TCP","port":8080}]}',
+        "--set-json",
+        'networkPolicy.extraEgress[0]={"to":[{"ipBlock":{"cidr":"203.0.113.0/24"}}],"ports":[{"protocol":"TCP","port":8443}]}',
+    )
+    policy = _network_policy(docs)
+
+    assert policy["spec"]["ingress"][-1] == {
+        "from": [{"namespaceSelector": {"matchLabels": {"gateway": "public"}}}],
+        "ports": [{"protocol": "TCP", "port": 8080}],
+    }
+    assert policy["spec"]["egress"][-1] == {
+        "to": [{"ipBlock": {"cidr": "203.0.113.0/24"}}],
+        "ports": [{"protocol": "TCP", "port": 8443}],
+    }
+
+
+def test_helm_httproute_is_disabled_by_default() -> None:
+    docs = _render()
+
+    assert not _objects_of_kind(docs, "HTTPRoute")
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (
+            ["--set", "httpRoute.enabled=true"],
+            "httpRoute.parentRefs must be set when httpRoute.enabled=true",
+        ),
+        (
+            [
+                "--set",
+                "httpRoute.enabled=true",
+                "--set-json",
+                'httpRoute.parentRefs=[{"name":"public-gateway"}]',
+            ],
+            "httpRoute.hostnames must be set when httpRoute.enabled=true",
+        ),
+    ],
+)
+def test_helm_httproute_requires_explicit_gateway_and_hostname(
+    args: list[str], message: str
+) -> None:
+    result = subprocess.run(
+        [_helm(), "template", "coding-agent", str(CHART), *args],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    assert result.returncode != 0
+    assert message in result.stderr
+
+
+def test_helm_httproute_renders_gateway_backend_and_hostname() -> None:
+    docs = _render(
+        "--set",
+        "httpRoute.enabled=true",
+        "--set-json",
+        'httpRoute.parentRefs=[{"name":"public-gateway","namespace":"traefik"}]',
+        "--set-json",
+        'httpRoute.hostnames=["agent.example.com"]',
+    )
+    route = _object_named(docs, "HTTPRoute", "coding-agent")
+
+    assert route["apiVersion"] == "gateway.networking.k8s.io/v1"
+    assert route["spec"]["parentRefs"] == [
+        {"name": "public-gateway", "namespace": "traefik"}
+    ]
+    assert route["spec"]["hostnames"] == ["agent.example.com"]
+    assert route["spec"]["rules"] == [
+        {
+            "matches": [
+                {
+                    "path": {
+                        "type": "PathPrefix",
+                        "value": "/",
+                    }
+                }
+            ],
+            "backendRefs": [
+                {
+                    "name": "coding-agent-coding-agent",
+                    "port": 8080,
+                }
+            ],
+        }
+    ]
 
 
 def test_helm_default_configures_http_auth() -> None:

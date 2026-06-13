@@ -13,6 +13,14 @@ and secrets as operator-provided values.
   and mounts separate `workspace` and `data` PVCs.
 - The default Service is `ClusterIP` on port `8080`.
 - HTTP bearer auth is enabled by default. The chart expects an existing Secret.
+- The pod uses a dedicated ServiceAccount by default, does not mount a
+  ServiceAccount token, and the chart does not create RBAC bindings.
+- Kubernetes service environment variable injection is disabled with
+  `enableServiceLinks=false`.
+- NetworkPolicy is enabled by default. It allows inbound HTTP to the agent pod,
+  DNS to CoreDNS/kube-dns, and outbound public HTTPS while excluding private,
+  link-local, loopback, and carrier-grade NAT ranges.
+- HTTPRoute support is optional and disabled by default.
 
 ## Required Operator Decisions
 
@@ -31,6 +39,41 @@ Fill these before live deployment:
   - Kimi values: `provider=kimi-code`, `model=kimi-for-coding`
 - Provider Secret values, if required by the selected provider
 - Storage class and PVC sizes, if the cluster default is not acceptable
+- CNI NetworkPolicy enforcement. Do not treat rendered NetworkPolicy objects as
+  an isolation boundary until the target cluster is confirmed to enforce them.
+- Resource requests and limits for shared clusters.
+- Gateway API and HTTPRoute parentRefs, if the chart is responsible for the
+  public route.
+
+## Shared Or Public Cluster Prerequisites
+
+Do not deploy the unauthenticated Orbstack values to a public or shared cluster:
+they are only for local development and intentionally set
+`server.allowUnauthenticated=true`.
+
+Before deploying to a shared cluster:
+
+- Confirm the CNI enforces Kubernetes NetworkPolicy. A cluster may accept
+  NetworkPolicy manifests without enforcing them.
+- Set resource requests and limits. The default chart leaves `resources` empty
+  so operators can choose values that match the target node.
+- Keep the generated ServiceAccount unprivileged. The chart does not create
+  Role, ClusterRole, RoleBinding, or ClusterRoleBinding resources.
+- Keep `automountServiceAccountToken=false` unless there is a reviewed reason to
+  let the pod call the Kubernetes API.
+- If `httpRoute.enabled=true`, ensure the Gateway API CRDs exist and TLS is
+  terminated by the Gateway, Traefik, or another reviewed edge component.
+- If the provider endpoint, proxy, or dependency is on a private CIDR, add a
+  narrow `networkPolicy.extraEgress` rule for that destination. The default
+  public HTTPS rule intentionally excludes private address ranges, including
+  `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`,
+  `169.254.0.0/16`, and `127.0.0.0/8`.
+- The default `networkPolicy.ingress.from=null` allows any pod source to the
+  agent HTTP port. For shared clusters, prefer setting this to the Gateway or
+  ingress-controller namespace/pod selector; set it to `[]` only when you want
+  the NetworkPolicy to deny all pod-network ingress.
+- If the target cluster cannot enforce NetworkPolicy, do not count it as a safe
+  shared-cluster deployment target for this service.
 
 ## Build And Publish
 
@@ -91,7 +134,9 @@ helm --kube-context <kube-context> upgrade --install coding-agent ./helm \
   --namespace coding-agent \
   --set image.repository='<registry>/<namespace>/coding-agent' \
   --set image.tag='<image-tag>' \
-  --set-json cors.origins='["https://<agent-domain>"]'
+  --set-json cors.origins='["https://<agent-domain>"]' \
+  --set-json resources.requests='{"cpu":"250m","memory":"512Mi"}' \
+  --set-json resources.limits='{"cpu":"1","memory":"2Gi"}'
 ```
 
 Kimi provider:
@@ -104,7 +149,9 @@ helm --kube-context <kube-context> upgrade --install coding-agent ./helm \
   --set image.tag='<image-tag>' \
   --set server.auth.enabled=true \
   --set server.allowUnauthenticated=false \
-  --set-json cors.origins='["https://<agent-domain>"]'
+  --set-json cors.origins='["https://<agent-domain>"]' \
+  --set-json resources.requests='{"cpu":"250m","memory":"512Mi"}' \
+  --set-json resources.limits='{"cpu":"1","memory":"2Gi"}'
 ```
 
 If the target cluster has no default storage class, set PVC classes explicitly:
@@ -112,6 +159,22 @@ If the target cluster has no default storage class, set PVC classes explicitly:
 ```bash
 --set persistence.workspace.storageClassName='<storage-class>' \
 --set persistence.data.storageClassName='<storage-class>'
+```
+
+If the chart should render the Gateway API route, provide the parent Gateway and
+hostname explicitly:
+
+```bash
+--set httpRoute.enabled=true \
+--set-json httpRoute.parentRefs='[{"name":"<gateway-name>","namespace":"<gateway-namespace>"}]' \
+--set-json httpRoute.hostnames='["<agent-domain>"]'
+```
+
+If a private provider endpoint or egress proxy is required, add only that
+destination:
+
+```bash
+--set-json networkPolicy.extraEgress='[{"to":[{"ipBlock":{"cidr":"<provider-or-proxy-cidr>"}}],"ports":[{"protocol":"TCP","port":443}]}]'
 ```
 
 ## Health Checks

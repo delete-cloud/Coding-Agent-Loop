@@ -1,0 +1,63 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- if and (not .Values.networkPolicy.ingress.enabled) (not .Values.networkPolicy.egress.enabled) }}
+{{- fail "networkPolicy.ingress.enabled or networkPolicy.egress.enabled must be true when networkPolicy.enabled=true" }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "coding-agent.fullname" . }}
+  labels:
+    {{- include "coding-agent.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "coding-agent.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    {{- if .Values.networkPolicy.ingress.enabled }}
+    - Ingress
+    {{- end }}
+    {{- if .Values.networkPolicy.egress.enabled }}
+    - Egress
+    {{- end }}
+  {{- if .Values.networkPolicy.ingress.enabled }}
+  ingress:
+    - ports:
+        - port: {{ .Values.server.port }}
+          protocol: TCP
+      {{- if ne .Values.networkPolicy.ingress.from nil }}
+      from:
+        {{- toYaml .Values.networkPolicy.ingress.from | nindent 8 }}
+      {{- end }}
+    {{- range .Values.networkPolicy.extraIngress }}
+    - {{- toYaml . | nindent 6 }}
+    {{- end }}
+  {{- end }}
+  {{- if .Values.networkPolicy.egress.enabled }}
+  egress:
+    {{- if .Values.networkPolicy.egress.dns.enabled }}
+    - to:
+        - namespaceSelector:
+            {{- toYaml .Values.networkPolicy.egress.dns.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml .Values.networkPolicy.egress.dns.podSelector | nindent 12 }}
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    {{- end }}
+    {{- if .Values.networkPolicy.egress.publicHttps.enabled }}
+    - to:
+        - ipBlock:
+            cidr: {{ .Values.networkPolicy.egress.publicHttps.cidr | quote }}
+            except:
+              {{- toYaml .Values.networkPolicy.egress.publicHttps.except | nindent 14 }}
+      ports:
+        - port: 443
+          protocol: TCP
+    {{- end }}
+    {{- range .Values.networkPolicy.extraEgress }}
+    - {{- toYaml . | nindent 6 }}
+    {{- end }}
+  {{- end }}
+{{- end }}
