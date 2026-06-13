@@ -39,23 +39,22 @@ if ! command -v helm >/dev/null 2>&1; then
   exit 2
 fi
 
-helm_args="
-upgrade --install ${HELM_RELEASE} ${HELM_CHART_DIR}
---namespace ${K8S_NAMESPACE}
---values ${HELM_VALUES}
---set image.repository=${IMAGE_REPOSITORY}
---set image.tag=${IMAGE_TAG}
---wait
---timeout ${ROLLOUT_TIMEOUT}
-"
+set -- \
+  upgrade --install "$HELM_RELEASE" "$HELM_CHART_DIR" \
+  --namespace "$K8S_NAMESPACE" \
+  --values "$HELM_VALUES" \
+  --set "image.repository=${IMAGE_REPOSITORY}" \
+  --set "image.tag=${IMAGE_TAG}" \
+  --wait \
+  --timeout "$ROLLOUT_TIMEOUT"
 
 if [ "$HELM_DEPLOY_MODE" = "dry-run" ]; then
   # Default mode proves the rendered release without mutating the cluster.
-  helm $helm_args --dry-run=client
+  helm "$@" --dry-run=client
   exit 0
 fi
 
-helm $helm_args
+helm "$@"
 
 kubectl -n "$K8S_NAMESPACE" rollout status \
   "deployment/${K8S_DEPLOYMENT}" \

@@ -101,3 +101,5 @@ def test_woodpecker_builds_deploy_tools_image_used_by_manual_deploy() -> None:
     assert "kubectl.sha256" in dockerfile
     assert "helm.tgz.sha256sum" in dockerfile
     assert "sha256sum -c -" in dockerfile
+    assert "ENV HOME=/home/deploy" in dockerfile
+    assert "USER 10001:10001" in dockerfile

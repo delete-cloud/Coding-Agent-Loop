@@ -99,9 +99,9 @@ agent:
 
 observability:
   enabled: false
-  backend: ""
-  endpoint: ""
-  endpointEnv: ""
+  backend: null
+  endpoint: null
+  endpointEnv: null
   timeoutSeconds: 2.0
   headers: {}
   publicKeyEnv: LANGFUSE_PUBLIC_KEY

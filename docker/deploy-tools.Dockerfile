@@ -28,4 +28,9 @@ RUN set -eux; \
     mv "/tmp/linux-${arch}/helm" /usr/local/bin/helm; \
     chmod 0755 /usr/local/bin/helm; \
     rm -rf /tmp/kubectl /tmp/kubectl.sha256 /tmp/helm.tgz /tmp/helm.tgz.sha256sum "/tmp/linux-${arch}"; \
+    groupadd --gid 10001 deploy; \
+    useradd --uid 10001 --gid 10001 --create-home --home-dir /home/deploy --shell /usr/sbin/nologin deploy; \
     rm -rf /var/lib/apt/lists/*
+
+ENV HOME=/home/deploy
+USER 10001:10001
