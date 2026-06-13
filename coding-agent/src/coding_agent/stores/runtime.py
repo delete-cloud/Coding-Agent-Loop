@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
-from coding_agent.runtime_store import (
+from coding_agent.stores.runtime_store import (
     AgentInteractionRecord,
     AgentRunRecord,
     JSONObject,
