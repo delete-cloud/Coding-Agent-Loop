@@ -12,6 +12,8 @@ and secrets as operator-provided values.
 - The Helm chart runs as UID/GID `10001`, uses native sandbox mode by default,
   and mounts separate `workspace` and `data` PVCs.
 - The default Service is `ClusterIP` on port `8080`.
+- `service.nodePort` is supported for existing NodePort deployments and is only
+  rendered when `service.type=NodePort`.
 - HTTP bearer auth is enabled by default. The chart expects an existing Secret.
 - The pod uses a dedicated ServiceAccount by default, does not mount a
   ServiceAccount token, and the chart does not create RBAC bindings.
@@ -176,6 +178,26 @@ destination:
 ```bash
 --set-json networkPolicy.extraEgress='[{"to":[{"ipBlock":{"cidr":"<provider-or-proxy-cidr>"}}],"ports":[{"protocol":"TCP","port":443}]}]'
 ```
+
+## Existing o6n DeepSeek Values
+
+`helm/values-o6n-deepseek.yaml` captures the non-secret runtime configuration
+for the existing o6n DeepSeek instance:
+
+- Forgejo registry image repository: `git.mesh.kinaz.me/kina/coding-agent`
+- namespace/release-compatible Service name through the chart fullname
+- NodePort `30082`
+- provider/model: `deepseek` / `deepseek-chat`
+- runtime Secret references: `coding-agent-deepseek` and `coding-agent-langfuse`
+- API bearer token Secret reference: `coding-agent-coding-agent-api-key` key
+  `api-key`
+- Langfuse OTLP endpoint reference: `LANGFUSE_BASE_URL` from
+  `coding-agent-langfuse`
+- a narrow NetworkPolicy egress exception for the mesh Langfuse endpoint
+
+The file must not contain token values. If these Secrets are managed by
+SealedSecrets in the SRE repo, keep using SealedSecrets for the Secret manifests
+and keep this chart values file limited to names and keys.
 
 ## Health Checks
 

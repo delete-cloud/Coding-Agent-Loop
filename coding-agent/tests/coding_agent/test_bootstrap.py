@@ -197,6 +197,30 @@ enabled = ["topic"]
                 api_key="sk-test",
             )
 
+    def test_agent_base_url_flows_to_llm_provider_plugin(self, tmp_path):
+        config_path = tmp_path / "agent.toml"
+        config_path.write_text(
+            """
+[agent]
+name = "test-agent"
+model = "deepseek-chat"
+provider = "deepseek"
+base_url = "https://llm-proxy.example/v1"
+
+[agent.plugins]
+enabled = ["llm_provider"]
+""".strip()
+        )
+
+        pipeline, _ = create_agent(
+            config_path=config_path,
+            data_dir=tmp_path / "data",
+            api_key="sk-test",
+        )
+
+        plugin = pipeline._registry.get("llm_provider")
+        assert plugin._base_url == "https://llm-proxy.example/v1"
+
     def test_kb_plugin_requires_explicit_enablement(self, tmp_path):
         config_path = tmp_path / "agent.toml"
         config_path.write_text(

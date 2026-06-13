@@ -1,5 +1,4 @@
 import pytest
-from pathlib import Path
 from agentkit.config.loader import load_config, AgentConfig
 from agentkit.errors import ConfigError
 
@@ -23,6 +22,7 @@ class TestAgentConfig:
         assert cfg.system_prompt == ""
         assert cfg.plugins == []
         assert cfg.max_turns == 30
+        assert cfg.base_url is None
 
 
 class TestLoadConfig:
@@ -95,3 +95,19 @@ timeout = 7.5
         cfg = load_config(toml_file)
 
         assert cfg.extra["subagent"]["timeout"] == 7.5
+
+    def test_load_toml_exposes_agent_base_url(self, tmp_path):
+        toml_file = tmp_path / "agent.toml"
+        toml_file.write_text(
+            """
+[agent]
+name = "test-agent"
+model = "deepseek-chat"
+provider = "deepseek"
+base_url = "https://llm-proxy.example/v1"
+""".strip()
+        )
+
+        cfg = load_config(toml_file)
+
+        assert cfg.base_url == "https://llm-proxy.example/v1"

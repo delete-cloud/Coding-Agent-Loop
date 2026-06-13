@@ -20,6 +20,7 @@ class AgentConfig:
     system_prompt: str = ""
     plugins: list[str] = field(default_factory=list)
     max_turns: int = 30
+    base_url: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -57,5 +58,6 @@ def load_config(path: Path) -> AgentConfig:
         system_prompt=agent.get("system_prompt", ""),
         plugins=plugins,
         max_turns=agent.get("max_turns", 30),
+        base_url=agent.get("base_url"),
         extra=extra,
     )

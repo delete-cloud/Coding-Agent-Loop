@@ -10,6 +10,9 @@ data:
     name = "coding-agent"
     model = {{ .Values.agent.config.model | quote }}
     provider = {{ .Values.agent.config.provider | quote }}
+    {{- if .Values.agent.config.baseUrl }}
+    base_url = {{ .Values.agent.config.baseUrl | quote }}
+    {{- end }}
     system_prompt = """You are a skilled coding assistant. You help users write, debug, and improve code.
     You have access to file operations, shell commands, and search tools.
     Always explain your reasoning before making changes."""
@@ -30,7 +33,6 @@ data:
       "approval",
       "doom_detector",
       "parallel_executor",
-      "topic",
       "summarizer",
       "memory",
       "session_metrics",
@@ -74,3 +76,29 @@ data:
     [topic]
     overlap_threshold = 0.2
     min_entries_before_detect = 4
+
+    {{- if .Values.observability.enabled }}
+    [observability]
+    enabled = true
+    backend = {{ required "observability.backend is required when observability.enabled=true" .Values.observability.backend | quote }}
+    {{- if and .Values.observability.endpoint .Values.observability.endpointEnv }}
+    {{- fail "observability.endpoint and observability.endpointEnv cannot both be set" }}
+    {{- end }}
+    {{- if .Values.observability.endpoint }}
+    endpoint = {{ required "observability.endpoint is required when observability.enabled=true" .Values.observability.endpoint | quote }}
+    {{- else if .Values.observability.endpointEnv }}
+    endpoint_env = {{ .Values.observability.endpointEnv | quote }}
+    {{- else }}
+    {{- fail "observability.endpoint or observability.endpointEnv is required when observability.enabled=true" }}
+    {{- end }}
+    timeout_seconds = {{ .Values.observability.timeoutSeconds }}
+    public_key_env = {{ .Values.observability.publicKeyEnv | quote }}
+    secret_key_env = {{ .Values.observability.secretKeyEnv | quote }}
+    {{- with .Values.observability.headers }}
+
+    [observability.headers]
+    {{- range $key, $value := . }}
+    {{ $key | quote }} = {{ $value | quote }}
+    {{- end }}
+    {{- end }}
+    {{- end }}

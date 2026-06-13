@@ -218,6 +218,7 @@ def create_child_pipeline(
         cfg.model = model_override
     if provider_override:
         cfg.provider = provider_override
+    resolved_base_url = base_url_override or env_base_url or cfg.base_url
     if max_steps_override is not None:
         cfg.max_turns = max_steps_override
     cfg.system_prompt += _child_system_prompt_suffix(tool_filter)
@@ -311,7 +312,7 @@ def create_child_pipeline(
             provider=cfg.provider,
             model=cfg.model,
             api_key=resolved_key,
-            base_url=base_url_override or env_base_url,
+            base_url=resolved_base_url,
             parent_provider=parent_provider,
         ),
         "storage": lambda: StoragePlugin(data_dir=data_dir, config=storage_cfg),

@@ -10,6 +10,8 @@ from typing import Any
 import pytest
 import yaml
 
+from coding_agent.__main__ import create_agent
+
 
 ROOT = Path(__file__).resolve().parents[2]
 CHART = ROOT / "helm"
@@ -79,6 +81,13 @@ def _agent_toml(docs: list[dict[str, Any]]) -> dict[str, Any]:
     return tomllib.loads(config["data"]["agent.toml"])
 
 
+def _agent_toml_text(docs: list[dict[str, Any]]) -> str:
+    config = _object_named(docs, "ConfigMap", "-agent-config")
+    value = config["data"]["agent.toml"]
+    assert isinstance(value, str)
+    return value
+
+
 def _env_var(container: dict[str, Any], name: str) -> dict[str, Any]:
     for item in container.get("env", []):
         if item.get("name") == name:
@@ -122,6 +131,7 @@ def test_helm_chart_lints() -> None:
         None,
         "values-orbstack.yaml",
         "values-orbstack-kimi.yaml",
+        "values-o6n-deepseek.yaml",
     ],
 )
 def test_helm_values_render(values_file: str | None) -> None:
@@ -476,6 +486,80 @@ def test_helm_service_port_override_keeps_app_port() -> None:
         _command_option(main["command"], "--config")
         == "/app/src/coding_agent/agent.toml"
     )
+
+
+def test_helm_agent_base_url_override_is_rendered() -> None:
+    docs = _render("--set", "agent.config.baseUrl=https://llm-proxy.example/v1")
+
+    assert _agent_toml(docs)["agent"]["base_url"] == "https://llm-proxy.example/v1"
+
+
+def test_helm_o6n_deepseek_values_preserve_live_runtime_contract() -> None:
+    docs = _render("-f", str(CHART / "values-o6n-deepseek.yaml"))
+
+    service = _service(docs)
+    assert service["spec"]["type"] == "NodePort"
+    assert service["spec"]["ports"][0] == {
+        "name": "http",
+        "port": 8080,
+        "targetPort": "http",
+        "protocol": "TCP",
+        "nodePort": 30082,
+    }
+
+    main = _container(docs)
+    assert main["image"] == "git.mesh.kinaz.me/kina/coding-agent:main"
+    assert main["envFrom"] == [
+        {"secretRef": {"name": "coding-agent-deepseek"}},
+        {"secretRef": {"name": "coding-agent-langfuse"}},
+    ]
+    assert _env_var(main, "CODING_AGENT_API_KEY")["valueFrom"]["secretKeyRef"] == {
+        "name": "coding-agent-coding-agent-api-key",
+        "key": "api-key",
+    }
+
+    config = _agent_toml(docs)
+    assert config["agent"]["provider"] == "deepseek"
+    assert config["agent"]["model"] == "deepseek-chat"
+    assert config["server"]["bearer_token_env"] == "CODING_AGENT_API_KEY"
+    assert config["observability"] == {
+        "enabled": True,
+        "backend": "langfuse",
+        "endpoint_env": "LANGFUSE_BASE_URL",
+        "timeout_seconds": 2,
+        "public_key_env": "LANGFUSE_PUBLIC_KEY",
+        "secret_key_env": "LANGFUSE_SECRET_KEY",
+    }
+
+    policy = _network_policy(docs)
+    assert policy["spec"]["egress"][-1] == {
+        "to": [{"ipBlock": {"cidr": "100.123.220.136/32"}}],
+        "ports": [{"protocol": "TCP", "port": 443}],
+    }
+
+
+def test_helm_o6n_deepseek_config_bootstraps_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    docs = _render("-f", str(CHART / "values-o6n-deepseek.yaml"))
+    config_path = tmp_path / "agent.toml"
+    config_path.write_text(_agent_toml_text(docs), encoding="utf-8")
+    monkeypatch.setenv(
+        "LANGFUSE_BASE_URL", "https://langfuse.example.test/api/public/otel"
+    )
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
+
+    pipeline, _ = create_agent(
+        config_path=config_path,
+        data_dir=tmp_path / "data",
+        workspace_root=tmp_path / "workspace",
+        api_key="sk-test",
+    )
+
+    assert "topic" not in pipeline._registry.plugin_ids()
+    assert "llm_provider" in pipeline._registry.plugin_ids()
 
 
 def test_helm_workspace_mount_override_sets_working_dir() -> None:

@@ -29,6 +29,7 @@ command: []
 service:
   type: ClusterIP
   port: 8080
+  nodePort: null
 
 enableServiceLinks: false
 
@@ -86,6 +87,7 @@ agent:
   config:
     model: gpt-4.1
     provider: copilot
+    baseUrl: null
     approvalPolicy: auto
     maxTurns: 30
     subagentTimeout: 30.0
@@ -94,6 +96,16 @@ agent:
       cpuLimitSeconds: 10
       memoryLimitMb: null
       dockerImage: python:3.11-slim
+
+observability:
+  enabled: false
+  backend: null
+  endpoint: null
+  endpointEnv: null
+  timeoutSeconds: 2.0
+  headers: {}
+  publicKeyEnv: LANGFUSE_PUBLIC_KEY
+  secretKeyEnv: LANGFUSE_SECRET_KEY
 
 probes:
   readiness:

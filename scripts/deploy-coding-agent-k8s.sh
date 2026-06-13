@@ -9,9 +9,19 @@ K8S_CONTAINER="${K8S_CONTAINER:-coding-agent}"
 K8S_SERVICE="${K8S_SERVICE:-$K8S_DEPLOYMENT}"
 ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-180s}"
 ENABLE_POD_HEALTH_SMOKE="${ENABLE_POD_HEALTH_SMOKE:-1}"
+HELM_RELEASE="${HELM_RELEASE:-coding-agent}"
+HELM_CHART_DIR="${HELM_CHART_DIR:-coding-agent/helm}"
+HELM_VALUES="${HELM_VALUES:-coding-agent/helm/values-o6n-deepseek.yaml}"
+HELM_DEPLOY_MODE="${HELM_DEPLOY_MODE:-dry-run}"
+HELM_DRIVER="${HELM_DRIVER:-configmap}"
 
 if [ -z "$IMAGE_TAG" ]; then
   printf '%s\n' "IMAGE_TAG or CI_COMMIT_SHA is required" >&2
+  exit 2
+fi
+
+if [ "$HELM_DEPLOY_MODE" != "dry-run" ] && [ "$HELM_DEPLOY_MODE" != "apply" ]; then
+  printf '%s\n' "HELM_DEPLOY_MODE must be dry-run or apply" >&2
   exit 2
 fi
 
@@ -22,11 +32,29 @@ if [ -n "${KUBECONFIG_CONTENT:-}" ]; then
   export KUBECONFIG="$kubeconfig_file"
 fi
 
-image="${IMAGE_REPOSITORY}:${IMAGE_TAG}"
+export HELM_DRIVER
 
-kubectl -n "$K8S_NAMESPACE" set image \
-  "deployment/${K8S_DEPLOYMENT}" \
-  "${K8S_CONTAINER}=${image}"
+if ! command -v helm >/dev/null 2>&1; then
+  printf '%s\n' "helm is required for coding-agent deploy" >&2
+  exit 2
+fi
+
+set -- \
+  upgrade --install "$HELM_RELEASE" "$HELM_CHART_DIR" \
+  --namespace "$K8S_NAMESPACE" \
+  --values "$HELM_VALUES" \
+  --set "image.repository=${IMAGE_REPOSITORY}" \
+  --set "image.tag=${IMAGE_TAG}" \
+  --wait \
+  --timeout "$ROLLOUT_TIMEOUT"
+
+if [ "$HELM_DEPLOY_MODE" = "dry-run" ]; then
+  # Default mode proves the rendered release without mutating the cluster.
+  helm "$@" --dry-run=client
+  exit 0
+fi
+
+helm "$@"
 
 kubectl -n "$K8S_NAMESPACE" rollout status \
   "deployment/${K8S_DEPLOYMENT}" \

@@ -4,7 +4,7 @@ when:
 
 steps:
   deploy-o6n:
-    image: git.mesh.kinaz.me/kina/coding-agent-deploy-tools:kubectl-1.36.0-python-3.12-slim
+    image: git.mesh.kinaz.me/kina/coding-agent-deploy-tools:kubectl-1.36.0-helm-3.17.3-python-3.12-slim
     environment:
       KUBECONFIG_CONTENT:
         from_secret: kubeconfig
@@ -15,5 +15,10 @@ steps:
       K8S_CONTAINER: coding-agent
       ROLLOUT_TIMEOUT: 420s
       ENABLE_POD_HEALTH_SMOKE: "1"
+      HELM_RELEASE: coding-agent
+      HELM_CHART_DIR: coding-agent/helm
+      HELM_VALUES: coding-agent/helm/values-o6n-deepseek.yaml
+      HELM_DEPLOY_MODE: dry-run
+      HELM_DRIVER: configmap
     commands:
       - ./scripts/deploy-coding-agent-k8s.sh
