@@ -68,6 +68,10 @@ Before deploying to a shared cluster:
   public HTTPS rule intentionally excludes private address ranges, including
   `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`,
   `169.254.0.0/16`, and `127.0.0.0/8`.
+- The default `networkPolicy.ingress.from=null` allows any pod source to the
+  agent HTTP port. For shared clusters, prefer setting this to the Gateway or
+  ingress-controller namespace/pod selector; set it to `[]` only when you want
+  the NetworkPolicy to deny all pod-network ingress.
 - If the target cluster cannot enforce NetworkPolicy, do not count it as a safe
   shared-cluster deployment target for this service.
 

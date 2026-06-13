@@ -42,7 +42,9 @@ networkPolicy:
   enabled: true
   ingress:
     enabled: true
-    from: []
+    # null allows any source to the HTTP port. Set [] to deny all ingress or
+    # provide NetworkPolicyPeer entries to allow only a gateway/controller.
+    from: null
   egress:
     enabled: true
     dns:

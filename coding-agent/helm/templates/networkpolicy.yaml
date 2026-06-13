@@ -24,9 +24,9 @@ spec:
     - ports:
         - port: {{ .Values.server.port }}
           protocol: TCP
-      {{- with .Values.networkPolicy.ingress.from }}
+      {{- if ne .Values.networkPolicy.ingress.from nil }}
       from:
-        {{- toYaml . | nindent 8 }}
+        {{- toYaml .Values.networkPolicy.ingress.from | nindent 8 }}
       {{- end }}
     {{- range .Values.networkPolicy.extraIngress }}
     - {{- toYaml . | nindent 6 }}

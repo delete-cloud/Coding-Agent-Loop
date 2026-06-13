@@ -278,6 +278,13 @@ def test_helm_network_policy_requires_at_least_one_direction_when_enabled() -> N
     ) in result.stderr
 
 
+def test_helm_network_policy_preserves_explicit_empty_ingress_sources() -> None:
+    docs = _render("--set-json", "networkPolicy.ingress.from=[]")
+    policy = _network_policy(docs)
+
+    assert policy["spec"]["ingress"][0]["from"] == []
+
+
 def test_helm_network_policy_renders_extra_rules() -> None:
     docs = _render(
         "--set-json",
