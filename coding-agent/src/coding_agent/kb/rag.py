@@ -251,6 +251,11 @@ def _repo_retrieval_initial_fetch_k(k: int, max_fetch_k: int) -> int:
     return min(max(k * 4, k), max_fetch_k)
 
 
+def _compat_package_value(name: str, default: int) -> int:
+    kb_package = sys.modules.get("coding_agent.kb")
+    return getattr(kb_package, name, default)
+
+
 def _search_result_from_row(row: dict[str, Any]) -> KBSearchResult:
     import json
 
@@ -952,7 +957,9 @@ class KB:
 
         # With progress bar
         console = Console(stderr=True)  # Write progress to stderr
-        progress = Progress(
+        kb_package = sys.modules.get("coding_agent.kb")
+        progress_cls = getattr(kb_package, "Progress", Progress)
+        progress = progress_cls(
             SpinnerColumn(),
             TextColumn("[bold blue]{task.description}"),
             BarColumn(complete_style="green", finished_style="green"),
@@ -1053,17 +1060,19 @@ class KB:
     ) -> list[RepoRetrievalResult]:
         if not query.strip() or k <= 0:
             return []
-        if k > _MAX_REPO_RETRIEVAL_FETCH_K:
-            raise ValueError(
-                f"k must be less than or equal to {_MAX_REPO_RETRIEVAL_FETCH_K}"
-            )
+        max_fetch_k = _compat_package_value(
+            "_MAX_REPO_RETRIEVAL_FETCH_K",
+            _MAX_REPO_RETRIEVAL_FETCH_K,
+        )
+        if k > max_fetch_k:
+            raise ValueError(f"k must be less than or equal to {max_fetch_k}")
         if not self.has_table():
             return []
 
         table = self._get_table()
         embeddings = await self._embed([query])
         query_vector = embeddings[0]
-        fetch_k = _repo_retrieval_initial_fetch_k(k, _MAX_REPO_RETRIEVAL_FETCH_K)
+        fetch_k = _repo_retrieval_initial_fetch_k(k, max_fetch_k)
         corpus_filter = _corpus_filter(corpora)
 
         while True:
@@ -1073,13 +1082,9 @@ class KB:
             rows = search.limit(fetch_k).to_list()
             fetched = [_search_result_from_row(row) for row in rows]
             repo_results = _repo_retrieval_results(fetched, k=k)
-            if (
-                len(repo_results) >= k
-                or len(rows) < fetch_k
-                or fetch_k >= _MAX_REPO_RETRIEVAL_FETCH_K
-            ):
+            if len(repo_results) >= k or len(rows) < fetch_k or fetch_k >= max_fetch_k:
                 return repo_results
-            fetch_k = min(fetch_k * 2, _MAX_REPO_RETRIEVAL_FETCH_K)
+            fetch_k = min(fetch_k * 2, max_fetch_k)
 
     async def search_test_failures(
         self,
@@ -1090,17 +1095,19 @@ class KB:
     ) -> list[TestFailureRetrievalResult]:
         if not query.strip() or k <= 0:
             return []
-        if k > _MAX_FAILURE_RETRIEVAL_FETCH_K:
-            raise ValueError(
-                f"k must be less than or equal to {_MAX_FAILURE_RETRIEVAL_FETCH_K}"
-            )
+        max_fetch_k = _compat_package_value(
+            "_MAX_FAILURE_RETRIEVAL_FETCH_K",
+            _MAX_FAILURE_RETRIEVAL_FETCH_K,
+        )
+        if k > max_fetch_k:
+            raise ValueError(f"k must be less than or equal to {max_fetch_k}")
         if not self.has_table():
             return []
 
         table = self._get_table()
         embeddings = await self._embed([query])
         query_vector = embeddings[0]
-        fetch_k = _repo_retrieval_initial_fetch_k(k, _MAX_FAILURE_RETRIEVAL_FETCH_K)
+        fetch_k = _repo_retrieval_initial_fetch_k(k, max_fetch_k)
         corpus_filter = _corpus_filter(corpora)
 
         while True:
@@ -1113,10 +1120,10 @@ class KB:
             if (
                 len(failure_results) >= k
                 or len(rows) < fetch_k
-                or fetch_k >= _MAX_FAILURE_RETRIEVAL_FETCH_K
+                or fetch_k >= max_fetch_k
             ):
                 return failure_results
-            fetch_k = min(fetch_k * 2, _MAX_FAILURE_RETRIEVAL_FETCH_K)
+            fetch_k = min(fetch_k * 2, max_fetch_k)
 
     def search_sync(
         self,
