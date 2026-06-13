@@ -1030,56 +1030,95 @@ def test_otlp_sink_fail_opens_when_export_fails() -> None:
 
 
 def test_build_observation_sink_builds_otlp_http_sink() -> None:
-    sink = build_observation_sink({
-        "enabled": True,
-        "backend": "otlp_http",
-        "endpoint": "https://otel.example.test/api/public/otel",
-        "headers": {"x-test": "yes"},
-    })
+    sink = build_observation_sink(
+        {
+            "enabled": True,
+            "backend": "otlp_http",
+            "endpoint": "https://otel.example.test/api/public/otel",
+            "headers": {"x-test": "yes"},
+        }
+    )
 
     assert isinstance(sink, OtlpHttpObservationSink)
     assert sink.endpoint == "https://otel.example.test/api/public/otel/v1/traces"
 
 
-def test_build_observation_sink_supports_tracing_only() -> None:
-    sink = build_observation_sink({
-        "enabled": True,
-        "tracing": {
+def test_build_observation_sink_supports_endpoint_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OTEL_ENDPOINT", "https://otel-env.example.test/api/public/otel")
+
+    sink = build_observation_sink(
+        {
             "enabled": True,
             "backend": "otlp_http",
-            "endpoint": "https://otel.example.test/api/public/otel",
-        },
-    })
+            "endpoint_env": "OTEL_ENDPOINT",
+        }
+    )
+
+    assert isinstance(sink, OtlpHttpObservationSink)
+    assert sink.endpoint == "https://otel-env.example.test/api/public/otel/v1/traces"
+
+
+def test_build_observation_sink_rejects_ambiguous_endpoint_config() -> None:
+    with pytest.raises(
+        ValueError, match="endpoint and endpoint_env cannot both be set"
+    ):
+        build_observation_sink(
+            {
+                "enabled": True,
+                "backend": "otlp_http",
+                "endpoint": "https://otel.example.test/api/public/otel",
+                "endpoint_env": "OTEL_ENDPOINT",
+            }
+        )
+
+
+def test_build_observation_sink_supports_tracing_only() -> None:
+    sink = build_observation_sink(
+        {
+            "enabled": True,
+            "tracing": {
+                "enabled": True,
+                "backend": "otlp_http",
+                "endpoint": "https://otel.example.test/api/public/otel",
+            },
+        }
+    )
 
     assert isinstance(sink, OtlpHttpObservationSink)
     assert sink.endpoint == "https://otel.example.test/api/public/otel/v1/traces"
 
 
 def test_build_observation_sink_supports_metrics_only() -> None:
-    sink = build_observation_sink({
-        "enabled": True,
-        "metrics": {
+    sink = build_observation_sink(
+        {
             "enabled": True,
-            "backend": "prometheus",
-        },
-    })
+            "metrics": {
+                "enabled": True,
+                "backend": "prometheus",
+            },
+        }
+    )
 
     assert isinstance(sink, PrometheusMetricsObservationSink)
 
 
 def test_build_observation_sink_supports_tracing_and_metrics() -> None:
-    sink = build_observation_sink({
-        "enabled": True,
-        "tracing": {
+    sink = build_observation_sink(
+        {
             "enabled": True,
-            "backend": "otlp_http",
-            "endpoint": "https://otel.example.test/api/public/otel",
-        },
-        "metrics": {
-            "enabled": True,
-            "backend": "prometheus",
-        },
-    })
+            "tracing": {
+                "enabled": True,
+                "backend": "otlp_http",
+                "endpoint": "https://otel.example.test/api/public/otel",
+            },
+            "metrics": {
+                "enabled": True,
+                "backend": "prometheus",
+            },
+        }
+    )
 
     assert isinstance(sink, CompositeObservationSink)
     assert len(sink.sinks) == 2
@@ -1090,15 +1129,17 @@ def test_build_observation_sink_supports_tracing_and_metrics() -> None:
 def test_build_observation_sink_preserves_flat_tracing_when_metrics_are_nested() -> (
     None
 ):
-    sink = build_observation_sink({
-        "enabled": True,
-        "backend": "otlp_http",
-        "endpoint": "https://otel.example.test/api/public/otel",
-        "metrics": {
+    sink = build_observation_sink(
+        {
             "enabled": True,
-            "backend": "prometheus",
-        },
-    })
+            "backend": "otlp_http",
+            "endpoint": "https://otel.example.test/api/public/otel",
+            "metrics": {
+                "enabled": True,
+                "backend": "prometheus",
+            },
+        }
+    )
 
     assert isinstance(sink, CompositeObservationSink)
     assert len(sink.sinks) == 2
@@ -1116,11 +1157,13 @@ def test_build_observation_sink_returns_none_when_disabled() -> None:
 def test_build_observation_sink_returns_noop_when_all_nested_backends_disabled() -> (
     None
 ):
-    sink = build_observation_sink({
-        "enabled": True,
-        "tracing": {"enabled": False},
-        "metrics": {"enabled": False},
-    })
+    sink = build_observation_sink(
+        {
+            "enabled": True,
+            "tracing": {"enabled": False},
+            "metrics": {"enabled": False},
+        }
+    )
 
     assert isinstance(sink, NoopObservationSink)
 
@@ -1131,11 +1174,13 @@ def test_build_observation_sink_builds_langfuse_basic_auth(
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
 
-    sink = build_observation_sink({
-        "enabled": True,
-        "backend": "langfuse",
-        "endpoint": "https://cloud.langfuse.com/api/public/otel",
-    })
+    sink = build_observation_sink(
+        {
+            "enabled": True,
+            "backend": "langfuse",
+            "endpoint": "https://cloud.langfuse.com/api/public/otel",
+        }
+    )
 
     assert isinstance(sink, OtlpHttpObservationSink)
     encoded = base64.b64encode(b"pk-test:sk-test").decode("ascii")
@@ -1149,8 +1194,10 @@ def test_build_observation_sink_rejects_missing_langfuse_secret(
     monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
 
     with pytest.raises(ValueError, match="LANGFUSE_SECRET_KEY"):
-        build_observation_sink({
-            "enabled": True,
-            "backend": "langfuse",
-            "endpoint": "https://cloud.langfuse.com/api/public/otel",
-        })
+        build_observation_sink(
+            {
+                "enabled": True,
+                "backend": "langfuse",
+                "endpoint": "https://cloud.langfuse.com/api/public/otel",
+            }
+        )

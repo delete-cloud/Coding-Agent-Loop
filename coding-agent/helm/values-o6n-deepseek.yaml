@@ -1,0 +1,61 @@
+image:
+  repository: git.mesh.kinaz.me/kina/coding-agent
+  tag: main
+  pullPolicy: IfNotPresent
+
+server:
+  allowUnauthenticated: false
+  auth:
+    enabled: true
+    bearerTokenEnv: CODING_AGENT_API_KEY
+    secretName: coding-agent-coding-agent-api-key
+    secretKey: api-key
+
+cors:
+  origins:
+    - http://100.123.220.136:30082
+
+service:
+  type: NodePort
+  port: 8080
+  nodePort: 30082
+
+agent:
+  secretRef:
+    - coding-agent-deepseek
+    - coding-agent-langfuse
+  config:
+    provider: deepseek
+    model: deepseek-chat
+    approvalPolicy: auto
+    maxTurns: 30
+    subagentTimeout: 30.0
+    shell:
+      sandboxMode: native
+      cpuLimitSeconds: 10
+      memoryLimitMb: null
+      dockerImage: python:3.11-slim
+
+observability:
+  enabled: true
+  backend: langfuse
+  endpointEnv: LANGFUSE_BASE_URL
+  publicKeyEnv: LANGFUSE_PUBLIC_KEY
+  secretKeyEnv: LANGFUSE_SECRET_KEY
+
+networkPolicy:
+  extraEgress:
+    - to:
+        - ipBlock:
+            cidr: 100.123.220.136/32
+      ports:
+        - protocol: TCP
+          port: 443
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: "1"
+    memory: 2Gi

@@ -1843,10 +1843,10 @@ def _string_map(value: Any, *, field_name: str) -> dict[str, str]:
     return result
 
 
-def _required_env(name: str) -> str:
+def _required_env(name: str, *, purpose: str = "Langfuse observability") -> str:
     value = os.environ.get(name)
     if value is None or not value:
-        raise ValueError(f"{name} must be set for Langfuse observability")
+        raise ValueError(f"{name} must be set for {purpose}")
     return value
 
 
@@ -1867,6 +1867,22 @@ def _langfuse_headers(config: Mapping[str, Any]) -> dict[str, str]:
     return headers
 
 
+def _tracing_endpoint(config: Mapping[str, Any]) -> str:
+    endpoint = config.get("endpoint")
+    endpoint_env = config.get("endpoint_env")
+    if endpoint and endpoint_env:
+        raise ValueError("observability.endpoint and endpoint_env cannot both be set")
+    if endpoint is not None:
+        if not isinstance(endpoint, str) or not endpoint.strip():
+            raise ValueError("observability.endpoint must be a non-empty string")
+        return endpoint
+    if endpoint_env is not None:
+        if not isinstance(endpoint_env, str) or not endpoint_env.strip():
+            raise ValueError("observability.endpoint_env must be a non-empty string")
+        return _required_env(endpoint_env, purpose="observability endpoint")
+    raise ValueError("observability.endpoint or endpoint_env must be set")
+
+
 def _enabled(config: Mapping[str, Any]) -> bool:
     enabled = config.get("enabled", False)
     if not isinstance(enabled, bool):
@@ -1885,9 +1901,7 @@ def _build_tracing_sink(config: Mapping[str, Any]) -> ObservationSink | None:
     if backend not in {"otlp_http", "langfuse"}:
         raise ValueError(f"unsupported observability backend: {backend}")
 
-    endpoint = config.get("endpoint")
-    if not isinstance(endpoint, str) or not endpoint.strip():
-        raise ValueError("observability.endpoint must be a non-empty string")
+    endpoint = _tracing_endpoint(config)
     timeout = config.get("timeout_seconds", 2.0)
     if not isinstance(timeout, int | float) or isinstance(timeout, bool):
         raise ValueError("observability.timeout_seconds must be a number")
@@ -1923,7 +1937,9 @@ def _table(value: Any, *, field_name: str) -> Mapping[str, Any] | None:
 
 
 def _has_flat_tracing_config(config: Mapping[str, Any]) -> bool:
-    return any(key in config for key in ("backend", "endpoint", "headers"))
+    return any(
+        key in config for key in ("backend", "endpoint", "endpoint_env", "headers")
+    )
 
 
 def build_observation_sink(config: Mapping[str, Any]) -> ObservationSink | None:

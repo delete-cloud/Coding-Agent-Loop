@@ -34,3 +34,20 @@ steps:
       - event:
           - push
         branch: main
+
+  build-deploy-tools:
+    image: gcr.io/kaniko-project/executor:v1.24.0-debug
+    environment:
+      REGISTRY_USERNAME:
+        from_secret: registry_username
+      REGISTRY_PASSWORD:
+        from_secret: registry_password
+    commands:
+      - mkdir -p /kaniko/.docker
+      - auth="$(printf '%s:%s' "$REGISTRY_USERNAME" "$REGISTRY_PASSWORD" | base64 | tr -d '\n')"
+      - printf '{"auths":{"git.mesh.kinaz.me":{"auth":"%s"}}}\n' "$auth" > /kaniko/.docker/config.json
+      - /kaniko/executor --context "$CI_WORKSPACE" --dockerfile "$CI_WORKSPACE/docker/deploy-tools.Dockerfile" --build-arg PYTHON_BASE_IMAGE=git.mesh.kinaz.me/kina/python:3.12-slim --destination "git.mesh.kinaz.me/kina/coding-agent-deploy-tools:kubectl-1.36.0-helm-3.17.3-python-3.12-slim"
+    when:
+      - event:
+          - push
+        branch: main
