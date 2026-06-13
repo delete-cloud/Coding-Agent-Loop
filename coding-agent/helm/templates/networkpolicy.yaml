@@ -1,4 +1,7 @@
 {{- if .Values.networkPolicy.enabled }}
+{{- if and (not .Values.networkPolicy.ingress.enabled) (not .Values.networkPolicy.egress.enabled) }}
+{{- fail "networkPolicy.ingress.enabled or networkPolicy.egress.enabled must be true when networkPolicy.enabled=true" }}
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

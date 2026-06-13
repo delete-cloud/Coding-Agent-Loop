@@ -253,6 +253,31 @@ def test_helm_network_policy_can_be_disabled() -> None:
     assert not _objects_of_kind(docs, "NetworkPolicy")
 
 
+def test_helm_network_policy_requires_at_least_one_direction_when_enabled() -> None:
+    result = subprocess.run(
+        [
+            _helm(),
+            "template",
+            "coding-agent",
+            str(CHART),
+            "--set",
+            "networkPolicy.ingress.enabled=false",
+            "--set",
+            "networkPolicy.egress.enabled=false",
+        ],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    assert result.returncode != 0
+    assert (
+        "networkPolicy.ingress.enabled or networkPolicy.egress.enabled must be true "
+        "when networkPolicy.enabled=true"
+    ) in result.stderr
+
+
 def test_helm_network_policy_renders_extra_rules() -> None:
     docs = _render(
         "--set-json",
