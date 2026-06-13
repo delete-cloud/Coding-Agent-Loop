@@ -21,10 +21,10 @@ from agentkit.providers.models import (
 from agentkit.runtime.pipeline import Pipeline, PipelineContext
 from agentkit.tape.models import Entry
 
-from coding_agent.adapter_types import StopReason, TurnOutcome
-from coding_agent.agent_observability import AgentObservationRecorder
+from coding_agent.adapter.types import StopReason, TurnOutcome
+from coding_agent.observability.agent import AgentObservationRecorder
 from coding_agent.plugins.metrics import SessionMetricsPlugin
-from .redaction import redact_sensitive_text
+from coding_agent.redaction import redact_sensitive_text
 from coding_agent.wire.protocol import (
     ApprovalRequest,
     CompletionStatus,
