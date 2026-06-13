@@ -76,6 +76,10 @@ Before deploying to a shared cluster:
   the NetworkPolicy to deny all pod-network ingress.
 - If the target cluster cannot enforce NetworkPolicy, do not count it as a safe
   shared-cluster deployment target for this service.
+- If upgrading an existing manually-created deployment into this chart, run a
+  Helm server-side dry-run with the same values and `--take-ownership` before
+  applying. Client-side template rendering cannot detect RBAC, ownership, or
+  admission failures.
 
 ## Build And Publish
 
@@ -179,6 +183,20 @@ destination:
 --set-json networkPolicy.extraEgress='[{"to":[{"ipBlock":{"cidr":"<provider-or-proxy-cidr>"}}],"ports":[{"protocol":"TCP","port":443}]}]'
 ```
 
+For a first cutover from non-Helm resources, preflight against the cluster:
+
+```bash
+helm --kube-context <kube-context> upgrade --install coding-agent ./helm \
+  --namespace coding-agent \
+  --set image.repository='<registry>/<namespace>/coding-agent' \
+  --set image.tag='<image-tag>' \
+  --take-ownership \
+  --dry-run=server
+```
+
+Use `--take-ownership` only when same-name resources have been confirmed to be
+the existing coding-agent deployment that should become Helm-managed.
+
 ## Existing o6n DeepSeek Values
 
 `helm/values-o6n-deepseek.yaml` captures the non-secret runtime configuration
@@ -198,6 +216,10 @@ for the existing o6n DeepSeek instance:
 The file must not contain token values. If these Secrets are managed by
 SealedSecrets in the SRE repo, keep using SealedSecrets for the Secret manifests
 and keep this chart values file limited to names and keys.
+
+The Woodpecker o6n deploy script uses Helm server-side dry-run by default and
+passes `--take-ownership` so the first apply can adopt the existing deployment
+objects instead of failing on missing Helm ownership metadata.
 
 ## Health Checks
 

@@ -12,8 +12,8 @@ DeepSeek, Langfuse, bearer tokens, or kube credentials into the image.
   server image.
 - `.woodpecker/deploy.yml` is manual-only on `main` and runs the Helm deploy
   script against the o6n DeepSeek values. It defaults to `HELM_DEPLOY_MODE=dry-run`
-  so the first pass renders and validates the release without mutating the
-  cluster.
+  so the first pass uses Helm server-side dry-run to validate RBAC, ownership
+  takeover, and admission without mutating the cluster.
 
 The manual deploy step uses the internal deploy-tools image built by
 `.woodpecker/ci.yml`:
@@ -53,9 +53,11 @@ kubeconfig
 `kubeconfig` should be scoped to the target cluster and preferably to the
 `coding-agent-deepseek` namespace.
 
-Dry-run mode needs read permission for Helm release state. This deploy script
-sets `HELM_DRIVER=configmap` by default so Helm stores release metadata in
-ConfigMaps instead of Secrets.
+Dry-run mode uses `helm upgrade --install --dry-run=server`, not local-only
+template rendering. It therefore needs the same Kubernetes API visibility and
+chart resource permissions that the preflight is intended to validate. This
+deploy script sets `HELM_DRIVER=configmap` by default so Helm stores release
+metadata in ConfigMaps instead of Secrets.
 
 Apply mode needs permission to manage the chart-owned resources in the
 `coding-agent-deepseek` namespace:
@@ -66,6 +68,11 @@ Apply mode needs permission to manage the chart-owned resources in the
 
 Do not grant Secret read/write permission to the deploy identity. Runtime
 Secrets are pre-created by the cluster operator.
+
+The deploy script passes `--take-ownership` to Helm. This is intentional for the
+first cutover from manually-created resources to a Helm-managed release; confirm
+that same-name resources in the namespace belong to this deployment before
+switching from dry-run to apply.
 
 ## Existing Kubernetes Secrets
 
@@ -98,7 +105,7 @@ or commit Secret values.
 ## Manual Deploy
 
 Trigger `.woodpecker/deploy.yml` manually from the Woodpecker UI on `main`.
-By default this is a Helm dry-run.
+By default this is a Helm server-side dry-run.
 
 Optional overrides can be set as Woodpecker environment variables:
 
@@ -118,9 +125,10 @@ HELM_DEPLOY_MODE
 HELM_DRIVER
 ```
 
-Set `HELM_DEPLOY_MODE=apply` only after the dry-run output has been reviewed,
-the target namespace RBAC can manage chart-owned resources, and any existing
-non-Helm resources have been adopted or intentionally recreated.
+Set `HELM_DEPLOY_MODE=apply` only after the server-side dry-run has passed, the
+target namespace RBAC can manage chart-owned resources, and any same-name
+resources in the namespace are confirmed to be the existing coding-agent
+deployment that Helm may take over.
 
 The health smoke calls `http://$K8S_SERVICE.$K8S_NAMESPACE.svc.cluster.local:8080/healthz`
 from the pipeline container. Set `ENABLE_POD_HEALTH_SMOKE=0` if the runner cannot
