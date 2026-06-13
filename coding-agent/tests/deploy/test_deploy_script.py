@@ -65,7 +65,9 @@ def test_deploy_script_defaults_to_helm_dry_run_without_kubectl_mutation(
     assert "--values coding-agent/helm/values-o6n-deepseek.yaml" in calls
     assert "--set image.repository=git.mesh.kinaz.me/kina/coding-agent" in calls
     assert "--set image.tag=test-sha" in calls
-    assert "--dry-run" in calls
+    assert "--take-ownership" in calls
+    assert "--dry-run=server" in calls
+    assert "--dry-run=client" not in calls
     assert "kubectl" not in calls
 
 
@@ -77,6 +79,7 @@ def test_deploy_script_apply_mode_waits_for_rollout_and_smokes_service(
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
     assert "helm upgrade --install coding-agent coding-agent/helm" in calls
+    assert "--take-ownership" in calls
     assert "--dry-run" not in calls
     assert "kubectl -n coding-agent-deepseek rollout status" in calls
     assert (

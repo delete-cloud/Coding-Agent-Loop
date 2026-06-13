@@ -46,11 +46,12 @@ set -- \
   --set "image.repository=${IMAGE_REPOSITORY}" \
   --set "image.tag=${IMAGE_TAG}" \
   --wait \
-  --timeout "$ROLLOUT_TIMEOUT"
+  --timeout "$ROLLOUT_TIMEOUT" \
+  --take-ownership
 
 if [ "$HELM_DEPLOY_MODE" = "dry-run" ]; then
-  # Default mode proves the rendered release without mutating the cluster.
-  helm "$@" --dry-run=client
+  # Validate RBAC, ownership takeover, and admission without mutating the cluster.
+  helm "$@" --dry-run=server
   exit 0
 fi
 
