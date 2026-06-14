@@ -4,24 +4,24 @@ from datetime import UTC, datetime
 
 from agentkit.tape.tape import Tape
 
-from coding_agent.bee_workspace import (
+from coding_agent.bee.workspace import (
     BeeWorkspaceExecutorRunArtifact,
     BeeWorkspaceRunArtifacts,
     BeeWorkspaceRunNode,
 )
 from coding_agent.observability import PrometheusMetricsRecorder
-from coding_agent.recall_context import (
+from coding_agent.topics.recall_context import (
     TopicRecallPlanner,
     TopicRecallPlannerInput,
     recall_context_pack,
     record_recall_plan,
 )
-from coding_agent.topic_memory import (
+from coding_agent.topics.memory import (
     MemoryReviewStore,
     propose_memory_candidates_from_bee_artifacts,
 )
-from coding_agent.topic_range_index import TopicRangeIndex
-from coding_agent.topic_store import TopicRecallLinkRecord, TopicRecord
+from coding_agent.topics.range_index import TopicRangeIndex
+from coding_agent.topics.store import TopicRecallLinkRecord, TopicRecord
 from coding_agent.server.developer_console import (
     ConsoleMemoryReviewSummary,
     ConsoleMemorySummary,

@@ -7,14 +7,14 @@ import pytest
 
 from agentkit.observability import SpanRecord
 from coding_agent.action_safety import ValidationStatus
-from coding_agent.bee_command_bridge import (
+from coding_agent.bee.command_bridge import (
     BeeNodeCompletionEvidence,
     complete_bee_node_from_bridge_result,
     plan_bee_command_intent,
     resolve_bee_command_intent,
     run_bee_validation_node,
 )
-from coding_agent.bee_workspace import (
+from coding_agent.bee.workspace import (
     build_bee_manifest_from_workspace_template,
     load_bee_workspace_template,
 )

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from coding_agent.context_pack import (
+from coding_agent.topics.context_pack import (
     ContextPack,
     ContextPackItem,
     ContextPackRenderer,

@@ -8,7 +8,7 @@ import pytest
 
 from agentkit.observability import SpanRecord
 from agentkit.tape.tape import Tape
-from coding_agent.bee_runtime import (
+from coding_agent.bee.runtime import (
     BEE_TASK_ABORTED,
     BEE_TASK_FINALIZED,
     BEE_TASK_STARTED,
@@ -31,8 +31,8 @@ from coding_agent.server.developer_console import (
     ConsoleBeePage,
     render_console_bee_page,
 )
-from coding_agent.topic_lifecycle import find_topic_anchors
-from coding_agent.topic_store import JSONObject, TopicAnchorRecord, TopicRecord
+from coding_agent.topics.lifecycle import find_topic_anchors
+from coding_agent.topics.store import JSONObject, TopicAnchorRecord, TopicRecord
 
 
 class FakeBeePool:

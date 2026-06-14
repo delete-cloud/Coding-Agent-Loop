@@ -3,26 +3,26 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
-from coding_agent.bee_template_pack import (
+from coding_agent.bee.template_pack import (
     BeePackRegistry,
     BeeTemplatePackSource,
     build_bee_pack_dry_run_plan,
     load_bee_template_pack,
     validate_bee_pack_compatibility,
 )
-from coding_agent.bee_workspace import (
+from coding_agent.bee.workspace import (
     BeeWorkspaceRunArtifacts,
     BeeWorkspaceRunNode,
 )
 from coding_agent.observability import PrometheusMetricsRecorder
-from coding_agent.recall_context import TopicRecallPlanner, TopicRecallPlannerInput
-from coding_agent.topic_memory import (
+from coding_agent.topics.recall_context import TopicRecallPlanner, TopicRecallPlannerInput
+from coding_agent.topics.memory import (
     MEMORY_REFERENCE_MODE,
     MemoryReviewStore,
     propose_memory_candidates_from_bee_artifacts,
 )
-from coding_agent.topic_range_index import TopicRangeIndex
-from coding_agent.topic_store import TopicRecord
+from coding_agent.topics.range_index import TopicRangeIndex
+from coding_agent.topics.store import TopicRecord
 from coding_agent.server.developer_console import (
     ConsoleBeePackCompatibilitySummary,
     ConsoleBeePackDryRunSummary,

@@ -8,12 +8,12 @@ import pytest
 
 from agentkit.tools import FatalToolExecutionError
 
-from coding_agent.adapter_types import StopReason, TurnOutcome
+from coding_agent.adapter.types import StopReason, TurnOutcome
 from coding_agent.executors.local_daemon import (
     LocalDaemonRuntimeBinding,
     LocalDaemonRuntimeExecution,
 )
-from coding_agent.runtime_store import AgentRunRecord, JSONObject
+from coding_agent.stores.runtime_store import AgentRunRecord, JSONObject
 from coding_agent.runs import (
     IsolationPolicy,
     LocalDaemonExecutorRef,

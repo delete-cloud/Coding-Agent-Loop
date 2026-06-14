@@ -21,7 +21,7 @@ from agentkit.storage.sqlite import (
     _optional_entry_str,
 )
 
-from coding_agent.runtime_store import (
+from coding_agent.stores.runtime_store import (
     AgentRunRecord,
     AgentInteractionRecord,
     RuntimeEventRecord,

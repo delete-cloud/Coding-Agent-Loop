@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, cast
 
-from coding_agent.runtime_store import (
+from coding_agent.stores.runtime_store import (
     JSONLRuntimeStore,
     PGRuntimeStore,
     SQLiteRuntimeStore,

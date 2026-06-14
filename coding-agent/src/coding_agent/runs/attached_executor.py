@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, AsyncContextManager, Protocol, cast
 
-from coding_agent.runtime_store import AgentRunRecord, JSONObject, RuntimeEventRecord
+from coding_agent.stores.runtime_store import AgentRunRecord, JSONObject, RuntimeEventRecord
 from coding_agent.stores import RuntimeRunStore
 
 from .lifecycle import RuntimeRunResumeContext

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from coding_agent.bee_template_pack import (
+from coding_agent.bee.template_pack import (
     BeePackCompatibilityFinding,
     BeePackCompatibilityReport,
     BeePackRegistry,

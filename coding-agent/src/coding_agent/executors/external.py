@@ -18,12 +18,12 @@ from typing import Final, Protocol
 from agentkit.storage.pg import AsyncPGPool, PGPool
 from coding_agent.action_safety.approval_routing import ActionApprovalRoute
 from coding_agent.action_safety.command_policy import CommandPolicyDecision
-from coding_agent.bee_command_bridge import (
+from coding_agent.bee.command_bridge import (
     BeeCommandIntentPlan,
     BeeNodeCompletionEvidence,
     is_authorized_bee_command_plan,
 )
-from coding_agent.topic_store import JSONObject, JSONValue
+from coding_agent.topics.store import JSONObject, JSONValue
 
 ExecutorKind = str
 ExecutorRunStatus = str

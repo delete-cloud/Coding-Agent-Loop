@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 import pytest
 
 from agentkit.tape.tape import Tape
-from coding_agent.recall_context import (
+from coding_agent.topics.recall_context import (
     TopicRecallPlanner,
     TopicRecallPlannerInput,
     build_topic_recall_query,
@@ -13,12 +13,12 @@ from coding_agent.recall_context import (
     recall_context_pack,
     record_recall_plan,
 )
-from coding_agent.topic_memory import (
+from coding_agent.topics.memory import (
     MemoryReviewStore,
     propose_memory_candidate_from_topic,
 )
-from coding_agent.topic_range_index import TopicRangeIndex
-from coding_agent.topic_store import TopicRecallLinkRecord, TopicRecord
+from coding_agent.topics.range_index import TopicRangeIndex
+from coding_agent.topics.store import TopicRecallLinkRecord, TopicRecord
 
 
 class FakeRecallStore:

@@ -7,7 +7,7 @@ from typing import Any, cast
 
 from agentkit.storage.checkpoint_fs import FSCheckpointStore
 from agentkit.storage.sqlite import SQLiteCheckpointStore, SQLiteTapeStore
-from coding_agent.local_storage import local_sqlite_path
+from coding_agent.stores.local import local_sqlite_path
 
 
 @dataclass(frozen=True)

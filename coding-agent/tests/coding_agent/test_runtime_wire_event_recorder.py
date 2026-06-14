@@ -14,7 +14,7 @@ from coding_agent.runs import (
     RunTarget,
     RuntimeWireEventRecorder,
 )
-from coding_agent.runtime_store import AgentRunRecord, RuntimeEventRecord
+from coding_agent.stores.runtime_store import AgentRunRecord, RuntimeEventRecord
 from coding_agent.wire.protocol import StreamDelta
 
 

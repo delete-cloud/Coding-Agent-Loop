@@ -11,7 +11,7 @@ from agentkit.tracing import configure_tracing
 from coding_agent.acp import AcpServer, AcpMode, run_stdio
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.cli.local_runtime import create_local_cli_session_manager
-from coding_agent.local_storage import (
+from coding_agent.stores.local import (
     local_data_dir,
     local_sqlite_path,
     local_sqlite_storage_config,

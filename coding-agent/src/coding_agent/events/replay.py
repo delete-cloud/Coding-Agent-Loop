@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from coding_agent.runtime_store import RuntimeEventRecord
+from coding_agent.stores.runtime_store import RuntimeEventRecord
 from coding_agent.stores import RuntimeEventStore
 
 from .display import DisplayEvent, project_runtime_events_to_display

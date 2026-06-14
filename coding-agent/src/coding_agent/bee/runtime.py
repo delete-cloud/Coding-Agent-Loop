@@ -15,7 +15,7 @@ from typing import Protocol
 from agentkit.storage.pg import AsyncPGPool, PGPool
 from agentkit.tape.anchor import Anchor
 from agentkit.tape.tape import Tape
-from coding_agent.topic_store import (
+from coding_agent.topics.store import (
     JSONObject,
     JSONValue,
     TopicAnchorRecord,

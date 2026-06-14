@@ -26,7 +26,7 @@ from coding_agent.bee.workspace import (
     load_bee_workspace_command_intents,
     load_bee_workspace_template,
 )
-from coding_agent.topic_store import JSONObject
+from coding_agent.topics.store import JSONObject
 
 _MANIFEST_CANDIDATES: Final[tuple[tuple[str, str], ...]] = (
     ("bee-pack.yaml", "yaml"),

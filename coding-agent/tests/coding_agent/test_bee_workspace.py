@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from agentkit.observability import SpanRecord
-from coding_agent.bee_workspace import (
+from coding_agent.bee.workspace import (
     BeeWorkspaceExecutorRunArtifact,
     BeeWorkspaceRunArtifacts,
     BeeWorkspaceRunNode,

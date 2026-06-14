@@ -15,7 +15,7 @@ from typing import Final, cast
 import yaml
 
 from coding_agent.bee.runtime import BeeTaskManifest, parse_bee_task_manifest
-from coding_agent.topic_store import JSONObject
+from coding_agent.topics.store import JSONObject
 
 _BEE_DIR: Final[str] = ".bee"
 _TEMPLATES_DIR: Final[str] = "templates"

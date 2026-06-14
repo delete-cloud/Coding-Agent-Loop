@@ -8,8 +8,8 @@ from inspect import isawaitable
 from types import TracebackType
 from typing import Any, Protocol, cast
 
-from coding_agent.adapter_types import StopReason, TurnOutcome
-from coding_agent.runtime_store import AgentRunRecord, JSONObject
+from coding_agent.adapter.types import StopReason, TurnOutcome
+from coding_agent.stores.runtime_store import AgentRunRecord, JSONObject
 from coding_agent.stores import RuntimeRunLifecycleStore
 
 RuntimeRunStore = RuntimeRunLifecycleStore

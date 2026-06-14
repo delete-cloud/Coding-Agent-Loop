@@ -568,7 +568,7 @@ def test_session_manager_uses_pg_backends_when_storage_config_requests_pg() -> N
 def test_session_manager_disables_runtime_store_by_default() -> None:
     manager = SessionManager()
 
-    from coding_agent.runtime_store import SQLiteRuntimeStore
+    from coding_agent.stores.runtime_store import SQLiteRuntimeStore
 
     assert isinstance(manager._runtime_store, SQLiteRuntimeStore)
     assert (
@@ -586,7 +586,7 @@ def test_session_manager_uses_single_local_sqlite_bundle_by_default(
     monkeypatch,
 ) -> None:
     from agentkit.storage.sqlite import SQLiteCheckpointStore, SQLiteTapeStore
-    from coding_agent.runtime_store import SQLiteRuntimeStore
+    from coding_agent.stores.runtime_store import SQLiteRuntimeStore
     from coding_agent.server.stores.session_store import SQLiteSessionStore
 
     monkeypatch.setenv("AGENT_DATA_DIR", str(tmp_path))
@@ -737,7 +737,7 @@ def test_session_manager_creates_pg_runtime_store_when_storage_config_requests_p
 def test_session_manager_creates_jsonl_runtime_store_when_storage_config_requests_jsonl(
     tmp_path,
 ) -> None:
-    from coding_agent.runtime_store import JSONLRuntimeStore
+    from coding_agent.stores.runtime_store import JSONLRuntimeStore
 
     manager = SessionManager(
         storage_config={
@@ -752,7 +752,7 @@ def test_session_manager_creates_jsonl_runtime_store_when_storage_config_request
 def test_session_manager_creates_sqlite_runtime_store_when_storage_config_requests_sqlite(
     tmp_path,
 ) -> None:
-    from coding_agent.runtime_store import SQLiteRuntimeStore
+    from coding_agent.stores.runtime_store import SQLiteRuntimeStore
 
     manager = SessionManager(
         storage_config={
@@ -803,7 +803,7 @@ async def test_file_session_and_jsonl_runtime_store_reopen_resume_metadata(
 ) -> None:
     from datetime import UTC
 
-    from coding_agent.runtime_store import AgentRunRecord
+    from coding_agent.stores.runtime_store import AgentRunRecord
 
     storage_config = {
         "http_session_backend": "fs",

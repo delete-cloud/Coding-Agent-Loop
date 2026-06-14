@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 import pytest
 
 from coding_agent.events import RuntimeEventReplayService
-from coding_agent.runtime_store import RuntimeEventRecord
+from coding_agent.stores.runtime_store import RuntimeEventRecord
 
 
 class FakeRuntimeEventStore:

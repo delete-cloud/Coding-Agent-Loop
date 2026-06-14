@@ -33,12 +33,12 @@ from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
 from agentkit.tools import FatalToolExecutionError
 
-from coding_agent.adapter_types import StopReason, TurnOutcome
+from coding_agent.adapter.types import StopReason, TurnOutcome
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.approval.store import ApprovalStore
 from coding_agent.core.config import settings
 from coding_agent.environment import CloudCommandResult, CloudEnvironment
-from coding_agent.runtime_store import (
+from coding_agent.stores.runtime_store import (
     AgentInteractionRecord,
     AgentRunRecord,
     RunMessageSnapshotRecord,
@@ -96,7 +96,7 @@ from coding_agent.wire.protocol import (
     TurnStatusDelta,
     TurnEnd,
 )
-from coding_agent.local_storage import local_sqlite_storage_config
+from coding_agent.stores.local import local_sqlite_storage_config
 
 
 def _local_run_target(path: Path | str) -> RunTarget:

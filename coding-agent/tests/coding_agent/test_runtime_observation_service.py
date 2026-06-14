@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from coding_agent.agent_observability import AgentObservationEvent
+from coding_agent.observability.agent import AgentObservationEvent
 from coding_agent.runs import (
     IsolationPolicy,
     LocalDaemonExecutorRef,

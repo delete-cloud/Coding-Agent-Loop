@@ -21,7 +21,7 @@ from agentkit.tape.tape import Tape
 from agentkit.tape.models import Entry
 
 from coding_agent.adapter import PipelineAdapter
-from coding_agent.adapter_types import StopReason, TurnOutcome
+from coding_agent.adapter.types import StopReason, TurnOutcome
 from coding_agent.plugins.metrics import SessionMetricsPlugin
 from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictError
 from coding_agent.wire.protocol import (

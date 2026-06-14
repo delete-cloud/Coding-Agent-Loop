@@ -1,6 +1,6 @@
 import json
 
-from coding_agent.context_pack import (
+from coding_agent.topics.context_pack import (
     ContextPack,
     ContextPackItem,
     ContextPackRenderer,

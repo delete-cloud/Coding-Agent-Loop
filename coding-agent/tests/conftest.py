@@ -8,7 +8,7 @@ from types import ModuleType
 import pytest
 
 import coding_agent.server.http_server as http_server
-from coding_agent.local_storage import local_sqlite_storage_config
+from coding_agent.stores.local import local_sqlite_storage_config
 from coding_agent.observability import reset_prometheus_metrics
 from coding_agent.server.session_manager import SessionManager
 

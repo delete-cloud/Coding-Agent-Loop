@@ -7,7 +7,7 @@ from typing import Any, Protocol
 from agentkit.checkpoint.models import CheckpointMeta
 
 from coding_agent.events import DisplayEvent, RuntimeEventReplayService
-from coding_agent.runtime_store import (
+from coding_agent.stores.runtime_store import (
     AgentInteractionRecord,
     AgentRunRecord,
     RunMessageSnapshotRecord,

@@ -4,7 +4,7 @@ import asyncio
 from types import SimpleNamespace
 
 from coding_agent.cli.local_runtime import ServerBackedLocalCliSessionManager
-from coding_agent.local_storage import local_sqlite_storage_config
+from coding_agent.stores.local import local_sqlite_storage_config
 
 
 class FakeManagedSession:

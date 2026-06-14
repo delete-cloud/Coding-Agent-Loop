@@ -23,7 +23,7 @@ from typing import Any, Callable
 from agentkit.directive.types import MemoryRecord
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
-from coding_agent.context_pack import (
+from coding_agent.topics.context_pack import (
     ContextPack,
     ContextPackItem,
     ContextPackRenderer,

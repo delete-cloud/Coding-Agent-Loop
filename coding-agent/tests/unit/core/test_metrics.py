@@ -3,7 +3,7 @@
 import pytest
 import time
 
-from coding_agent.metrics import SessionMetrics, MetricsCollector, collector
+from coding_agent.observability.metrics import SessionMetrics, MetricsCollector, collector
 
 
 class TestSessionMetrics:

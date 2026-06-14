@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from coding_agent.workspace_archive import (
+from coding_agent.environment.archive import (
     create_workspace_archive_base64,
     extract_workspace_archive_base64,
 )

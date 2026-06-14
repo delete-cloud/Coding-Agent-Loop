@@ -9,7 +9,7 @@ from typing import Protocol, cast
 from agentkit.checkpoint.models import CheckpointMeta
 from agentkit.tape.models import Anchor
 
-from coding_agent.runtime_store import (
+from coding_agent.stores.runtime_store import (
     AgentRunRecord,
     JSONObject,
     RunMessageSnapshotRecord,

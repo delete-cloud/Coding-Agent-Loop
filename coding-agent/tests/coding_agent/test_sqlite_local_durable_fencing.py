@@ -9,9 +9,9 @@ import pytest
 from agentkit.checkpoint.models import CheckpointMeta, CheckpointSnapshot
 from agentkit.checkpoint import CheckpointService
 from agentkit.errors import ConfigError
-from coding_agent.local_durable_store import SQLiteLocalDurableStore
-from coding_agent.local_storage import local_sqlite_path, local_sqlite_storage_config
-from coding_agent.runtime_store import AgentRunRecord, RuntimeEventRecord
+from coding_agent.stores.durable_local import SQLiteLocalDurableStore
+from coding_agent.stores.local import local_sqlite_path, local_sqlite_storage_config
+from coding_agent.stores.runtime_store import AgentRunRecord, RuntimeEventRecord
 from coding_agent.server.session_manager import SessionManager
 from coding_agent.server.stores.session_owner_store import (
     SQLiteSessionOwnerStore,

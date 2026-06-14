@@ -7,11 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from coding_agent.bee_command_bridge import (
+from coding_agent.bee.command_bridge import (
     complete_bee_node_from_bridge_result,
     plan_bee_command_intent,
 )
-from coding_agent.bee_workspace import (
+from coding_agent.bee.workspace import (
     BeeWorkspaceExecutorRunArtifact,
     BeeWorkspaceRunArtifacts,
     BeeWorkspaceRunNode,
@@ -19,7 +19,7 @@ from coding_agent.bee_workspace import (
     load_bee_workspace_template,
     write_bee_workspace_run_artifacts,
 )
-from coding_agent.external_executor import (
+from coding_agent.executors.external import (
     ArgoWorkflowExecutorAdapter,
     DockerExecutorAdapter,
     ExecutorEvidence,

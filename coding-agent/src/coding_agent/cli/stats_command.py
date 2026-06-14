@@ -10,7 +10,7 @@ import click
 @click.option("--session", "-s", help="Session ID (default: last)")
 def stats(session: str | None):
     """Show session statistics."""
-    from coding_agent.metrics import collector
+    from coding_agent.observability.metrics import collector
 
     if not session:
         # Use last session

@@ -8,7 +8,7 @@ from typing import cast
 import pytest
 
 from agentkit.tape.tape import Tape
-from coding_agent.bee_launch import (
+from coding_agent.bee.launch import (
     BeeInputBinding,
     BeeTaskLifecycleController,
     BeeLaunchOrchestrator,
@@ -20,11 +20,11 @@ from coding_agent.bee_launch import (
     ScheduledBeeLaunchOrchestrator,
     build_bee_launch_plan,
 )
-from coding_agent.bee_runtime import BeeNodeRecord, BeeTaskLifecycle, BeeTaskRecord
+from coding_agent.bee.runtime import BeeNodeRecord, BeeTaskLifecycle, BeeTaskRecord
 from coding_agent.observability import prometheus_metrics_text, reset_prometheus_metrics
-from coding_agent.scheduled_runs import ScheduledLaunchIntent, ScheduleTriggerRecord
-from coding_agent.topic_lifecycle import TopicLifecycle
-from coding_agent.topic_store import JSONObject, TopicAnchorRecord, TopicRecord
+from coding_agent.runs.scheduled import ScheduledLaunchIntent, ScheduleTriggerRecord
+from coding_agent.topics.lifecycle import TopicLifecycle
+from coding_agent.topics.store import JSONObject, TopicAnchorRecord, TopicRecord
 
 
 class FakeBeeLaunchPool:

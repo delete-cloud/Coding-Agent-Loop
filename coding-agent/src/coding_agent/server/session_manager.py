@@ -36,7 +36,7 @@ from agentkit.storage.protocols import TapeDebugStore, TapeInfo, TapeSearchResul
 from agentkit.tape.models import Anchor
 from agentkit.tape.tape import Tape
 from coding_agent.adapter import PipelineAdapter
-from coding_agent.agent_observability import (
+from coding_agent.observability.agent import (
     AgentObservationStore,
     JsonlAgentObservationStore,
 )
@@ -49,7 +49,7 @@ from coding_agent.approval import (
 )
 from coding_agent.approval.store import ApprovalStore
 from coding_agent.core import config as core_config
-from coding_agent.local_storage import (
+from coding_agent.stores.local import (
     DURABLE_STORAGE_BACKEND_KEYS,
     DURABLE_STORAGE_PATH_KEYS,
     durable_storage_backend_values,
@@ -58,13 +58,13 @@ from coding_agent.local_storage import (
     normalize_storage_path,
     with_local_sqlite_bundle_paths,
 )
-from coding_agent.local_durable_store import (
+from coding_agent.stores.durable_local import (
     FencedSQLiteCheckpointStore,
     FencedSQLiteRuntimeStore,
     FencedSQLiteTapeStore,
     SQLiteLocalDurableStore,
 )
-from coding_agent.pg_durable_store import (
+from coding_agent.stores.durable_pg import (
     FencedPGCheckpointStore,
     FencedPGRuntimeStore,
     FencedPGTapeStore,
@@ -72,7 +72,7 @@ from coding_agent.pg_durable_store import (
 )
 from coding_agent.plugins.storage import JSONLTapeStore
 from coding_agent.providers.base import ToolSchema
-from coding_agent.runtime_store import (
+from coding_agent.stores.runtime_store import (
     AgentInteractionRecord,
     AgentRunRecord,
     JSONLRuntimeStore,

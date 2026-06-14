@@ -15,8 +15,8 @@ from httpx_sse import aconnect_sse
 
 from agentkit.observability import ObservationSink, record_span
 from coding_agent.adapter import PipelineAdapter
-from coding_agent.app import create_agent
-from coding_agent.adapter_types import TurnOutcome
+from coding_agent.core.app import create_agent
+from coding_agent.adapter.types import TurnOutcome
 from coding_agent.ui.headless import HeadlessConsumer
 from coding_agent.wire.protocol import (
     ApprovalRequest,

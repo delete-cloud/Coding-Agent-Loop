@@ -9,7 +9,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
 
-from coding_agent.bee_workspace import BeeWorkspaceRunArtifacts
+from coding_agent.bee.workspace import BeeWorkspaceRunArtifacts
 from coding_agent.topics.context_pack import (
     ContextPack,
     ContextPackItem,

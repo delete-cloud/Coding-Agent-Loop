@@ -12,8 +12,8 @@ from uuid import uuid4
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.core.config import Config
 from coding_agent.runs import UNSET, UnsetType
-from coding_agent.local_storage import local_sqlite_storage_config
-from coding_agent.local_storage import local_sqlite_path_from_storage_config
+from coding_agent.stores.local import local_sqlite_storage_config
+from coding_agent.stores.local import local_sqlite_path_from_storage_config
 from coding_agent.server.session_manager import SessionManager
 from coding_agent.server.stores.session_owner_store import SQLiteSessionOwnerStore
 
@@ -360,7 +360,7 @@ __all__ = [
 
 
 def create_agent(*args: Any, **kwargs: Any) -> tuple[Any, Any]:
-    return importlib.import_module("coding_agent.app").create_agent(*args, **kwargs)
+    return importlib.import_module("coding_agent.core.app").create_agent(*args, **kwargs)
 
 
 def create_local_cli_runtime(config: Config, consumer: Any) -> LocalCliRuntime:

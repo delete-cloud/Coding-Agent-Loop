@@ -12,26 +12,26 @@ from coding_agent.observability import (
     PrometheusMetricsObservationSink,
     PrometheusMetricsRecorder,
 )
-from coding_agent.topic_lifecycle import (
+from coding_agent.topics.lifecycle import (
     TOPIC_FINALIZED,
     TOPIC_INITIAL,
     TopicLifecycle,
     find_topic_anchors,
     topic_range_entries,
 )
-from coding_agent.topic_provenance import (
+from coding_agent.topics.provenance import (
     topic_cost_delta,
     topic_eval_provenance,
     topic_memory_provenance,
     topic_metric_attributes,
 )
-from coding_agent.topic_recall import (
+from coding_agent.topics.recall import (
     RECALL_ANCHOR,
     recall_topic_summaries,
     record_topic_recall,
     topic_recall_context_pack,
 )
-from coding_agent.topic_store import (
+from coding_agent.topics.store import (
     JSONObject,
     TopicAnchorRecord,
     TopicCostRecord,

@@ -37,7 +37,7 @@ from coding_agent.plugins.skills import SkillsPlugin
 from coding_agent.plugins.storage import StoragePlugin
 from coding_agent.plugins.summarizer import SummarizerPlugin
 from coding_agent.subagents.coordinator import ChildWorkerCoordinator
-from coding_agent.topic_memory import MemoryReviewStore
+from coding_agent.topics.memory import MemoryReviewStore
 from coding_agent.tools.web_search import create_web_search_backend
 
 ToolFilter = Any
