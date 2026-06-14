@@ -25,6 +25,23 @@ if [ "$HELM_DEPLOY_MODE" != "dry-run" ] && [ "$HELM_DEPLOY_MODE" != "apply" ]; t
   exit 2
 fi
 
+# Fail closed before mutating a cluster: apply must use real deploy values,
+# not the genericized placeholders. dry-run intentionally tolerates them.
+if [ "$HELM_DEPLOY_MODE" = "apply" ]; then
+  case "$IMAGE_REPOSITORY" in
+  *"<"*)
+    printf '%s\n' "apply requires a real IMAGE_REPOSITORY (got placeholder)" >&2
+    exit 2
+    ;;
+  esac
+  if [ -z "${VALUES_CONTENT:-}" ] \
+    && [ "$HELM_VALUES" = "coding-agent/helm/values-example.yaml" ]; then
+    printf '%s\n' \
+      "apply requires real values: set VALUES_CONTENT or HELM_VALUES" >&2
+    exit 2
+  fi
+fi
+
 if [ -n "${KUBECONFIG_CONTENT:-}" ]; then
   kubeconfig_file="$(mktemp)"
   umask 077

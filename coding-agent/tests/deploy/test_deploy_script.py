@@ -74,7 +74,12 @@ def test_deploy_script_defaults_to_helm_dry_run_without_kubectl_mutation(
 def test_deploy_script_apply_mode_waits_for_rollout_and_smokes_service(
     tmp_path: Path,
 ) -> None:
-    result = _run_script(tmp_path, HELM_DEPLOY_MODE="apply")
+    result = _run_script(
+        tmp_path,
+        HELM_DEPLOY_MODE="apply",
+        IMAGE_REPOSITORY="example.invalid/coding-agent",
+        VALUES_CONTENT="image:\n  repository: example.invalid/coding-agent\n",
+    )
 
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
@@ -86,6 +91,31 @@ def test_deploy_script_apply_mode_waits_for_rollout_and_smokes_service(
         "curl -fsS http://coding-agent-coding-agent.coding-agent.svc.cluster.local:8080/healthz"
         in calls
     )
+
+
+def test_deploy_script_apply_mode_rejects_placeholder_image_repository(
+    tmp_path: Path,
+) -> None:
+    # Guard: apply must not run against the genericized placeholder defaults.
+    result = _run_script(tmp_path, HELM_DEPLOY_MODE="apply")
+
+    assert result.returncode == 2
+    assert "apply requires a real IMAGE_REPOSITORY" in result.stderr
+    assert not (tmp_path / "calls.log").exists()
+
+
+def test_deploy_script_apply_mode_rejects_example_values_without_content(
+    tmp_path: Path,
+) -> None:
+    result = _run_script(
+        tmp_path,
+        HELM_DEPLOY_MODE="apply",
+        IMAGE_REPOSITORY="example.invalid/coding-agent",
+    )
+
+    assert result.returncode == 2
+    assert "apply requires real values" in result.stderr
+    assert not (tmp_path / "calls.log").exists()
 
 
 def test_deploy_script_uses_values_content_temp_file_when_present(
