@@ -4,36 +4,40 @@ This repository uses Woodpecker for self-hosted CI/CD on the private mesh.
 
 The deployment pipeline intentionally keeps runtime provider credentials in
 Kubernetes Secrets. Woodpecker builds and deploys images, but it does not bake
-DeepSeek, Langfuse, bearer tokens, or kube credentials into the image.
+provider, observability, bearer token, or kube credentials into the image.
+
+Real values live in the private SRE inventory and Woodpecker repository secrets:
+`deploy_values`, `kubeconfig`, `k8s_namespace`, and `image_repository`.
 
 ## Pipelines
 
 - `.woodpecker/ci.yml` runs lint, focused smoke tests, and builds the HTTP
   server image.
 - `.woodpecker/deploy.yml` is manual-only on `main` and runs the Helm deploy
-  script against the o6n DeepSeek values. It defaults to `HELM_DEPLOY_MODE=dry-run`
-  so the first pass uses Helm server-side dry-run to validate RBAC, ownership
-  takeover, and admission without mutating the cluster.
+  script against values supplied by the `deploy_values` Woodpecker secret. It
+  defaults to `HELM_DEPLOY_MODE=dry-run` so the first pass uses Helm server-side
+  dry-run to validate RBAC, ownership takeover, and admission without mutating
+  the cluster.
 
-The manual deploy step uses the internal deploy-tools image built by
+The manual deploy step uses the build-registry deploy-tools image built by
 `.woodpecker/ci.yml`:
 
 ```text
-git.mesh.kinaz.me/kina/coding-agent-deploy-tools:kubectl-1.36.0-helm-3.17.3-python-3.12-slim
+<build-registry>/<namespace>/coding-agent-deploy-tools:kubectl-1.36.0-helm-3.17.3-python-3.12-slim
 ```
 
 The default image target is:
 
 ```text
-git.mesh.kinaz.me/kina/coding-agent:${CI_COMMIT_SHA}
+<registry>/<namespace>/coding-agent:${CI_COMMIT_SHA}
 ```
 
 The deploy workflow updates:
 
 ```text
-namespace: coding-agent-deepseek
+namespace: <k8s-namespace>
 release: coding-agent
-values: coding-agent/helm/values-o6n-deepseek.yaml
+values: VALUES_CONTENT from deploy_values
 deployment: coding-agent-coding-agent, when HELM_DEPLOY_MODE=apply
 ```
 
@@ -45,13 +49,16 @@ Configure these in Woodpecker repository secrets:
 registry_username
 registry_password
 kubeconfig
+deploy_values
+k8s_namespace
+image_repository
 ```
 
 `registry_username` and `registry_password` must be able to push
-`git.mesh.kinaz.me/kina/coding-agent`.
+`<registry>/<namespace>/coding-agent`.
 
 `kubeconfig` should be scoped to the target cluster and preferably to the
-`coding-agent-deepseek` namespace.
+`<k8s-namespace>` namespace.
 
 Dry-run mode uses `helm upgrade --install --dry-run=server`, not local-only
 template rendering. It therefore needs the same Kubernetes API visibility and
@@ -60,7 +67,7 @@ deploy script sets `HELM_DRIVER=configmap` by default so Helm stores release
 metadata in ConfigMaps instead of Secrets.
 
 Apply mode needs permission to manage the chart-owned resources in the
-`coding-agent-deepseek` namespace:
+`<k8s-namespace>` namespace:
 
 - Deployment, Service, ConfigMap, PVC, ServiceAccount, and NetworkPolicy
 - ConfigMaps used by Helm release metadata
@@ -76,28 +83,28 @@ switching from dry-run to apply.
 
 ## Existing Kubernetes Secrets
 
-Keep runtime secrets in Kubernetes, not Woodpecker. The o6n values file contains
-only Secret names and key names; Secret values should be supplied by ordinary
-Kubernetes Secrets or SealedSecrets in the SRE repo.
+Keep runtime secrets in Kubernetes, not this public repository. The deployment
+values contain only Secret names and key names; Secret values should be supplied
+by ordinary Kubernetes Secrets or SealedSecrets in the private SRE repo.
 
 ```bash
-kubectl -n coding-agent-deepseek get secret coding-agent-deepseek
-kubectl -n coding-agent-deepseek get secret coding-agent-langfuse
+kubectl -n <k8s-namespace> get secret <provider-secret>
+kubectl -n <k8s-namespace> get secret <observability-secret>
 ```
 
 The deployment pipeline does not create or replace these secrets.
 
-The o6n chart values expect:
+The chart values expect:
 
 ```text
 coding-agent-coding-agent-api-key: api-key
-coding-agent-deepseek: DEEPSEEK_API_KEY
-coding-agent-langfuse: LANGFUSE_BASE_URL, LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY
+<provider-secret>: <provider-api-key-env>
+<observability-secret>: <observability-endpoint-env>, <observability-public-key-env>, <observability-secret-key-env>
 ```
 
-`LANGFUSE_BASE_URL` must be the Langfuse OTLP base endpoint accepted by the
-Coding Agent exporter, for example a URL ending in `/api/public/otel`; it is not
-the UI root URL unless the exporter endpoint is served there.
+`<observability-endpoint-env>` must be the OTLP base endpoint accepted by the
+Coding Agent exporter; it is not the UI root URL unless the exporter endpoint is
+served there.
 
 Verify key names from the cluster before switching apply mode on. Do not print
 or commit Secret values.
@@ -121,6 +128,7 @@ ENABLE_POD_HEALTH_SMOKE
 HELM_RELEASE
 HELM_CHART_DIR
 HELM_VALUES
+VALUES_CONTENT
 HELM_DEPLOY_MODE
 HELM_DRIVER
 ```

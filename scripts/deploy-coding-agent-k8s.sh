@@ -1,9 +1,9 @@
 #!/usr/bin/env sh
 set -eu
 
-IMAGE_REPOSITORY="${IMAGE_REPOSITORY:-git.mesh.kinaz.me/kina/coding-agent}"
+IMAGE_REPOSITORY="${IMAGE_REPOSITORY:-<registry>/<namespace>/coding-agent}"
 IMAGE_TAG="${IMAGE_TAG:-${CI_COMMIT_SHA:-}}"
-K8S_NAMESPACE="${K8S_NAMESPACE:-coding-agent-deepseek}"
+K8S_NAMESPACE="${K8S_NAMESPACE:-coding-agent}"
 K8S_DEPLOYMENT="${K8S_DEPLOYMENT:-coding-agent-coding-agent}"
 K8S_CONTAINER="${K8S_CONTAINER:-coding-agent}"
 K8S_SERVICE="${K8S_SERVICE:-$K8S_DEPLOYMENT}"
@@ -11,7 +11,7 @@ ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-180s}"
 ENABLE_POD_HEALTH_SMOKE="${ENABLE_POD_HEALTH_SMOKE:-1}"
 HELM_RELEASE="${HELM_RELEASE:-coding-agent}"
 HELM_CHART_DIR="${HELM_CHART_DIR:-coding-agent/helm}"
-HELM_VALUES="${HELM_VALUES:-coding-agent/helm/values-o6n-deepseek.yaml}"
+HELM_VALUES="${HELM_VALUES:-coding-agent/helm/values-example.yaml}"
 HELM_DEPLOY_MODE="${HELM_DEPLOY_MODE:-dry-run}"
 HELM_DRIVER="${HELM_DRIVER:-configmap}"
 
@@ -25,11 +25,35 @@ if [ "$HELM_DEPLOY_MODE" != "dry-run" ] && [ "$HELM_DEPLOY_MODE" != "apply" ]; t
   exit 2
 fi
 
+# Fail closed before mutating a cluster: apply must use real deploy values,
+# not the genericized placeholders. dry-run intentionally tolerates them.
+if [ "$HELM_DEPLOY_MODE" = "apply" ]; then
+  case "$IMAGE_REPOSITORY" in
+  *"<"*)
+    printf '%s\n' "apply requires a real IMAGE_REPOSITORY (got placeholder)" >&2
+    exit 2
+    ;;
+  esac
+  if [ -z "${VALUES_CONTENT:-}" ] \
+    && [ "$HELM_VALUES" = "coding-agent/helm/values-example.yaml" ]; then
+    printf '%s\n' \
+      "apply requires real values: set VALUES_CONTENT or HELM_VALUES" >&2
+    exit 2
+  fi
+fi
+
 if [ -n "${KUBECONFIG_CONTENT:-}" ]; then
   kubeconfig_file="$(mktemp)"
   umask 077
   printf '%s' "$KUBECONFIG_CONTENT" > "$kubeconfig_file"
   export KUBECONFIG="$kubeconfig_file"
+fi
+
+helm_values_file="$HELM_VALUES"
+if [ -n "${VALUES_CONTENT:-}" ]; then
+  helm_values_file="$(mktemp)"
+  umask 077
+  printf '%s' "$VALUES_CONTENT" > "$helm_values_file"
 fi
 
 export HELM_DRIVER
@@ -42,7 +66,7 @@ fi
 set -- \
   upgrade --install "$HELM_RELEASE" "$HELM_CHART_DIR" \
   --namespace "$K8S_NAMESPACE" \
-  --values "$HELM_VALUES" \
+  --values "$helm_values_file" \
   --set "image.repository=${IMAGE_REPOSITORY}" \
   --set "image.tag=${IMAGE_TAG}" \
   --wait \

@@ -197,29 +197,32 @@ helm --kube-context <kube-context> upgrade --install coding-agent ./helm \
 Use `--take-ownership` only when same-name resources have been confirmed to be
 the existing coding-agent deployment that should become Helm-managed.
 
-## Existing o6n DeepSeek Values
+## Example Values
 
-`helm/values-o6n-deepseek.yaml` captures the non-secret runtime configuration
-for the existing o6n DeepSeek instance:
+`helm/values-example.yaml` captures the non-secret runtime configuration shape
+with placeholders only:
 
-- Forgejo registry image repository: `git.mesh.kinaz.me/kina/coding-agent`
+- registry image repository: `<registry>/<namespace>/coding-agent`
 - namespace/release-compatible Service name through the chart fullname
-- NodePort `30082`
-- provider/model: `deepseek` / `deepseek-chat`
-- runtime Secret references: `coding-agent-deepseek` and `coding-agent-langfuse`
+- example NodePort `30080`
+- provider/model placeholders for the target runtime
+- runtime Secret references: `<provider-secret>` and `<observability-secret>`
 - API bearer token Secret reference: `coding-agent-coding-agent-api-key` key
   `api-key`
-- Langfuse OTLP endpoint reference: `LANGFUSE_BASE_URL` from
-  `coding-agent-langfuse`
-- a narrow NetworkPolicy egress exception for the mesh Langfuse endpoint
+- observability endpoint reference from `<observability-secret>`
+- a narrow NetworkPolicy egress exception placeholder for the observability
+  endpoint
 
 The file must not contain token values. If these Secrets are managed by
 SealedSecrets in the SRE repo, keep using SealedSecrets for the Secret manifests
 and keep this chart values file limited to names and keys.
 
-The Woodpecker o6n deploy script uses Helm server-side dry-run by default and
-passes `--take-ownership` so the first apply can adopt the existing deployment
-objects instead of failing on missing Helm ownership metadata.
+Real values live in the private SRE inventory and Woodpecker repository secrets:
+`deploy_values`, `kubeconfig`, `k8s_namespace`, and `image_repository`.
+
+The Woodpecker deploy script uses Helm server-side dry-run by default and passes
+`--take-ownership` so the first apply can adopt the existing deployment objects
+instead of failing on missing Helm ownership metadata.
 
 ## Health Checks
 
