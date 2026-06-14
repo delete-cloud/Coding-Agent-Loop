@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from coding_agent.postmortem_phase1 import (
+from coding_agent.core.postmortem_phase1 import (
     build_phase1_artifacts,
     collect_fix_commits,
 )
