@@ -309,6 +309,21 @@ async def test_topic_store_schema_is_idempotent(
     assert "CREATE TABLE IF NOT EXISTS topic_anchors" in schema_calls[0]
     assert "CREATE TABLE IF NOT EXISTS topic_recall_links" in schema_calls[0]
     assert "CREATE TABLE IF NOT EXISTS topic_costs" in schema_calls[0]
+    assert "topic_id TEXT NOT NULL REFERENCES topics(topic_id) ON DELETE CASCADE" in (
+        schema_calls[0]
+    )
+    assert (
+        "source_topic_id TEXT NOT NULL REFERENCES topics(topic_id) ON DELETE CASCADE"
+        in schema_calls[0]
+    )
+    assert (
+        "recalled_topic_id TEXT NOT NULL REFERENCES topics(topic_id) ON DELETE CASCADE"
+        in schema_calls[0]
+    )
+    assert (
+        "topic_id TEXT PRIMARY KEY REFERENCES topics(topic_id) ON DELETE CASCADE"
+        in schema_calls[0]
+    )
     assert "agent_tapes" not in schema_calls[0]
 
 

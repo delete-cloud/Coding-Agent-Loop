@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+import coding_agent.environment.archive as archive_module
 from coding_agent.environment.archive import (
     create_workspace_archive_base64,
     extract_workspace_archive_base64,
@@ -200,6 +201,21 @@ def test_workspace_archive_create_rejects_input_larger_than_limit(
     _ = (source / "large.bin").write_bytes(b"a" * (8 * 1024 * 1024 + 1))
 
     with pytest.raises(ValueError, match="exceeds 8 MiB limit"):
+        _ = create_workspace_archive_base64(source)
+
+
+def test_workspace_archive_create_rejects_too_many_members(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    for index in range(3):
+        _ = (source / f"file-{index}.txt").write_text(
+            f"{index}\n", encoding="utf-8"
+        )
+    monkeypatch.setattr(archive_module, "_MAX_WORKSPACE_ARCHIVE_MEMBERS", 2)
+
+    with pytest.raises(ValueError, match="contains too many members"):
         _ = create_workspace_archive_base64(source)
 
 

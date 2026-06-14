@@ -28,6 +28,7 @@ def create_workspace_archive_base64(workspace_root: Path) -> str:
 
     buffer = io.BytesIO()
     total_input_bytes = 0
+    member_count = 0
     with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
         for path in sorted(root.rglob("*")):
             relative = path.relative_to(root)
@@ -39,6 +40,9 @@ def create_workspace_archive_base64(workspace_root: Path) -> str:
                 )
             if not path.is_file():
                 continue
+            member_count += 1
+            if member_count > _MAX_WORKSPACE_ARCHIVE_MEMBERS:
+                raise ValueError("workspace archive contains too many members")
             stat_result = path.stat()
             total_input_bytes += stat_result.st_size
             _raise_if_archive_too_large(total_input_bytes)

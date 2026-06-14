@@ -122,6 +122,37 @@ def test_bee_pack_recall_filters_by_domain_profile_and_tag() -> None:
     assert [result.topic_id for result in plan.topic_results] == ["topic-backup"]
 
 
+def test_recall_planner_keeps_full_limit_when_source_topic_is_indexed() -> None:
+    index = TopicRangeIndex()
+    source = _topic(
+        "topic-000-source",
+        status="finalized",
+        title="JWT auth",
+        summary="JWT validation middleware",
+    )
+    for topic in (
+        source,
+        _topic("topic-auth-a", title="JWT auth", summary="JWT validation middleware"),
+        _topic("topic-auth-b", title="JWT auth", summary="JWT validation middleware"),
+    ):
+        index.index_topic(topic, profile="local")
+    planner = TopicRecallPlanner(topic_index=index)
+
+    plan = planner.plan(
+        TopicRecallPlannerInput(
+            source_topic=source,
+            text="jwt validation middleware",
+            profile="local",
+            limit=2,
+        )
+    )
+
+    assert [result.topic_id for result in plan.topic_results] == [
+        "topic-auth-a",
+        "topic-auth-b",
+    ]
+
+
 def test_recall_planner_recalls_accepted_memory() -> None:
     review_store = MemoryReviewStore()
     candidate = propose_memory_candidate_from_topic(
