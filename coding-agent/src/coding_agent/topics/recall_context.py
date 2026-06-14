@@ -115,7 +115,7 @@ def build_topic_recall_query(
         template_kind=planner_input.template_kind,
         tags=planner_input.tags,
         status="finalized",
-        limit=planner_input.limit,
+        limit=planner_input.limit + 1,
     )
 
 

@@ -198,7 +198,7 @@ class PGTopicStore:
         WHERE status = 'open';
 
     CREATE TABLE IF NOT EXISTS topic_anchors (
-        topic_id TEXT NOT NULL,
+        topic_id TEXT NOT NULL REFERENCES topics(topic_id) ON DELETE CASCADE,
         tape_id TEXT NOT NULL,
         seq INTEGER NOT NULL,
         anchor_type TEXT NOT NULL,
@@ -212,8 +212,8 @@ class PGTopicStore:
         ON topic_anchors (tape_id, seq);
 
     CREATE TABLE IF NOT EXISTS topic_recall_links (
-        source_topic_id TEXT NOT NULL,
-        recalled_topic_id TEXT NOT NULL,
+        source_topic_id TEXT NOT NULL REFERENCES topics(topic_id) ON DELETE CASCADE,
+        recalled_topic_id TEXT NOT NULL REFERENCES topics(topic_id) ON DELETE CASCADE,
         relation TEXT NOT NULL,
         anchor_seq INTEGER,
         source_entry_start_seq INTEGER,
@@ -227,7 +227,7 @@ class PGTopicStore:
         ON topic_recall_links (recalled_topic_id, source_topic_id);
 
     CREATE TABLE IF NOT EXISTS topic_costs (
-        topic_id TEXT PRIMARY KEY,
+        topic_id TEXT PRIMARY KEY REFERENCES topics(topic_id) ON DELETE CASCADE,
         prompt_tokens BIGINT NOT NULL DEFAULT 0,
         completion_tokens BIGINT NOT NULL DEFAULT 0,
         total_tokens BIGINT NOT NULL DEFAULT 0,
