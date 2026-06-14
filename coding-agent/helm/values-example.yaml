@@ -1,5 +1,5 @@
 image:
-  repository: git.mesh.kinaz.me/kina/coding-agent
+  repository: <registry>/<namespace>/coding-agent
   tag: main
   pullPolicy: IfNotPresent
 
@@ -13,20 +13,22 @@ server:
 
 cors:
   origins:
-    - http://100.123.220.136:30082
+    - https://<agent-host>
 
 service:
   type: NodePort
   port: 8080
-  nodePort: 30082
+  # Example only. Pick an available NodePort in the target cluster.
+  nodePort: 30080
 
 agent:
   secretRef:
-    - coding-agent-deepseek
-    - coding-agent-langfuse
+    - <provider-secret>
+    - <observability-secret>
   config:
-    provider: deepseek
-    model: deepseek-chat
+    # Example OpenAI-compatible provider settings. Replace for the target runtime.
+    provider: openai
+    model: gpt-4.1
     approvalPolicy: auto
     maxTurns: 30
     subagentTimeout: 30.0
@@ -39,15 +41,15 @@ agent:
 observability:
   enabled: true
   backend: langfuse
-  endpointEnv: LANGFUSE_BASE_URL
-  publicKeyEnv: LANGFUSE_PUBLIC_KEY
-  secretKeyEnv: LANGFUSE_SECRET_KEY
+  endpointEnv: <observability-endpoint-env>
+  publicKeyEnv: <observability-public-key-env>
+  secretKeyEnv: <observability-secret-key-env>
 
 networkPolicy:
   extraEgress:
     - to:
         - ipBlock:
-            cidr: 100.123.220.136/32
+            cidr: <observability-host-ip>/32
       ports:
         - protocol: TCP
           port: 443

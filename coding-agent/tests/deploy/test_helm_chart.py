@@ -131,7 +131,7 @@ def test_helm_chart_lints() -> None:
         None,
         "values-orbstack.yaml",
         "values-orbstack-kimi.yaml",
-        "values-o6n-deepseek.yaml",
+        "values-example.yaml",
     ],
 )
 def test_helm_values_render(values_file: str | None) -> None:
@@ -494,8 +494,8 @@ def test_helm_agent_base_url_override_is_rendered() -> None:
     assert _agent_toml(docs)["agent"]["base_url"] == "https://llm-proxy.example/v1"
 
 
-def test_helm_o6n_deepseek_values_preserve_live_runtime_contract() -> None:
-    docs = _render("-f", str(CHART / "values-o6n-deepseek.yaml"))
+def test_helm_example_values_preserve_template_runtime_contract() -> None:
+    docs = _render("-f", str(CHART / "values-example.yaml"))
 
     service = _service(docs)
     assert service["spec"]["type"] == "NodePort"
@@ -504,14 +504,14 @@ def test_helm_o6n_deepseek_values_preserve_live_runtime_contract() -> None:
         "port": 8080,
         "targetPort": "http",
         "protocol": "TCP",
-        "nodePort": 30082,
+        "nodePort": 30080,
     }
 
     main = _container(docs)
-    assert main["image"] == "git.mesh.kinaz.me/kina/coding-agent:main"
+    assert main["image"] == "<registry>/<namespace>/coding-agent:main"
     assert main["envFrom"] == [
-        {"secretRef": {"name": "coding-agent-deepseek"}},
-        {"secretRef": {"name": "coding-agent-langfuse"}},
+        {"secretRef": {"name": "<provider-secret>"}},
+        {"secretRef": {"name": "<observability-secret>"}},
     ]
     assert _env_var(main, "CODING_AGENT_API_KEY")["valueFrom"]["secretKeyRef"] == {
         "name": "coding-agent-coding-agent-api-key",
@@ -519,37 +519,38 @@ def test_helm_o6n_deepseek_values_preserve_live_runtime_contract() -> None:
     }
 
     config = _agent_toml(docs)
-    assert config["agent"]["provider"] == "deepseek"
-    assert config["agent"]["model"] == "deepseek-chat"
+    assert config["agent"]["provider"] == "openai"
+    assert config["agent"]["model"] == "gpt-4.1"
     assert config["server"]["bearer_token_env"] == "CODING_AGENT_API_KEY"
     assert config["observability"] == {
         "enabled": True,
         "backend": "langfuse",
-        "endpoint_env": "LANGFUSE_BASE_URL",
+        "endpoint_env": "<observability-endpoint-env>",
         "timeout_seconds": 2,
-        "public_key_env": "LANGFUSE_PUBLIC_KEY",
-        "secret_key_env": "LANGFUSE_SECRET_KEY",
+        "public_key_env": "<observability-public-key-env>",
+        "secret_key_env": "<observability-secret-key-env>",
     }
 
     policy = _network_policy(docs)
     assert policy["spec"]["egress"][-1] == {
-        "to": [{"ipBlock": {"cidr": "100.123.220.136/32"}}],
+        "to": [{"ipBlock": {"cidr": "<observability-host-ip>/32"}}],
         "ports": [{"protocol": "TCP", "port": 443}],
     }
 
 
-def test_helm_o6n_deepseek_config_bootstraps_runtime(
+def test_helm_example_config_bootstraps_runtime(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    docs = _render("-f", str(CHART / "values-o6n-deepseek.yaml"))
+    docs = _render("-f", str(CHART / "values-example.yaml"))
     config_path = tmp_path / "agent.toml"
     config_path.write_text(_agent_toml_text(docs), encoding="utf-8")
     monkeypatch.setenv(
-        "LANGFUSE_BASE_URL", "https://langfuse.example.test/api/public/otel"
+        "<observability-endpoint-env>",
+        "https://observability.example.test/api/public/otel",
     )
-    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
-    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
+    monkeypatch.setenv("<observability-public-key-env>", "pk-test")
+    monkeypatch.setenv("<observability-secret-key-env>", "sk-test")
 
     pipeline, _ = create_agent(
         config_path=config_path,

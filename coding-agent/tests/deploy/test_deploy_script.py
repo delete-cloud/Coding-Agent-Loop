@@ -61,9 +61,9 @@ def test_deploy_script_defaults_to_helm_dry_run_without_kubectl_mutation(
     assert result.returncode == 0, result.stderr
     calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
     assert "helm upgrade --install coding-agent coding-agent/helm" in calls
-    assert "--namespace coding-agent-deepseek" in calls
-    assert "--values coding-agent/helm/values-o6n-deepseek.yaml" in calls
-    assert "--set image.repository=git.mesh.kinaz.me/kina/coding-agent" in calls
+    assert "--namespace coding-agent" in calls
+    assert "--values coding-agent/helm/values-example.yaml" in calls
+    assert "--set image.repository=<registry>/<namespace>/coding-agent" in calls
     assert "--set image.tag=test-sha" in calls
     assert "--take-ownership" in calls
     assert "--dry-run=server" in calls
@@ -81,11 +81,26 @@ def test_deploy_script_apply_mode_waits_for_rollout_and_smokes_service(
     assert "helm upgrade --install coding-agent coding-agent/helm" in calls
     assert "--take-ownership" in calls
     assert "--dry-run" not in calls
-    assert "kubectl -n coding-agent-deepseek rollout status" in calls
+    assert "kubectl -n coding-agent rollout status" in calls
     assert (
-        "curl -fsS http://coding-agent-coding-agent.coding-agent-deepseek.svc.cluster.local:8080/healthz"
+        "curl -fsS http://coding-agent-coding-agent.coding-agent.svc.cluster.local:8080/healthz"
         in calls
     )
+
+
+def test_deploy_script_uses_values_content_temp_file_when_present(
+    tmp_path: Path,
+) -> None:
+    values_content = "image:\n  repository: example.invalid/coding-agent\n"
+    result = _run_script(tmp_path, VALUES_CONTENT=values_content)
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls.log").read_text(encoding="utf-8")
+    helm_call = next(line for line in calls.splitlines() if "helm upgrade" in line)
+    parts = helm_call.split()
+    values_path = Path(parts[parts.index("--values") + 1])
+    assert values_path.read_text(encoding="utf-8") == values_content
+    assert "coding-agent/helm/values-example.yaml" not in helm_call
 
 
 def test_woodpecker_builds_deploy_tools_image_used_by_manual_deploy() -> None:

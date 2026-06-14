@@ -3,21 +3,25 @@ when:
     branch: main
 
 steps:
-  deploy-o6n:
+  deploy:
+    # Built by this repository's CI and pushed to the build registry.
     image: git.mesh.kinaz.me/kina/coding-agent-deploy-tools:kubectl-1.36.0-helm-3.17.3-python-3.12-slim
     environment:
       KUBECONFIG_CONTENT:
         from_secret: kubeconfig
-      IMAGE_REPOSITORY: git.mesh.kinaz.me/kina/coding-agent
+      IMAGE_REPOSITORY:
+        from_secret: image_repository
       IMAGE_TAG: ${CI_COMMIT_SHA}
-      K8S_NAMESPACE: coding-agent-deepseek
+      K8S_NAMESPACE:
+        from_secret: k8s_namespace
       K8S_DEPLOYMENT: coding-agent-coding-agent
       K8S_CONTAINER: coding-agent
       ROLLOUT_TIMEOUT: 420s
       ENABLE_POD_HEALTH_SMOKE: "1"
       HELM_RELEASE: coding-agent
       HELM_CHART_DIR: coding-agent/helm
-      HELM_VALUES: coding-agent/helm/values-o6n-deepseek.yaml
+      VALUES_CONTENT:
+        from_secret: deploy_values
       HELM_DEPLOY_MODE: dry-run
       HELM_DRIVER: configmap
     commands:
