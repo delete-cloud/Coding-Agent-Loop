@@ -38,7 +38,7 @@ from .workspace_provider import (
     WorkspaceStatus,
     register_workspace_provider,
 )
-from ..workspace_archive import (
+from .archive import (
     create_workspace_archive_base64,
     extract_workspace_archive_base64,
     should_exclude_workspace_archive_path,
