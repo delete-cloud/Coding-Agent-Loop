@@ -4,7 +4,7 @@ from pathlib import Path
 
 import click
 
-from coding_agent.postmortem_phase1 import build_phase1_artifacts
+from coding_agent.core.postmortem_phase1 import build_phase1_artifacts
 
 
 @click.group()

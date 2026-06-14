@@ -24,3 +24,4 @@ data/eval/golden/*
 !data/eval/golden/*.yaml
 
 .alma-snapshots
+bee-pack-v4pro-round1/
