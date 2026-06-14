@@ -1,7 +1,7 @@
 """Tests for adapter_types module."""
 
 import pytest
-from coding_agent.adapter_types import TurnOutcome, StopReason
+from coding_agent.adapter.types import TurnOutcome, StopReason
 
 
 class TestStopReasonEnum:

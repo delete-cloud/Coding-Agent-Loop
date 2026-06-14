@@ -3,17 +3,17 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 
-from coding_agent.recall_evaluation import (
+from coding_agent.topics.recall_evaluation import (
     RecallEvalCase,
     RecallEvalVariant,
     evaluate_recall_variants,
 )
-from coding_agent.topic_memory import (
+from coding_agent.topics.memory import (
     MemoryReviewStore,
     propose_memory_candidate_from_topic,
 )
-from coding_agent.topic_range_index import TopicRangeIndex
-from coding_agent.topic_store import TopicRecord
+from coding_agent.topics.range_index import TopicRangeIndex
+from coding_agent.topics.store import TopicRecord
 
 
 def test_recall_eval_report_compares_all_recall_variants() -> None:

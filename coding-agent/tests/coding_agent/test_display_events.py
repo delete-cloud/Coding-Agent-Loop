@@ -8,7 +8,7 @@ from coding_agent.events import (
     project_runtime_event_to_display,
     project_wire_sse_event_to_display,
 )
-from coding_agent.runtime_store import RuntimeEventRecord
+from coding_agent.stores.runtime_store import RuntimeEventRecord
 
 
 def _runtime_event(

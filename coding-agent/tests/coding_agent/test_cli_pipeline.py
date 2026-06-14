@@ -11,7 +11,7 @@ import pytest
 from click.testing import CliRunner
 
 from coding_agent.adapter import PipelineAdapter
-from coding_agent.adapter_types import StopReason, TurnOutcome
+from coding_agent.adapter.types import StopReason, TurnOutcome
 
 
 # ---------------------------------------------------------------------------

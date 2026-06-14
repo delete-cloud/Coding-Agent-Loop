@@ -8,7 +8,7 @@ from typing import cast
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from coding_agent.runtime_store import (
+from coding_agent.stores.runtime_store import (
     AgentInteractionRecord,
     AgentRunRecord,
     RunMessageSnapshotRecord,

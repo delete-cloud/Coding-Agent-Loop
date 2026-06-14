@@ -6,7 +6,7 @@ from datetime import datetime
 import pytest
 
 from coding_agent.approval import ApprovalInteractionService
-from coding_agent.runtime_store import AgentInteractionRecord, JSONObject
+from coding_agent.stores.runtime_store import AgentInteractionRecord, JSONObject
 from coding_agent.wire.protocol import ApprovalRequest, ApprovalResponse, ToolCallDelta
 
 

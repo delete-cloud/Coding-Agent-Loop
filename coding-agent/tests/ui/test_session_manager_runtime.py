@@ -16,8 +16,8 @@ from agentkit.checkpoint.models import CheckpointMeta
 from agentkit.tools import FatalToolExecutionError
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
-from coding_agent.adapter_types import StopReason, TurnOutcome
-from coding_agent.agent_observability import JsonlAgentObservationStore
+from coding_agent.adapter.types import StopReason, TurnOutcome
+from coding_agent.observability.agent import JsonlAgentObservationStore
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.environment import (
     CloudCommandResult,
@@ -34,7 +34,7 @@ from coding_agent.executors import (
     LocalDaemonRuntimeResult,
     RunExecutorTargetError,
 )
-from coding_agent.runtime_store import (
+from coding_agent.stores.runtime_store import (
     AgentInteractionRecord,
     AgentRunRecord,
     RunMessageSnapshotRecord,

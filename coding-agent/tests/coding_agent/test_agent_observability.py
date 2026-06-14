@@ -6,7 +6,7 @@ import httpx
 
 from agentkit.observability import SpanRecord
 from agentkit.tape.extract import ToolCallRecord, TurnTrace
-from coding_agent.agent_observability import (
+from coding_agent.observability.agent import (
     AgentObservationRecorder,
     JsonlAgentObservationStore,
     sanitized_turn_projection,
@@ -356,7 +356,7 @@ def test_recorder_emits_nested_typed_spans_with_real_times(tmp_path, monkeypatch
         clock["now"] += 5.0
         return value
 
-    monkeypatch.setattr("coding_agent.agent_observability.time.time", fake_time)
+    monkeypatch.setattr("coding_agent.observability.agent.time.time", fake_time)
 
     store = JsonlAgentObservationStore(tmp_path)
     sink = RecordingSink()

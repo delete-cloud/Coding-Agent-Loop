@@ -6,12 +6,12 @@ from typing import Any, Protocol
 from agentkit.observability import ObservationSink
 from agentkit.tape.extract import TurnTrace, extract_turns
 
-from coding_agent.agent_observability import (
+from coding_agent.observability.agent import (
     AgentObservationRecorder,
     AgentObservationStatus,
     AgentObservationStore,
 )
-from coding_agent.runtime_store import JSONObject
+from coding_agent.stores.runtime_store import JSONObject
 from coding_agent.runs.lifecycle import RuntimeRunResumeContext
 from coding_agent.runs.target import (
     RunTarget,

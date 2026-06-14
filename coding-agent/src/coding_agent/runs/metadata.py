@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, cast
 
-from coding_agent.runtime_store import JSONObject, JSONValue
+from coding_agent.stores.runtime_store import JSONObject, JSONValue
 
 from .lifecycle import RuntimeRunResumeContext
 from .target import (

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal, Protocol, cast
 
-from coding_agent.runtime_store import AgentRunRecord, JSONObject
+from coding_agent.stores.runtime_store import AgentRunRecord, JSONObject
 from coding_agent.stores import RuntimeRunLifecycleStore
 
 

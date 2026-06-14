@@ -4,11 +4,11 @@ from datetime import UTC, datetime
 
 import pytest
 
-from coding_agent.topic_range_index import (
+from coding_agent.topics.range_index import (
     TopicRangeIndex,
     TopicRangeSearchQuery,
 )
-from coding_agent.topic_store import TopicRecord
+from coding_agent.topics.store import TopicRecord
 
 
 def test_topic_range_index_indexes_finalized_topic_and_searches_text() -> None:

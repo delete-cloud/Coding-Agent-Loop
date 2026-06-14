@@ -8,13 +8,13 @@ import pytest
 
 from agentkit.checkpoint.models import CheckpointMeta, CheckpointSnapshot
 
-from coding_agent.pg_durable_store import (
+from coding_agent.stores.durable_pg import (
     FencedPGCheckpointStore,
     FencedPGRuntimeStore,
     FencedPGTapeStore,
     PGDurableStore,
 )
-from coding_agent.runtime_store import (
+from coding_agent.stores.runtime_store import (
     AgentInteractionRecord,
     AgentRunRecord,
     RunMessageSnapshotRecord,

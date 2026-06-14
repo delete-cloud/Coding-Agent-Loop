@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from coding_agent.topic_provenance import (
+from coding_agent.topics.provenance import (
     TopicEntryRange,
     topic_cost_delta,
     topic_entry_range,
@@ -13,7 +13,7 @@ from coding_agent.topic_provenance import (
     topic_metric_attributes,
     update_topic_cost,
 )
-from coding_agent.topic_store import TopicCostRecord, TopicRecord
+from coding_agent.topics.store import TopicCostRecord, TopicRecord
 
 
 class FakeTopicCostStore:

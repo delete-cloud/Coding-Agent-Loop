@@ -12,7 +12,7 @@ from httpx import ASGITransport, AsyncClient
 from coding_agent.environment import CloudCommandResult, WorkspaceProviderCapabilities
 from coding_agent.observability import prometheus_metrics_text, reset_prometheus_metrics
 from coding_agent.plugins.core_tools import CoreToolsPlugin
-from coding_agent.runtime_store import (
+from coding_agent.stores.runtime_store import (
     AgentInteractionRecord,
     AgentRunRecord,
     RunMessageSnapshotRecord,

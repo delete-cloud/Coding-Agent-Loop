@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from coding_agent.runtime_store import AgentRunRecord, JSONObject
+from coding_agent.stores.runtime_store import AgentRunRecord, JSONObject
 from coding_agent.runs import RuntimeRunRecoveryService
 from coding_agent.runs.recovery import (
     STALE_RUNTIME_RUN_ERROR,

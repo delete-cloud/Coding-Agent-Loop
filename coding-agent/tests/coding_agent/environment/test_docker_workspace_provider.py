@@ -22,7 +22,7 @@ from coding_agent.environment import (
     provision_cloud_binding_from_config,
 )
 from coding_agent.runs import CloudWorkspaceRef
-from coding_agent.workspace_archive import create_workspace_archive_base64
+from coding_agent.environment.archive import create_workspace_archive_base64
 
 
 TIMEOUT_SENTINEL_PREFIX = "__CODING_AGENT_DOCKER_TIMEOUT__:"

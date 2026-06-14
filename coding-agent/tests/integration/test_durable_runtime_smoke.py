@@ -17,9 +17,9 @@ from agentkit.observability import SpanRecord
 from agentkit.runtime.context import AgentRunContext
 from agentkit.storage.pg import PGTapeStore
 from agentkit.tape.tape import Tape
-from coding_agent.adapter_types import StopReason, TurnOutcome
+from coding_agent.adapter.types import StopReason, TurnOutcome
 from coding_agent.observability import OtlpHttpObservationSink
-from coding_agent.runtime_store import (
+from coding_agent.stores.runtime_store import (
     AgentInteractionRecord,
     AgentRunRecord,
     JSONObject,

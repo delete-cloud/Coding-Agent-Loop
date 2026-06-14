@@ -6,7 +6,7 @@ import time
 from collections import defaultdict
 from typing import Any, Callable
 
-from coding_agent.agent_identity import effective_agent_id, legacy_agent_id_str
+from coding_agent.core.agent_identity import effective_agent_id, legacy_agent_id_str
 
 
 class SessionMetricsPlugin:

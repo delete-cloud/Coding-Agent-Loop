@@ -16,7 +16,7 @@ from coding_agent.action_safety import (
     ActionObservation,
     ActionObservationStatus,
 )
-from coding_agent.context_pack import ContextPack, ContextPackItem, ContextPackSection
+from coding_agent.topics.context_pack import ContextPack, ContextPackItem, ContextPackSection
 from coding_agent.kb import DocumentChunk, KBSearchResult
 from coding_agent.observability import OtlpHttpObservationSink
 from coding_agent.plugins.kb import (

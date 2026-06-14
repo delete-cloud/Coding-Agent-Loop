@@ -7,15 +7,15 @@ from typing import cast
 
 import pytest
 
-from coding_agent.bee_command_bridge import (
+from coding_agent.bee.command_bridge import (
     complete_bee_node_from_bridge_result,
     plan_bee_command_intent,
 )
-from coding_agent.bee_workspace import (
+from coding_agent.bee.workspace import (
     build_bee_manifest_from_workspace_template,
     load_bee_workspace_template,
 )
-from coding_agent.external_executor import (
+from coding_agent.executors.external import (
     ArgoWorkflowExecutorAdapter,
     DockerExecutorAdapter,
     ExecutorCapability,

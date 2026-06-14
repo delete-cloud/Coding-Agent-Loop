@@ -8,7 +8,7 @@ from typing import cast
 
 import pytest
 
-from coding_agent.runtime_store import (
+from coding_agent.stores.runtime_store import (
     AgentRunRecord,
     JSONObject,
     RunMessageSnapshotRecord,

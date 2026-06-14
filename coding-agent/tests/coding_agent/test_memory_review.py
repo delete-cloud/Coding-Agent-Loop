@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from coding_agent.topic_memory import (
+from coding_agent.topics.memory import (
     MemoryReviewStore,
     TopicDerivedMemoryCandidate,
     accepted_memory_context_messages,

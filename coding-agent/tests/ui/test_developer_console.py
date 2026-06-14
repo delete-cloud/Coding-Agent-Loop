@@ -9,28 +9,28 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from agentkit.storage.protocols import TapeInfo, TapeSearchResult
-from coding_agent.bee_launch import BeeLaunchRecord
-from coding_agent.bee_workspace import (
+from coding_agent.bee.launch import BeeLaunchRecord
+from coding_agent.bee.workspace import (
     BeeWorkspaceRunArtifacts,
     BeeWorkspaceRunNode,
     write_bee_workspace_run_artifacts,
 )
 from coding_agent.core.config import settings
 from coding_agent.environment import WorkspaceProviderCapabilities
-from coding_agent.external_executor import ExecutorRunRecord
+from coding_agent.executors.external import ExecutorRunRecord
 from coding_agent.observability import prometheus_metrics_text, reset_prometheus_metrics
-from coding_agent.runtime_store import (
+from coding_agent.stores.runtime_store import (
     AgentInteractionRecord,
     AgentRunRecord,
     RunMessageSnapshotRecord,
     RuntimeEventRecord,
 )
-from coding_agent.scheduled_runs import (
+from coding_agent.runs.scheduled import (
     ProactiveSignalRecord,
     ScheduleRecord,
     ScheduleTriggerRecord,
 )
-from coding_agent.topic_store import (
+from coding_agent.topics.store import (
     TopicAnchorRecord,
     TopicCostRecord,
     TopicRecallLinkRecord,

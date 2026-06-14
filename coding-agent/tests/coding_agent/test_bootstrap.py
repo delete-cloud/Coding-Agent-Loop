@@ -18,7 +18,7 @@ from coding_agent.observability import (
     CompositeObservationSink,
     PrometheusMetricsObservationSink,
 )
-from coding_agent.topic_memory import MemoryReviewStore
+from coding_agent.topics.memory import MemoryReviewStore
 
 
 class NonLocalEnvironment:

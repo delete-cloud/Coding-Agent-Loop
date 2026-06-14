@@ -6,7 +6,7 @@ from typing import cast
 import pytest
 
 from agentkit.storage.pg import AsyncPGPool, PGPool
-from coding_agent.topic_store import (
+from coding_agent.topics.store import (
     PGTopicStore,
     TopicAnchorRecord,
     TopicCostRecord,

@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 import pytest
 
 from coding_agent.approval import ApprovalPolicy
-from coding_agent.runtime_store import AgentRunRecord, JSONObject, RuntimeEventRecord
+from coding_agent.stores.runtime_store import AgentRunRecord, JSONObject, RuntimeEventRecord
 from coding_agent.runs import (
     ExternalWorkerExecutorRef,
     ExternalWorkerWorkspaceRef,

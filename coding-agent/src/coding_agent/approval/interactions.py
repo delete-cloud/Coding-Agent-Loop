@@ -7,7 +7,7 @@ from enum import Enum
 from math import isfinite
 from typing import Protocol, cast
 
-from coding_agent.runtime_store import (
+from coding_agent.stores.runtime_store import (
     AgentInteractionRecord,
     JSONObject,
     JSONValue,

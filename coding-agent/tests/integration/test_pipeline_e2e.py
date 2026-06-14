@@ -16,7 +16,7 @@ from agentkit.tape.store import ForkTapeStore
 
 from coding_agent.__main__ import create_agent
 from coding_agent.adapter import PipelineAdapter
-from coding_agent.adapter_types import StopReason, TurnOutcome
+from coding_agent.adapter.types import StopReason, TurnOutcome
 from coding_agent.evaluation import build_test_cases, load_tape_entries
 from coding_agent.wire.protocol import (
     StreamDelta,

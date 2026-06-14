@@ -815,7 +815,7 @@ def test_storage_migrate_sqlite_command_reports_counts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from coding_agent.cli import main as cli_main
-    from coding_agent.storage_migration import (
+    from coding_agent.stores.migration import (
         LegacySQLiteMigrationReport,
         StoreMigrationReport,
     )

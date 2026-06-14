@@ -6,7 +6,7 @@ from typing import cast
 import pytest
 
 from agentkit.storage.pg import AsyncPGPool, PGPool
-from coding_agent.runtime_store import (
+from coding_agent.stores.runtime_store import (
     AgentInteractionRecord,
     AgentRunRecord,
     PGRuntimeStore,

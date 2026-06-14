@@ -8,7 +8,7 @@ from coding_agent.environment import (
     import_workspace_archive_from_config,
     provision_cloud_binding_from_config,
 )
-from coding_agent.workspace_archive import (
+from coding_agent.environment.archive import (
     create_workspace_archive_base64,
     extract_workspace_archive_base64,
 )

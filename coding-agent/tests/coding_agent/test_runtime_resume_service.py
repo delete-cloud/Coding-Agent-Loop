@@ -8,7 +8,7 @@ import pytest
 from agentkit.checkpoint.models import CheckpointMeta
 from agentkit.tape.models import Entry
 
-from coding_agent.runtime_store import AgentRunRecord, RunMessageSnapshotRecord
+from coding_agent.stores.runtime_store import AgentRunRecord, RunMessageSnapshotRecord
 from coding_agent.runs import (
     RuntimeResumeOrchestrationService,
     RuntimeResumeService,

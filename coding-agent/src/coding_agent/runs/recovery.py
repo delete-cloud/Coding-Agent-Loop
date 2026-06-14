@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import cast
 
-from coding_agent.runtime_store import AgentRunRecord, JSONObject
+from coding_agent.stores.runtime_store import AgentRunRecord, JSONObject
 from coding_agent.stores import RuntimeRunRecoveryStore
 
 STALE_RUNTIME_RUN_ERROR = "runtime run was still running during startup recovery"

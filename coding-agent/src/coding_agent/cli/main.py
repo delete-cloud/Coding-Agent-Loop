@@ -13,7 +13,7 @@ from typing import get_args
 
 import click
 
-from coding_agent.app import create_agent, create_child_pipeline  # noqa: F401
+from coding_agent.core.app import create_agent, create_child_pipeline  # noqa: F401
 from coding_agent.cli.acp_command import acp
 from coding_agent.cli.kb_commands import kb
 from coding_agent.cli.oauth_commands import oauth_cli
@@ -30,8 +30,8 @@ from coding_agent.cli.local_runtime import (
     create_local_cli_session_manager,
     local_cli_session_origin,
 )
-from coding_agent.storage_migration import migrate_legacy_storage_to_sqlite
-from coding_agent.local_storage import local_sqlite_storage_config
+from coding_agent.stores.migration import migrate_legacy_storage_to_sqlite
+from coding_agent.stores.local import local_sqlite_storage_config
 from coding_agent.ui.headless import HeadlessConsumer
 from coding_agent.ui.rich_tui import CodingAgentTUI
 from coding_agent.wire.protocol import TurnEnd, WireMessage

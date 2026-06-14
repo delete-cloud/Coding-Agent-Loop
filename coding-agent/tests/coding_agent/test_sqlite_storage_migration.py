@@ -9,7 +9,7 @@ import pytest
 from agentkit.checkpoint.models import CheckpointMeta, CheckpointSnapshot
 from agentkit.storage.checkpoint_fs import FSCheckpointStore
 from agentkit.storage.sqlite import SQLiteCheckpointStore, SQLiteTapeStore
-from coding_agent.storage_migration import (
+from coding_agent.stores.migration import (
     migrate_fs_checkpoints_to_sqlite,
     migrate_jsonl_tapes_to_sqlite,
     migrate_legacy_storage_to_sqlite,

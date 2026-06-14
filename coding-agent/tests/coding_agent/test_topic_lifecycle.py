@@ -8,7 +8,7 @@ import pytest
 from agentkit.tape.anchor import Anchor
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
-from coding_agent.topic_lifecycle import (
+from coding_agent.topics.lifecycle import (
     TOPIC_ABORTED,
     TOPIC_FINALIZED,
     TOPIC_INITIAL,
@@ -16,8 +16,8 @@ from coding_agent.topic_lifecycle import (
     find_topic_anchors,
     topic_range_entries,
 )
-from coding_agent.topic_memory import MemoryReviewStore
-from coding_agent.topic_store import (
+from coding_agent.topics.memory import MemoryReviewStore
+from coding_agent.topics.store import (
     JSONObject,
     TopicAnchorRecord,
     TopicRecord,

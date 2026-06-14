@@ -13,7 +13,7 @@ from coding_agent.observability import (
     PrometheusMetricsObservationSink,
     PrometheusMetricsRecorder,
 )
-from coding_agent.scheduled_runs import (
+from coding_agent.runs.scheduled import (
     PGScheduledRunStore,
     ProactiveSignalPlanner,
     ProactiveSignalRecord,
@@ -23,8 +23,8 @@ from coding_agent.scheduled_runs import (
     ScheduledRunLaunchPreparer,
     ScheduledRunPlanner,
 )
-from coding_agent.topic_lifecycle import TopicLifecycle
-from coding_agent.topic_store import JSONObject, TopicAnchorRecord, TopicRecord
+from coding_agent.topics.lifecycle import TopicLifecycle
+from coding_agent.topics.store import JSONObject, TopicAnchorRecord, TopicRecord
 from coding_agent.server.developer_console import (
     ConsoleProactiveSignalSummary,
     ConsoleScheduleSummary,

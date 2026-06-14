@@ -7,7 +7,7 @@ import json
 import uuid
 from typing import Literal, cast
 
-from coding_agent.runtime_store import JSONObject, JSONValue, RuntimeEventRecord
+from coding_agent.stores.runtime_store import JSONObject, JSONValue, RuntimeEventRecord
 
 DisplayEventKind = Literal[
     "assistant_text_delta",

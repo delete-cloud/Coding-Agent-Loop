@@ -2,18 +2,18 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from coding_agent.bee_workspace import (
+from coding_agent.bee.workspace import (
     BeeWorkspaceExecutorRunArtifact,
     BeeWorkspaceRunArtifacts,
     BeeWorkspaceRunNode,
 )
-from coding_agent.topic_memory import (
+from coding_agent.topics.memory import (
     MEMORY_CANDIDATE_STATUS,
     MEMORY_REFERENCE_MODE,
     propose_memory_candidate_from_topic,
     propose_memory_candidates_from_bee_artifacts,
 )
-from coding_agent.topic_store import TopicRecord
+from coding_agent.topics.store import TopicRecord
 
 
 def test_topic_finalization_creates_memory_candidate_with_provenance() -> None:

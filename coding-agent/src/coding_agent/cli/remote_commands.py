@@ -201,7 +201,7 @@ def _remote_run_once(
         get_remote,
         stream_prompt,
     )
-    from coding_agent.workspace_archive import (
+    from coding_agent.environment.archive import (
         create_workspace_archive_base64,
     )
 
@@ -1528,7 +1528,7 @@ def _download_and_restore_workspace(
         download_workspace_archive,
         download_workspace_manifest,
     )
-    from coding_agent.workspace_archive import extract_workspace_archive_base64
+    from coding_agent.environment.archive import extract_workspace_archive_base64
 
     manifest = download_workspace_manifest(
         base_url=base_url,

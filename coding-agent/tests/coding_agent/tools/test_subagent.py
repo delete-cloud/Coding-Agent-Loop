@@ -15,7 +15,7 @@ from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
 from agentkit.tools import FatalToolExecutionError
 from agentkit.tools import ToolCallRequest, Toolset
-from coding_agent.adapter_types import StopReason, TurnOutcome
+from coding_agent.adapter.types import StopReason, TurnOutcome
 from coding_agent.__main__ import create_agent, create_child_pipeline
 from coding_agent.environment import CloudCommandResult, CloudEnvironment, LocalEnvironment
 from coding_agent.plugins.core_tools import CoreToolsPlugin

@@ -1514,7 +1514,7 @@ async def test_attached_executor_records_agent_phase_span(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from coding_agent.adapter_types import StopReason, TurnOutcome
+    from coding_agent.adapter.types import StopReason, TurnOutcome
     from coding_agent.remote import worker as remote_worker
 
     sink = RecordingObservationSink()
@@ -2952,7 +2952,7 @@ def test_remote_download_fetches_manifest_and_confirms_before_overwrite(
 
     monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
     monkeypatch.setattr(
-        "coding_agent.workspace_archive.extract_workspace_archive_base64",
+        "coding_agent.environment.archive.extract_workspace_archive_base64",
         lambda repo_path_arg, archive_base64: applied.append(
             (repo_path_arg, archive_base64)
         ),
@@ -3861,7 +3861,7 @@ def test_remote_repl_with_repo_uploads_snapshot_and_downloads_workspace(
     monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
     monkeypatch.setattr("coding_agent.remote.client.stream_prompt", fake_stream_prompt)
     monkeypatch.setattr(
-        "coding_agent.workspace_archive.create_workspace_archive_base64",
+        "coding_agent.environment.archive.create_workspace_archive_base64",
         lambda path: "archive-encoded",
     )
 
@@ -3887,7 +3887,7 @@ def test_remote_repl_with_repo_uploads_snapshot_and_downloads_workspace(
         fake_download_workspace_manifest,
     )
     monkeypatch.setattr(
-        "coding_agent.workspace_archive.extract_workspace_archive_base64",
+        "coding_agent.environment.archive.extract_workspace_archive_base64",
         lambda repo_path_arg, archive_base64: applied.append(
             (repo_path_arg, archive_base64)
         ),
@@ -4019,11 +4019,11 @@ def test_remote_run_with_repo_does_not_download_or_cleanup_by_default(
     monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
     monkeypatch.setattr("coding_agent.remote.client.stream_prompt", fake_stream_prompt)
     monkeypatch.setattr(
-        "coding_agent.workspace_archive.create_workspace_archive_base64",
+        "coding_agent.environment.archive.create_workspace_archive_base64",
         lambda path: "archive-encoded",
     )
     monkeypatch.setattr(
-        "coding_agent.workspace_archive.extract_workspace_archive_base64",
+        "coding_agent.environment.archive.extract_workspace_archive_base64",
         lambda repo_path_arg, archive_base64: applied.append(
             (repo_path_arg, archive_base64)
         ),
@@ -4138,7 +4138,7 @@ def test_remote_run_clean_git_repo_uses_git_workspace_source(
     monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
     monkeypatch.setattr("coding_agent.remote.client.stream_prompt", fake_stream_prompt)
     monkeypatch.setattr(
-        "coding_agent.workspace_archive.create_workspace_archive_base64",
+        "coding_agent.environment.archive.create_workspace_archive_base64",
         fail_archive,
     )
 
@@ -4332,7 +4332,7 @@ def test_remote_run_snapshot_fallback_uploads_archive_for_local_only_repo(
     monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
     monkeypatch.setattr("coding_agent.remote.client.stream_prompt", fake_stream_prompt)
     monkeypatch.setattr(
-        "coding_agent.workspace_archive.create_workspace_archive_base64",
+        "coding_agent.environment.archive.create_workspace_archive_base64",
         lambda path: "archive-encoded",
     )
 
@@ -4443,7 +4443,7 @@ def test_remote_run_with_download_keeps_explicit_archive_overwrite(
     monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
     monkeypatch.setattr("coding_agent.remote.client.stream_prompt", fake_stream_prompt)
     monkeypatch.setattr(
-        "coding_agent.workspace_archive.create_workspace_archive_base64",
+        "coding_agent.environment.archive.create_workspace_archive_base64",
         lambda path: "archive-encoded",
     )
     monkeypatch.setattr(
@@ -4455,7 +4455,7 @@ def test_remote_run_with_download_keeps_explicit_archive_overwrite(
         fake_download_workspace_manifest,
     )
     monkeypatch.setattr(
-        "coding_agent.workspace_archive.extract_workspace_archive_base64",
+        "coding_agent.environment.archive.extract_workspace_archive_base64",
         lambda repo_path_arg, archive_base64: applied.append(
             (repo_path_arg, archive_base64)
         ),
@@ -4569,7 +4569,7 @@ def test_remote_repl_with_repo_downloads_results_when_stream_fails(
         "coding_agent.remote.client.stream_prompt", failing_stream_prompt
     )
     monkeypatch.setattr(
-        "coding_agent.workspace_archive.create_workspace_archive_base64",
+        "coding_agent.environment.archive.create_workspace_archive_base64",
         lambda path: "archive-encoded",
     )
     monkeypatch.setattr(
@@ -4588,7 +4588,7 @@ def test_remote_repl_with_repo_downloads_results_when_stream_fails(
         fake_download_workspace_manifest,
     )
     monkeypatch.setattr(
-        "coding_agent.workspace_archive.extract_workspace_archive_base64",
+        "coding_agent.environment.archive.extract_workspace_archive_base64",
         lambda repo_path_arg, archive_base64: applied.append(
             (repo_path_arg, archive_base64)
         ),
@@ -4713,7 +4713,7 @@ def test_remote_repl_with_repo_retains_session_when_extract_fails(
     monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
     monkeypatch.setattr("coding_agent.remote.client.stream_prompt", fake_stream_prompt)
     monkeypatch.setattr(
-        "coding_agent.workspace_archive.create_workspace_archive_base64",
+        "coding_agent.environment.archive.create_workspace_archive_base64",
         lambda path: "archive-encoded",
     )
     monkeypatch.setattr(
@@ -4732,7 +4732,7 @@ def test_remote_repl_with_repo_retains_session_when_extract_fails(
         fake_download_workspace_manifest,
     )
     monkeypatch.setattr(
-        "coding_agent.workspace_archive.extract_workspace_archive_base64",
+        "coding_agent.environment.archive.extract_workspace_archive_base64",
         failing_extract,
     )
 
@@ -4864,7 +4864,7 @@ def test_remote_repl_with_repo_retains_session_when_stream_and_extract_fail(
         "coding_agent.remote.client.stream_prompt", failing_stream_prompt
     )
     monkeypatch.setattr(
-        "coding_agent.workspace_archive.create_workspace_archive_base64",
+        "coding_agent.environment.archive.create_workspace_archive_base64",
         lambda path: "archive-encoded",
     )
     monkeypatch.setattr(
@@ -4876,7 +4876,7 @@ def test_remote_repl_with_repo_retains_session_when_stream_and_extract_fail(
         fake_download_workspace_manifest,
     )
     monkeypatch.setattr(
-        "coding_agent.workspace_archive.extract_workspace_archive_base64",
+        "coding_agent.environment.archive.extract_workspace_archive_base64",
         lambda repo_path_arg, archive_base64: (_ for _ in ()).throw(
             OSError("extract failed")
         ),

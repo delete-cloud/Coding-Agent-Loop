@@ -19,7 +19,7 @@ from agentkit.storage.protocols import SessionStore, TapeStore
 from agentkit.storage.session import FileSessionStore
 from agentkit.storage.sqlite import SQLiteTapeStore
 from agentkit.tape.store import ForkTapeStore
-from coding_agent.local_storage import local_sqlite_path_from_storage_config
+from coding_agent.stores.local import local_sqlite_path_from_storage_config
 
 
 def _load_pg_types() -> tuple[Any, Any, Any, Any]:

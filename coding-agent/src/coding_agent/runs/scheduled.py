@@ -9,9 +9,9 @@ from typing import Final, Protocol
 
 from agentkit.storage.pg import AsyncPGPool, PGPool
 from agentkit.tape.tape import Tape
-from coding_agent.topic_lifecycle import TopicLifecycle
-from coding_agent.topic_store import JSONObject
-from coding_agent.topic_store import TopicRecord
+from coding_agent.topics.lifecycle import TopicLifecycle
+from coding_agent.topics.store import JSONObject
+from coding_agent.topics.store import TopicRecord
 
 ScheduleStatus = str
 SignalStatus = str
