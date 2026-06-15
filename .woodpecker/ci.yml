@@ -25,6 +25,16 @@ steps:
         from_secret: registry_username
       REGISTRY_PASSWORD:
         from_secret: registry_password
+      http_proxy:
+        from_secret: proxy_url
+      https_proxy:
+        from_secret: proxy_url
+      HTTP_PROXY:
+        from_secret: proxy_url
+      HTTPS_PROXY:
+        from_secret: proxy_url
+      no_proxy: git.mesh.kinaz.me,localhost,127.0.0.1,.svc,.cluster.local,10.0.0.0/8,192.168.0.0/16
+      NO_PROXY: git.mesh.kinaz.me,localhost,127.0.0.1,.svc,.cluster.local,10.0.0.0/8,192.168.0.0/16
     commands:
       - mkdir -p /kaniko/.docker
       - auth="$(printf '%s:%s' "$REGISTRY_USERNAME" "$REGISTRY_PASSWORD" | base64 | tr -d '\n')"
@@ -42,6 +52,16 @@ steps:
         from_secret: registry_username
       REGISTRY_PASSWORD:
         from_secret: registry_password
+      http_proxy:
+        from_secret: proxy_url
+      https_proxy:
+        from_secret: proxy_url
+      HTTP_PROXY:
+        from_secret: proxy_url
+      HTTPS_PROXY:
+        from_secret: proxy_url
+      no_proxy: git.mesh.kinaz.me,localhost,127.0.0.1,.svc,.cluster.local,10.0.0.0/8,192.168.0.0/16
+      NO_PROXY: git.mesh.kinaz.me,localhost,127.0.0.1,.svc,.cluster.local,10.0.0.0/8,192.168.0.0/16
     commands:
       - mkdir -p /kaniko/.docker
       - auth="$(printf '%s:%s' "$REGISTRY_USERNAME" "$REGISTRY_PASSWORD" | base64 | tr -d '\n')"
