@@ -25,6 +25,13 @@ agent:
   secretRef:
     - <provider-secret>
     - <observability-secret>
+    # The KB embedding client reads OPENAI_API_KEY. Put that key in a private
+    # secret and include it here, or wire it with agent.secretEnv below.
+    # - <kb-embedding-secret>
+  # secretEnv:
+  #   - name: OPENAI_API_KEY
+  #     secretName: <kb-embedding-secret>
+  #     secretKey: api-key
   config:
     # Example OpenAI-compatible provider settings. Replace for the target runtime.
     provider: openai
@@ -38,6 +45,27 @@ agent:
       memoryLimitMb: null
       dockerImage: python:3.11-slim
 
+# kb:
+#   enabled: true
+#   dbPath: kb
+#   embeddingModel: BAAI/bge-m3
+#   embeddingBaseUrl: https://api.siliconflow.cn/v1
+#   embeddingDim: 1024
+#   maxDistance: null
+#   corpus: notes
+#   searchCorpora:
+#     - sre
+#     - notes
+#   index:
+#     enabled: true
+#     schedule: "0 * * * *"
+#     gitRef: main
+#     gitSecretName: <kb-git-secret>
+#     repos:
+#       - name: sre
+#         corpus: sre
+#         url: "<forgejo-host>/<owner>/sre.git"
+
 observability:
   enabled: true
   backend: langfuse
@@ -47,6 +75,13 @@ observability:
 
 networkPolicy:
   extraEgress:
+    # Private deployments should add the git host CIDR needed by kb.index.repos.
+    - to:
+        - ipBlock:
+            cidr: <git-host-cidr>/32
+      ports:
+        - protocol: TCP
+          port: 443
     - to:
         - ipBlock:
             cidr: <observability-host-ip>/32
