@@ -1,0 +1,108 @@
+{{- if and .Values.kb.enabled .Values.kb.index.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "coding-agent.fullname" . }}-kb-index
+  labels:
+    {{- include "coding-agent.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.kb.index.schedule | quote }}
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            {{- include "coding-agent.selectorLabels" . | nindent 12 }}
+        spec:
+          serviceAccountName: {{ include "coding-agent.serviceAccountName" . }}
+          automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+          enableServiceLinks: {{ .Values.enableServiceLinks }}
+          restartPolicy: OnFailure
+          {{- with .Values.podSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: kb-index
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command:
+                - /bin/sh
+                - -ec
+                - |
+                  set -eu
+                  workdir="$(mktemp -d)"
+                  trap 'rm -rf "$workdir"' EXIT
+
+                  if [ -n "${GIT_USERNAME:-}" ] && [ -n "${GIT_PASSWORD:-}" ]; then
+                    askpass="$workdir/git-askpass.sh"
+                    cat > "$askpass" <<'EOF'
+                  #!/bin/sh
+                  case "$1" in
+                    *Username*) printf '%s\n' "$GIT_USERNAME" ;;
+                    *Password*) printf '%s\n' "$GIT_PASSWORD" ;;
+                    *) printf '\n' ;;
+                  esac
+                  EOF
+                    chmod 700 "$askpass"
+                    export GIT_ASKPASS="$askpass"
+                  fi
+
+                  {{- range .Values.kb.index.repos }}
+                  git clone --depth 1 --branch {{ $.Values.kb.index.gitRef | quote }} {{ required "kb.index.repos[].url is required" .url | quote }} "$workdir/{{ required "kb.index.repos[].name is required" .name }}"
+                  kb index "$workdir/{{ required "kb.index.repos[].name is required" .name }}" --corpus {{ required "kb.index.repos[].corpus is required" .corpus | quote }}
+                  {{- end }}
+              {{- if or .Values.agent.secretRef .Values.kb.index.gitSecretName }}
+              envFrom:
+                {{- range .Values.agent.secretRef }}
+                - secretRef:
+                    name: {{ . | quote }}
+                {{- end }}
+                {{- if .Values.kb.index.gitSecretName }}
+                - secretRef:
+                    name: {{ .Values.kb.index.gitSecretName | quote }}
+                {{- end }}
+              {{- end }}
+              {{- if or .Values.agent.extraEnv .Values.agent.secretEnv }}
+              env:
+                {{- range .Values.agent.extraEnv }}
+                - name: {{ .name }}
+                  value: {{ .value | quote }}
+                {{- end }}
+                {{- range .Values.agent.secretEnv }}
+                - name: {{ .name }}
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .secretName | quote }}
+                      key: {{ .secretKey | quote }}
+                {{- end }}
+              {{- end }}
+              volumeMounts:
+                # Mount the same rendered agent.toml the Deployment uses so that
+                # `kb index` reads the [kb] embedding/db_path config from values
+                # instead of the image-baked default (wrong dim/model/off-PVC path).
+                - name: agent-config
+                  mountPath: {{ .Values.server.configPath | quote }}
+                  subPath: agent.toml
+                  readOnly: true
+                # RWO data PVC assumes single-node scheduling. Multi-node clusters
+                # need RWX storage or node affinity shared with the agent pod.
+                - name: data-storage
+                  mountPath: {{ .Values.persistence.data.mountPath }}
+              {{- with .Values.securityContext }}
+              securityContext:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              {{- with .Values.resources }}
+              resources:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+          volumes:
+            - name: agent-config
+              configMap:
+                name: {{ include "coding-agent.fullname" . }}-agent-config
+            - name: data-storage
+              persistentVolumeClaim:
+                claimName: {{ default (printf "%s-data" (include "coding-agent.fullname" .)) .Values.persistence.data.existingClaim }}
+{{- end }}

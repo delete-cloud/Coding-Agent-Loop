@@ -81,6 +81,9 @@ httpRoute:
 
 agent:
   dataDir: /var/lib/coding-agent/data
+  # KB embedding providers such as SiliconFlow must expose their key to pods as
+  # OPENAI_API_KEY using agent.secretRef or agent.secretEnv. The LLM key remains
+  # separate and continues to use AGENT_API_KEY or provider-specific variables.
   extraEnv: []
   secretRef: []
   secretEnv: []
@@ -96,6 +99,33 @@ agent:
       cpuLimitSeconds: 10
       memoryLimitMb: null
       dockerImage: python:3.11-slim
+
+kb:
+  enabled: false
+  dbPath: kb
+  embeddingModel: BAAI/bge-m3
+  embeddingBaseUrl: https://api.siliconflow.cn/v1
+  embeddingDim: 1024
+  maxDistance: null
+  corpus: notes
+  searchCorpora:
+    - sre
+    - notes
+  index:
+    enabled: false
+    schedule: "0 * * * *"
+    gitRef: main
+    # Real repo URLs come from private values injected at deploy time.
+    # Example only:
+    # repos:
+    #   - name: sre
+    #     corpus: sre
+    #     url: "<forgejo-host>/<owner>/sre.git"
+    repos: []
+    # Optional k8s secret for git credentials. A secret can provide
+    # GIT_USERNAME/GIT_PASSWORD for the built-in askpass helper, or other
+    # git-compatible env such as GIT_ASKPASS.
+    gitSecretName: ""
 
 observability:
   enabled: false

@@ -72,6 +72,10 @@ def _network_policy(docs: list[dict[str, Any]]) -> dict[str, Any]:
     return _object_named(docs, "NetworkPolicy", "coding-agent")
 
 
+def _cronjob(docs: list[dict[str, Any]], name_suffix: str) -> dict[str, Any]:
+    return _object_named(docs, "CronJob", name_suffix)
+
+
 def _objects_of_kind(docs: list[dict[str, Any]], kind: str) -> list[dict[str, Any]]:
     return [doc for doc in docs if doc.get("kind") == kind]
 
@@ -147,6 +151,11 @@ def test_helm_values_render(values_file: str | None) -> None:
 def test_helm_default_runtime_contract_is_runnable() -> None:
     docs = _render()
     _assert_storage(docs, "/var/lib/coding-agent/data")
+    config = _agent_toml(docs)
+    assert "kb" not in config
+    assert "kb" not in config["agent"]["plugins"]["enabled"]
+    assert not _objects_of_kind(docs, "CronJob")
+
     pod_spec = _deployment(docs)["spec"]["template"]["spec"]
     assert pod_spec["securityContext"]["fsGroup"] == 10001
     assert pod_spec["serviceAccountName"] == "coding-agent-coding-agent"
@@ -571,6 +580,105 @@ def test_helm_workspace_mount_override_sets_working_dir() -> None:
 def test_helm_data_mount_override_updates_sqlite_bundle_path() -> None:
     docs = _render("--set", "persistence.data.mountPath=/data2")
     _assert_storage(docs, "/data2")
+
+
+def test_helm_kb_enabled_renders_config_and_plugin() -> None:
+    docs = _render("--set", "kb.enabled=true")
+    config = _agent_toml(docs)
+
+    assert "kb" in config["agent"]["plugins"]["enabled"]
+    assert config["kb"] == {
+        "db_path": "/var/lib/coding-agent/data/kb",
+        "embedding_model": "BAAI/bge-m3",
+        "embedding_base_url": "https://api.siliconflow.cn/v1",
+        "embedding_dim": 1024,
+        "corpus": "notes",
+        "search_corpora": ["sre", "notes"],
+    }
+
+
+def test_helm_kb_enabled_can_render_optional_max_distance() -> None:
+    docs = _render("--set", "kb.enabled=true", "--set", "kb.maxDistance=0.42")
+
+    assert _agent_toml(docs)["kb"]["max_distance"] == 0.42
+
+
+def test_helm_kb_index_disabled_does_not_render_cronjob() -> None:
+    docs = _render("--set", "kb.enabled=true", "--set", "kb.index.enabled=false")
+
+    assert not _objects_of_kind(docs, "CronJob")
+
+
+def test_helm_kb_index_cronjob_renders_pvc_env_and_netpol_labels() -> None:
+    docs = _render(
+        "--set",
+        "kb.enabled=true",
+        "--set",
+        "kb.index.enabled=true",
+        "--set",
+        "kb.index.gitSecretName=kb-git-creds",
+        "--set-json",
+        'agent.secretEnv=[{"name":"OPENAI_API_KEY","secretName":"kb-embedding","secretKey":"api-key"}]',
+        "--set-json",
+        'kb.index.repos=[{"name":"sre","corpus":"sre","url":"<forgejo-host>/<owner>/sre.git"}]',
+    )
+    job = _cronjob(docs, "-kb-index")
+    pod_spec = job["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+    container = pod_spec["containers"][0]
+
+    assert job["spec"]["schedule"] == "0 * * * *"
+    assert job["spec"]["jobTemplate"]["spec"]["template"]["metadata"]["labels"] == {
+        "app.kubernetes.io/name": "coding-agent",
+        "app.kubernetes.io/instance": "coding-agent",
+    }
+    assert pod_spec["securityContext"]["fsGroup"] == 10001
+    assert container["securityContext"] == {
+        "runAsGroup": 10001,
+        "runAsNonRoot": True,
+        "runAsUser": 10001,
+    }
+    assert container["envFrom"] == [{"secretRef": {"name": "kb-git-creds"}}]
+    assert _env_var(container, "OPENAI_API_KEY")["valueFrom"]["secretKeyRef"] == {
+        "name": "kb-embedding",
+        "key": "api-key",
+    }
+    # The CronJob must mount the SAME rendered agent.toml ConfigMap as the
+    # Deployment, at the same configPath/subPath, so `kb index` reads the [kb]
+    # embedding/db_path config from values rather than the image-baked default.
+    deployment_container = _container(docs)
+    config_mount = next(
+        m for m in deployment_container["volumeMounts"] if m["name"] == "agent-config"
+    )
+    assert config_mount["subPath"] == "agent.toml"
+    assert container["volumeMounts"] == [
+        {
+            "name": "agent-config",
+            "mountPath": config_mount["mountPath"],
+            "subPath": "agent.toml",
+            "readOnly": True,
+        },
+        {
+            "name": "data-storage",
+            "mountPath": "/var/lib/coding-agent/data",
+        },
+    ]
+    assert pod_spec["volumes"] == [
+        {
+            "name": "agent-config",
+            "configMap": {"name": "coding-agent-coding-agent-agent-config"},
+        },
+        {
+            "name": "data-storage",
+            "persistentVolumeClaim": {
+                "claimName": "coding-agent-coding-agent-data",
+            },
+        },
+    ]
+    script = "\n".join(container["command"])
+    assert "git clone --depth 1 --branch \"main\"" in script
+    assert "<forgejo-host>/<owner>/sre.git" in script
+    assert "kb index" in script
+    assert "--corpus \"sre\"" in script
 
 
 def test_helm_chart_ignores_legacy_sandbox_sidecar_values() -> None:

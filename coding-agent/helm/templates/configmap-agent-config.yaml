@@ -38,6 +38,9 @@ data:
       "session_metrics",
       "shell_session",
       "skills",
+      {{- if .Values.kb.enabled }}
+      "kb",
+      {{- end }}
     ]
 
     [storage]
@@ -50,6 +53,21 @@ data:
     [storage.paths]
     local = {{ printf "%s/local.sqlite3" .Values.persistence.data.mountPath | quote }}
     docs = {{ printf "%s/docs" .Values.persistence.data.mountPath | quote }}
+
+    {{- if .Values.kb.enabled }}
+    [kb]
+    db_path = {{ printf "%s/%s" (.Values.persistence.data.mountPath | trimSuffix "/") (.Values.kb.dbPath | trimPrefix "/") | quote }}
+    embedding_model = {{ .Values.kb.embeddingModel | quote }}
+    {{- if .Values.kb.embeddingBaseUrl }}
+    embedding_base_url = {{ .Values.kb.embeddingBaseUrl | quote }}
+    {{- end }}
+    embedding_dim = {{ .Values.kb.embeddingDim }}
+    {{- if ne .Values.kb.maxDistance nil }}
+    max_distance = {{ .Values.kb.maxDistance }}
+    {{- end }}
+    corpus = {{ .Values.kb.corpus | quote }}
+    search_corpora = {{ .Values.kb.searchCorpora | toJson }}
+    {{- end }}
 
     [approval]
     policy = {{ .Values.agent.config.approvalPolicy | quote }}
