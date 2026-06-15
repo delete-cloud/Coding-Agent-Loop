@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import tomllib
@@ -677,7 +678,8 @@ def test_helm_kb_index_cronjob_renders_pvc_env_and_netpol_labels() -> None:
     script = "\n".join(container["command"])
     assert "git clone --depth 1 --branch \"main\"" in script
     assert "<forgejo-host>/<owner>/sre.git" in script
-    assert "kb index" in script
+    assert "/app/.venv/bin/python -m coding_agent kb index" in script
+    assert re.search(r"(^|\n)\s*kb\s+index(\s|$)", script) is None
     assert "--corpus \"sre\"" in script
 
 

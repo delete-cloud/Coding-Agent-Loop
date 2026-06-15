@@ -51,7 +51,7 @@ spec:
 
                   {{- range .Values.kb.index.repos }}
                   git clone --depth 1 --branch {{ $.Values.kb.index.gitRef | quote }} {{ required "kb.index.repos[].url is required" .url | quote }} "$workdir/{{ required "kb.index.repos[].name is required" .name }}"
-                  kb index "$workdir/{{ required "kb.index.repos[].name is required" .name }}" --corpus {{ required "kb.index.repos[].corpus is required" .corpus | quote }}
+                  /app/.venv/bin/python -m coding_agent kb index "$workdir/{{ required "kb.index.repos[].name is required" .name }}" --corpus {{ required "kb.index.repos[].corpus is required" .corpus | quote }}
                   {{- end }}
               {{- if or .Values.agent.secretRef .Values.kb.index.gitSecretName }}
               envFrom:
