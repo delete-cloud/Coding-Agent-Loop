@@ -13,7 +13,17 @@ spec:
       template:
         metadata:
           labels:
-            {{- include "coding-agent.selectorLabels" . | nindent 12 }}
+            # Deliberately NOT the agent's selectorLabels: this EXCLUDES the
+            # index Job from the agent NetworkPolicy (whose podSelector IS the
+            # agent selectorLabels), so the Job can reach the private/mesh git
+            # host to clone corpora. The agent's default-deny-private egress
+            # (anti-SSRF) blocks that, and an extraEgress allow does not reliably
+            # override the publicHttps `except` on all CNIs. The index Job runs a
+            # fixed, trusted pipeline (git clone + kb index), not untrusted
+            # tool/LLM calls, so it does not need the agent's egress lockdown.
+            app.kubernetes.io/name: {{ include "coding-agent.name" . }}-kb-index
+            app.kubernetes.io/instance: {{ .Release.Name }}
+            app.kubernetes.io/component: kb-index
         spec:
           serviceAccountName: {{ include "coding-agent.serviceAccountName" . }}
           automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}

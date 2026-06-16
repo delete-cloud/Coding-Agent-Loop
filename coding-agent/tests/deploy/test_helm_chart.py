@@ -610,7 +610,7 @@ def test_helm_kb_index_disabled_does_not_render_cronjob() -> None:
     assert not _objects_of_kind(docs, "CronJob")
 
 
-def test_helm_kb_index_cronjob_renders_pvc_env_and_netpol_labels() -> None:
+def test_helm_kb_index_cronjob_excluded_from_netpol() -> None:
     docs = _render(
         "--set",
         "kb.enabled=true",
@@ -628,10 +628,19 @@ def test_helm_kb_index_cronjob_renders_pvc_env_and_netpol_labels() -> None:
     container = pod_spec["containers"][0]
 
     assert job["spec"]["schedule"] == "0 * * * *"
-    assert job["spec"]["jobTemplate"]["spec"]["template"]["metadata"]["labels"] == {
-        "app.kubernetes.io/name": "coding-agent",
+    # The index Job must be EXCLUDED from the agent NetworkPolicy so it can reach
+    # the private/mesh git host. Its pod labels must therefore NOT satisfy the
+    # netpol podSelector (which is the agent selectorLabels).
+    job_labels = job["spec"]["jobTemplate"]["spec"]["template"]["metadata"]["labels"]
+    assert job_labels == {
+        "app.kubernetes.io/name": "coding-agent-kb-index",
         "app.kubernetes.io/instance": "coding-agent",
+        "app.kubernetes.io/component": "kb-index",
     }
+    netpol_selector = _network_policy(docs)["spec"]["podSelector"]["matchLabels"]
+    assert not (netpol_selector.items() <= job_labels.items()), (
+        "kb-index Job must not match the agent NetworkPolicy podSelector"
+    )
     assert pod_spec["securityContext"]["fsGroup"] == 10001
     assert container["securityContext"] == {
         "runAsGroup": 10001,
@@ -681,6 +690,53 @@ def test_helm_kb_index_cronjob_renders_pvc_env_and_netpol_labels() -> None:
     assert "/app/.venv/bin/python -m coding_agent kb index" in script
     assert re.search(r"(^|\n)\s*kb\s+index(\s|$)", script) is None
     assert "--corpus \"sre\"" in script
+
+
+def test_helm_kb_index_dedicated_netpol_allows_dns_and_https_only() -> None:
+    docs = _render(
+        "--set",
+        "kb.enabled=true",
+        "--set",
+        "kb.index.enabled=true",
+        "--set-json",
+        'kb.index.repos=[{"name":"sre","corpus":"sre","url":"https://x/sre.git"}]',
+    )
+    netpol = _object_named(docs, "NetworkPolicy", "-kb-index")
+    assert netpol["spec"]["policyTypes"] == ["Egress"]
+
+    # The dedicated policy must select exactly the kb-index Job pods.
+    sel = netpol["spec"]["podSelector"]["matchLabels"]
+    job = _cronjob(docs, "-kb-index")
+    job_labels = job["spec"]["jobTemplate"]["spec"]["template"]["metadata"]["labels"]
+    assert sel.items() <= job_labels.items()
+    assert sel["app.kubernetes.io/component"] == "kb-index"
+
+    egress = netpol["spec"]["egress"]
+    # DNS rule present.
+    assert any(
+        any(p.get("port") == 53 for p in rule.get("ports", [])) for rule in egress
+    )
+    # HTTPS-to-anywhere rule: 443 to 0.0.0.0/0 with NO `except` (so it can reach
+    # the private/mesh git host), and no other ports opened.
+    https = [
+        rule
+        for rule in egress
+        if any(p.get("port") == 443 for p in rule.get("ports", []))
+    ]
+    assert len(https) == 1
+    block = https[0]["to"][0]["ipBlock"]
+    assert block["cidr"] == "0.0.0.0/0"
+    assert "except" not in block
+    opened_ports = {p.get("port") for rule in egress for p in rule.get("ports", [])}
+    assert opened_ports == {53, 443}
+
+
+def test_helm_kb_index_dedicated_netpol_absent_when_index_disabled() -> None:
+    docs = _render("--set", "kb.enabled=true", "--set", "kb.index.enabled=false")
+    assert not any(
+        doc.get("metadata", {}).get("name", "").endswith("-kb-index")
+        for doc in _objects_of_kind(docs, "NetworkPolicy")
+    )
 
 
 def test_helm_chart_ignores_legacy_sandbox_sidecar_values() -> None:

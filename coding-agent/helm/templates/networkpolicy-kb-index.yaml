@@ -1,0 +1,46 @@
+{{- if and .Values.kb.enabled .Values.kb.index.enabled .Values.networkPolicy.enabled .Values.networkPolicy.egress.enabled }}
+# Dedicated egress policy for the KB index Job. The Job is deliberately NOT
+# covered by the main agent NetworkPolicy (it carries app.kubernetes.io/name
+# "<name>-kb-index", not the agent selectorLabels) because the agent policy's
+# default-deny-private egress (anti-SSRF, with a publicHttps `except` list)
+# blocks the Job from cloning the git host on a private/mesh range, and an
+# extraEgress allow does not reliably override that `except` on all CNIs.
+# This policy keeps the Job restricted to exactly what it needs: DNS + tcp/443
+# (forgejo private clone + embedding API public), nothing else.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "coding-agent.fullname" . }}-kb-index
+  labels:
+    {{- include "coding-agent.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "coding-agent.name" . }}-kb-index
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: kb-index
+  policyTypes:
+    - Egress
+  egress:
+    {{- if .Values.networkPolicy.egress.dns.enabled }}
+    - to:
+        - namespaceSelector:
+            {{- toYaml .Values.networkPolicy.egress.dns.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml .Values.networkPolicy.egress.dns.podSelector | nindent 12 }}
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    {{- end }}
+    # HTTPS to anywhere. No `except`: the index Job must reach the in-cluster /
+    # mesh git host (private range) to clone corpora, as well as the public
+    # embedding API. Restricted to tcp/443 only.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - port: 443
+          protocol: TCP
+{{- end }}
