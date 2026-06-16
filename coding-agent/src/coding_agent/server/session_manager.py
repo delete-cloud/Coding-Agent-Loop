@@ -3209,16 +3209,16 @@ class SessionManager:
         return session.as_dict()
 
     async def cleanup_idle_sessions(self, max_idle_minutes: int = 30) -> list[str]:
-        """Clean up sessions that have been idle for too long.
+        """Shut down runtimes for sessions that have been idle for too long.
 
         Args:
             max_idle_minutes: Maximum idle time in minutes
 
         Returns:
-            List of closed session IDs
+            List of session IDs whose runtime was shut down.
         """
         now = datetime.now(UTC)
-        closed: list[str] = []
+        shut_down: list[str] = []
         session_ids = await self.list_sessions_async()
 
         for session_id in session_ids:
@@ -3229,16 +3229,27 @@ class SessionManager:
                     last_activity = last_activity.replace(tzinfo=UTC)
                 idle_time = now - last_activity
                 if idle_time.total_seconds() > max_idle_minutes * 60:
-                    await self.close_session(session_id)
-                    closed.append(session_id)
+                    has_runtime_resources = (
+                        session.task is not None
+                        or session.runtime_pipeline is not None
+                        or session.runtime_ctx is not None
+                        or session.runtime_adapter is not None
+                    )
+                    if has_runtime_resources:
+                        await self.shutdown_session_runtime(session_id)
+                        shut_down.append(session_id)
             except KeyError:
-                # Session already closed
+                # Session was explicitly deleted between list and load.
                 pass
 
-        if closed:
-            logger.info(f"Cleaned up {len(closed)} idle sessions: {closed}")
+        if shut_down:
+            logger.info(
+                "Shut down %d idle session runtimes: %s",
+                len(shut_down),
+                shut_down,
+            )
 
-        return closed
+        return shut_down
 
     def _is_local_daemon_run_target(self, target: RunTarget | None) -> bool:
         if target is None:

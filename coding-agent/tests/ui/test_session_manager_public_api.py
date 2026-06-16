@@ -3,7 +3,7 @@ import asyncio
 import threading
 import types
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
@@ -18,6 +18,7 @@ from agentkit.runtime import RuntimeMessageCursor, RuntimeMessageKind
 from agentkit.runtime.hook_runtime import HookRuntime
 from agentkit.runtime.pipeline import Pipeline, PipelineContext
 from agentkit.tape.tape import Tape
+from coding_agent.adapter.types import StopReason, TurnOutcome
 from coding_agent.approval.store import ApprovalStore
 from coding_agent.approval import ApprovalPolicy
 from agentkit.config.loader import ConfigError
@@ -43,6 +44,7 @@ from coding_agent.server.stores.session_store import (
     RedisSessionStore,
     create_session_store,
 )
+from coding_agent.stores.runtime_store import AgentRunRecord
 
 
 def _local_run_target(path: Path | str) -> RunTarget:
@@ -1155,7 +1157,199 @@ async def test_capture_checkpoint_persists_tape_id_via_async_store_path() -> Non
 
 
 @pytest.mark.asyncio
-async def test_cleanup_idle_sessions_uses_async_store_helpers() -> None:
+async def test_cleanup_idle_sessions_preserves_durable_session_and_history(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "local.sqlite3"
+    owner_store = SQLiteSessionOwnerStore(sqlite_path)
+    manager = SessionManager(
+        storage_config={
+            "http_session_backend": "sqlite",
+            "tape_backend": "sqlite",
+            "checkpoint_backend": "sqlite",
+            "runtime_backend": "sqlite",
+            "paths": {"local": str(sqlite_path)},
+        },
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=7,
+        owner_lease_seconds=3600,
+    )
+    session_id = await manager.create_session()
+    tape_id = f"{session_id}-tape"
+    runtime_store = manager._runtime_store
+    assert runtime_store is not None
+    owner_before_cleanup = await owner_store.get_owner(session_id)
+    assert owner_before_cleanup is not None
+
+    class FakeAdapter:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    adapter = FakeAdapter()
+    session = await manager.get_session_async(session_id)
+    session.last_activity = datetime.now(UTC) - timedelta(minutes=31)
+    session.tape_id = tape_id
+    session.runtime_pipeline = object()
+    session.runtime_ctx = types.SimpleNamespace(tape=Tape(tape_id=tape_id))
+    session.runtime_adapter = adapter
+    await manager._persist_session_async(session)
+    await manager._tape_store.save(
+        tape_id,
+        [
+            {
+                "id": "entry-before-idle",
+                "kind": "message",
+                "payload": {"role": "user", "content": "before idle"},
+            }
+        ],
+    )
+    await runtime_store.create_agent_run(
+        AgentRunRecord(
+            run_id="run-before-idle",
+            session_id=session_id,
+            tape_id=tape_id,
+            parent_run_id=None,
+            agent_id=None,
+            status="completed",
+            started_at=datetime.now(UTC),
+            ended_at=datetime.now(UTC),
+            metadata={"prompt": "before idle"},
+            result={"stop_reason": "no_tool_calls", "steps_taken": 1},
+            error=None,
+        )
+    )
+
+    shut_down = await manager.cleanup_idle_sessions(max_idle_minutes=30)
+
+    assert shut_down == [session_id]
+    assert await manager.list_sessions_async() == [session_id]
+    reloaded = await manager.get_session_async(session_id)
+    assert reloaded.tape_id == tape_id
+    assert reloaded.task is None
+    assert reloaded.runtime_pipeline is None
+    assert reloaded.runtime_ctx is None
+    assert reloaded.runtime_adapter is None
+    assert adapter.closed is True
+
+    owner = await owner_store.get_owner(session_id)
+    assert owner == owner_before_cleanup
+    assert owner.lease_expires_at > datetime.now(UTC)
+
+    await manager._tape_store.save(
+        tape_id,
+        [
+            {
+                "id": "entry-after-idle",
+                "kind": "message",
+                "payload": {"role": "assistant", "content": "after idle"},
+            }
+        ],
+    )
+    tape_entries = await manager._tape_store.load(tape_id)
+    assert [entry["id"] for entry in tape_entries] == [
+        "entry-before-idle",
+        "entry-after-idle",
+    ]
+    assert [run.run_id for run in await runtime_store.list_agent_runs(session_id)] == [
+        "run-before-idle"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_idle_cleaned_session_rebuilds_runtime_on_next_prompt(
+    tmp_path: Path,
+) -> None:
+    create_agent_calls = 0
+    observed_prompts: list[str] = []
+
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        ),
+        _directive_executor=None,
+    )
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, ctx, consumer
+
+        async def run_turn(self, prompt: str) -> TurnOutcome:
+            observed_prompts.append(prompt)
+            return TurnOutcome(stop_reason=StopReason.NO_TOOL_CALLS, steps_taken=1)
+
+        async def close(self) -> None:
+            return None
+
+    def fake_create_agent(**kwargs):
+        nonlocal create_agent_calls
+        create_agent_calls += 1
+        return fake_pipeline, types.SimpleNamespace(
+            config={},
+            tape=kwargs.get("tape") or Tape(tape_id=f"{kwargs['session_id_override']}-tape"),
+        )
+
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        storage_config={"runtime_backend": "none"},
+        create_agent_fn=fake_create_agent,
+    )
+    session_id = await manager.create_session(default_run_target=_local_run_target(tmp_path))
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
+        await manager.run_agent(session_id, "first")
+        session = await manager.get_session_async(session_id)
+        session.last_activity = datetime.now(UTC) - timedelta(minutes=31)
+
+        shut_down = await manager.cleanup_idle_sessions(max_idle_minutes=30)
+
+        assert shut_down == [session_id]
+        assert session.runtime_adapter is None
+        assert await manager.list_sessions_async() == [session_id]
+
+        await manager.run_agent(session_id, "second")
+
+    assert observed_prompts == ["first", "second"]
+    assert create_agent_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_explicit_close_session_still_deletes_durable_session(
+    tmp_path: Path,
+) -> None:
+    sqlite_path = tmp_path / "local.sqlite3"
+    owner_store = SQLiteSessionOwnerStore(sqlite_path)
+    manager = SessionManager(
+        storage_config={
+            "http_session_backend": "sqlite",
+            "tape_backend": "sqlite",
+            "checkpoint_backend": "sqlite",
+            "runtime_backend": "sqlite",
+            "paths": {"local": str(sqlite_path)},
+        },
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=7,
+        owner_lease_seconds=3600,
+    )
+    session_id = await manager.create_session()
+
+    await manager.close_session(session_id)
+
+    assert await manager.list_sessions_async() == []
+    with pytest.raises(KeyError, match=f"Session not found: {session_id}"):
+        await manager.get_session_async(session_id)
+    assert await owner_store.get_owner(session_id) is None
+
+
+@pytest.mark.asyncio
+async def test_cleanup_idle_sessions_shuts_down_idle_runtimes_with_async_helpers(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     store = InMemorySessionStore()
     manager = SessionManager(store=store)
     first_id = await manager.create_session()
@@ -1163,12 +1357,13 @@ async def test_cleanup_idle_sessions_uses_async_store_helpers() -> None:
 
     first = manager.get_session(first_id)
     second = manager.get_session(second_id)
-    first.last_activity = datetime.now()
+    first.last_activity = datetime.now(UTC) - timedelta(minutes=31)
     second.last_activity = datetime.now()
+    first.runtime_adapter = object()
 
     sync_calls: list[str] = []
     async_calls: list[str] = []
-    closed_sessions: list[str] = []
+    shut_down_sessions: list[str] = []
 
     def fail_sync_list_sessions() -> list[str]:
         sync_calls.append("list")
@@ -1186,22 +1381,25 @@ async def test_cleanup_idle_sessions_uses_async_store_helpers() -> None:
         async_calls.append(f"get:{session_id}")
         return first if session_id == first_id else second
 
-    async def fake_close_session(session_id: str) -> None:
-        closed_sessions.append(session_id)
+    async def fake_shutdown_session_runtime(session_id: str) -> None:
+        shut_down_sessions.append(session_id)
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(manager._store, "list_sessions", fail_sync_list_sessions)
         mp.setattr(manager, "get_session", fail_sync_get_session)
         mp.setattr(manager, "list_sessions_async", fake_list_sessions_async)
         mp.setattr(manager, "get_session_async", fake_get_session_async)
-        mp.setattr(manager, "close_session", fake_close_session)
+        mp.setattr(manager, "shutdown_session_runtime", fake_shutdown_session_runtime)
 
-        closed = await manager.cleanup_idle_sessions(max_idle_minutes=10_000)
+        with caplog.at_level("INFO", logger="coding_agent.server.session_manager"):
+            shut_down = await manager.cleanup_idle_sessions(max_idle_minutes=30)
 
-    assert closed == []
-    assert closed_sessions == []
+    assert shut_down == [first_id]
+    assert shut_down_sessions == [first_id]
     assert sync_calls == []
     assert async_calls == ["list", f"get:{first_id}", f"get:{second_id}"]
+    assert "Shut down 1 idle session runtimes" in caplog.text
+    assert "Cleaned up" not in caplog.text
 
 
 def test_create_session_store_warns_and_falls_back_when_redis_unreachable(
