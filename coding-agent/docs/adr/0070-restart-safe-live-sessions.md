@@ -32,8 +32,9 @@ garbage collection:
   (`session_manager.py:3232`), which routes through `_remove_session_async_no_lock`
   → `delete_session` (`session_manager.py:2502`/`2509`) and **deletes the durable
   metadata row**. This is restart-independent: any session left idle for 30
-  minutes is destroyed; a restart merely triggers the next 60s sweep immediately
-  against already-stale `last_activity`.
+  minutes is destroyed. A restart does not cause the loss but surfaces it — the
+  cleanup task sleeps 60s before its first pass (`http_server.py:2310-2313`), then
+  finds the reloaded sessions already past the idle threshold.
 
 So "durable session" today means *persisted until explicit close OR idle GC*, not
 *persisted until the user/admin deletes it*. For a single-user personal agent
@@ -56,6 +57,12 @@ session is still listed by `GET /sessions` and its runtime is lazily rebuilt on
 the next prompt. Destructive deletion happens **only** on an explicit user/admin
 close/delete, never from a TTL sweep.
 
+Implementation note: the non-deleting path already exists
+(`shutdown_session_runtime`), but ownership must be handled. If idle cleanup also
+releases the owner lease, the next prompt must reacquire ownership — the current
+prompt path only `_assert_owner`s and does not reacquire. So D1 must either retain
+the owner lease across idle cleanup or add lease reacquisition on the next prompt.
+
 **D2 — Graceful drain on shutdown (in-flight-turn hardening).** On SIGTERM the
 process flushes in-flight session state, marks interrupted turns, and releases
 owner leases before exit; the Helm chart sets an adequate
@@ -68,9 +75,10 @@ lost session row (D1 is), and must not be documented as such.
 (`list_sessions_async`) and lazy metadata hydration (`get_session_async`,
 `Session.from_store_data`) already exist, so listing survives restart once D1
 stops deleting rows. The remaining gap — eagerly rebuilding the in-memory runtime
-at boot and resuming an interrupted turn from its last checkpoint (ADR-0055) — is
-optional. This ADR does **not** promise recovery of a turn whose in-process work
-was killed mid-execution; resume is best-effort from the last durable checkpoint.
+at boot and resuming an interrupted turn per ADR-0055 (from durable history /
+context) — is optional. This ADR does **not** promise recovery of a turn whose
+in-process work was killed mid-execution; resume is best-effort from durable
+history, not a checkpoint rollback.
 
 Scope is single-replica + sqlite-on-PVC. Multi-replica HA failover is out of
 scope.
@@ -112,7 +120,7 @@ Intended tests and gating command:
   in-flight turn and releases leases within the grace period.
 - [ ] `test_helm_deployment_sets_graceful_drain` — chart renders a non-default
   `terminationGracePeriodSeconds` and a `preStop`/SIGTERM drain path.
-- [ ] `uv run pytest tests/ui/test_http_server.py tests/coding_agent/test_session_manager*.py tests/deploy/test_helm_chart.py -k "idle or drain or rehydrate" -q`
+- [ ] `uv run pytest tests/ui/test_http_server.py tests/ui/test_session_manager*.py tests/deploy/test_helm_chart.py -k "idle or drain or rehydrate" -q`
 
 ## References
 

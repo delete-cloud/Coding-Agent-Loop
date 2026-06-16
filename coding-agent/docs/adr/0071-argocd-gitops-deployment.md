@@ -12,10 +12,11 @@ is a `manual`-event pipeline defaulting to `HELM_DEPLOY_MODE: dry-run`, and in
 practice rollouts have been done by hand over SSH (`helm upgrade` on the node).
 
 Manual deployment is slow and error-prone, and it lacks drift detection, a
-deploy history, a one-click rollback, and a GUI. The most recent manual rollout
-(REVISION 6) also appeared to drop live sessions; the real cause was the
-destructive idle-GC sweep the restart triggered, plus the lack of a pre-deploy
-in-flight drain (see ADR-0070).
+deploy history, a one-click rollback, and a GUI. The recent REVISION 6 rollout
+surfaced two ADR-0070 issues that are independent of how we deploy: the durable
+idle-GC deletion (ADR-0070 D1, the actual cause of the lost session rows) and the
+absence of a pre-deploy in-flight-turn drain (ADR-0070 D2, a deploy-safety gap,
+not a row-loss cause).
 
 A complication: the real o6n values (NodePort, mesh topology, secret names) were
 deliberately scrubbed from the public GitHub repo (PR #600); the chart ships a
@@ -67,8 +68,9 @@ o6n agent, replacing manual SSH `helm upgrade`.
   CI secret rather than auditable Git history. It remains a reasonable interim if
   ArgoCD standup is deferred.
 - **Keep manual SSH `helm upgrade`.** Rejected: no audit trail, no drift
-  detection, no one-click rollback, and it caused the ADR-0070 session-loss
-  incident.
+  detection, no one-click rollback. (The ad-hoc REVISION 6 rollout *surfaced* the
+  ADR-0070 idle-GC deletion, but that deletion bug is independent of the deploy
+  method.)
 - **ArgoCD auto-sync (self-healing on every Git change).** Rejected for a single
   prod agent: deploys should be intentional, and auto-sync would roll the pod —
   and (pre-ADR-0070-D1/D2) interrupt in-flight turns — on every values commit.
