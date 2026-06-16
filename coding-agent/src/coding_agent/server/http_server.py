@@ -2594,21 +2594,7 @@ async def update_runtime_config(
     if getattr(session, "turn_in_progress", False):
         raise HTTPException(status_code=409, detail="Turn already in progress")
 
-    # Apply thinking and approval directly on live mutable session/runtime state.
-    # No pipeline rebuild needed for these: provider reads thinking per-turn from
-    # ctx.config, and approval is evaluated by the existing live plugin.
     no_rebuild_update = not (provided & {"model", "provider", "base_url"})
-    if body.thinking is not None:
-        session.thinking_config["enabled"] = body.thinking.enabled
-        session.thinking_config["effort"] = body.thinking.effort
-    if body.approval is not None:
-        approval_policy = ApprovalPolicy(body.approval)
-        plugin = _live_approval_plugin(session)
-        if plugin is not None:
-            plugin.set_policy(approval_policy)
-        session.approval_policy = approval_policy
-        await session_manager._persist_session_async(session)
-
     try:
         if no_rebuild_update:
             updated_session = session
@@ -2633,6 +2619,20 @@ async def update_runtime_config(
         raise HTTPException(
             status_code=500, detail=_http_exception_detail(exc)
         ) from exc
+
+    # Apply thinking and approval after the fallible rebuild. For rebuilds this
+    # targets the freshly attached runtime; for approval/thinking-only updates it
+    # keeps the existing no-rebuild fast path.
+    if body.thinking is not None:
+        updated_session.thinking_config["enabled"] = body.thinking.enabled
+        updated_session.thinking_config["effort"] = body.thinking.effort
+    if body.approval is not None:
+        approval_policy = ApprovalPolicy(body.approval)
+        plugin = _live_approval_plugin(updated_session)
+        if plugin is not None:
+            plugin.set_policy(approval_policy)
+        updated_session.approval_policy = approval_policy
+        await session_manager._persist_session_async(updated_session)
 
     return RuntimeConfigUpdateResponse(
         session_id=session_id,
