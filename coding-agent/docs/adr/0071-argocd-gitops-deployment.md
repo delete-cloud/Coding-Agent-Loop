@@ -13,8 +13,9 @@ practice rollouts have been done by hand over SSH (`helm upgrade` on the node).
 
 Manual deployment is slow and error-prone, and it lacks drift detection, a
 deploy history, a one-click rollback, and a GUI. The most recent manual rollout
-(REVISION 6) also dropped live sessions partly because the operation was ad-hoc
-with no pre-deploy drain step (see ADR-0070).
+(REVISION 6) also appeared to drop live sessions; the real cause was the
+destructive idle-GC sweep the restart triggered, plus the lack of a pre-deploy
+in-flight drain (see ADR-0070).
 
 A complication: the real o6n values (NodePort, mesh topology, secret names) were
 deliberately scrubbed from the public GitHub repo (PR #600); the chart ships a
@@ -36,7 +37,7 @@ o6n agent, replacing manual SSH `helm upgrade`.
   back to the private Git repo for reproducibility and clean rollback.
 - **Sync policy.** Manual sync (not auto-sync), surfacing an ArgoCD diff/preview
   before apply. Deploys stay intentional, which also bounds when the pod rolls
-  and (until ADR-0070 P2 lands) when live sessions drop.
+  and (until ADR-0070 D1/D2 land) when in-flight turns are interrupted.
 - **Adoption.** The existing Helm release was adopted with `helm upgrade
   --take-ownership`; ArgoCD adopts the same release (Helm-source Application),
   no second take-ownership needed.
@@ -49,8 +50,9 @@ o6n agent, replacing manual SSH `helm upgrade`.
 1. Source of truth: chart in GitHub/Forgejo; **values in the private repo only**.
 2. Image tag policy: deploy pins an immutable `:<sha>`; promotion is explicit.
 3. Trigger: manual sync with a diff/preview before apply.
-4. Pre-deploy safety: relies on ADR-0070 P2 graceful drain; until then, deploys
-   are intentional and may interrupt live sessions.
+4. Pre-deploy safety: relies on ADR-0070 D1 (idle GC must not delete durable
+   sessions) + D2 (graceful drain); until they land, deploys are intentional and
+   may interrupt in-flight turns.
 5. Rollback: ArgoCD rollback (or `helm rollback`) to the previous revision.
 6. Secrets: never in Git; k8s Secret / SealedSecret by name.
 7. Environment isolation: distinct values for orbstack-local vs o6n-prod.
@@ -69,7 +71,7 @@ o6n agent, replacing manual SSH `helm upgrade`.
   incident.
 - **ArgoCD auto-sync (self-healing on every Git change).** Rejected for a single
   prod agent: deploys should be intentional, and auto-sync would roll the pod —
-  and (pre-ADR-0070-P2) drop sessions — on every values commit.
+  and (pre-ADR-0070-D1/D2) interrupt in-flight turns — on every values commit.
 - **Floating `:main` image tag.** Rejected: not reproducible and defeats clean
   rollback; pin immutable `:<sha>`.
 - **Put real o6n values in the public GitHub repo.** Rejected: violates the #600
@@ -86,15 +88,16 @@ chart/deploy guards that must keep passing.
   private repo; ArgoCD sync rolls the Deployment to that exact tag.
 - [ ] Operational: ArgoCD rollback to the previous revision restores the prior
   image and config.
-- [ ] `test_deploy_script_fails_closed_on_placeholder_values` keeps passing
-  (no public-repo values regression, PR #600).
+- [ ] `test_deploy_script_apply_mode_rejects_placeholder_image_repository` and
+  `test_deploy_script_apply_mode_rejects_example_values_without_content` keep
+  passing (no public-repo values regression, PR #600).
 - [ ] `test_helm_chart_lints` and the chart render contract tests keep passing.
 - [ ] `uv run pytest tests/deploy/test_deploy_script.py tests/deploy/test_helm_chart.py -q`
 
 ## References
 
-- `docs/adr/0070-restart-safe-live-sessions.md` (P2 graceful drain is the
-  prerequisite for comfortable GitOps deploys)
+- `docs/adr/0070-restart-safe-live-sessions.md` (D1 idle-GC retention fix + D2
+  graceful drain are the prerequisites for comfortable GitOps deploys)
 - `docs/deployment/phase2-k8s.md`
 - `docs/deployment/woodpecker.md`
 - `.woodpecker/ci.yml`, `.woodpecker/deploy.yml`
