@@ -1080,7 +1080,10 @@ async def lifespan(app: FastAPI):
     try:
         for session_id in await session_manager.list_sessions_async():
             try:
-                await session_manager.shutdown_session_runtime(session_id)
+                await session_manager.shutdown_session_runtime(
+                    session_id,
+                    interrupt_active_turn=True,
+                )
             except Exception:
                 logger.warning(
                     "Failed to shut down runtime for session %s during server shutdown",

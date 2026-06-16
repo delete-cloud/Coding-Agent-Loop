@@ -33,6 +33,10 @@ service:
 
 enableServiceLinks: false
 
+lifecycle:
+  terminationGracePeriodSeconds: 60
+  preStopSleepSeconds: 5
+
 serviceAccount:
   create: true
   name: ""
