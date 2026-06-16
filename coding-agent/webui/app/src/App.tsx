@@ -82,7 +82,7 @@ export default function App() {
     [config.baseUrl, config.apiKey],
   );
 
-  const patchConfig = (p: Partial<Config>) =>
+  const patchConfig = useCallback((p: Partial<Config>) => {
     setConfig((c) => {
       const next = { ...c, ...p };
       try {
@@ -92,6 +92,20 @@ export default function App() {
       }
       return next;
     });
+    const activeSessionId = activeSessionRef.current;
+    if (p.approval !== undefined && activeSessionId) {
+      void client.updateRuntimeConfig(activeSessionId, { approval: p.approval }).catch((e) => {
+        setItems((prev) => [
+          ...prev,
+          {
+            id: `e${Date.now()}`,
+            kind: "error",
+            text: `approval policy update failed: ${msg(e)}`,
+          },
+        ]);
+      });
+    }
+  }, [client]);
 
   const setSessionLoadingState = useCallback((value: boolean) => {
     sessionLoadingRef.current = value;

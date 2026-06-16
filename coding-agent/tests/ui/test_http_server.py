@@ -24,6 +24,7 @@ from fastapi import HTTPException
 from httpx import AsyncClient, ASGITransport
 from httpx_sse import aconnect_sse
 from starlette.requests import Request
+from agentkit.directive.types import Approve, AskUser
 from agentkit.errors import ConfigError
 from agentkit.checkpoint.models import CheckpointMeta
 from agentkit.providers.models import DoneEvent, TextEvent, ToolCallEvent
@@ -36,6 +37,7 @@ from agentkit.tools import FatalToolExecutionError
 from coding_agent.adapter.types import StopReason, TurnOutcome
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.approval.store import ApprovalStore
+from coding_agent.plugins.approval import ApprovalPlugin
 from coding_agent.core.config import settings
 from coding_agent.environment import CloudCommandResult, CloudEnvironment
 from coding_agent.stores.runtime_store import (
@@ -2401,6 +2403,72 @@ max_turns = 17
             await _renew_owner_leases()
 
         assert events == ["renew", "sleep"]
+
+
+class TestRuntimeConfigUpdate:
+    """Tests for runtime config update endpoint."""
+
+    async def test_approval_only_updates_live_plugin_without_runtime_replacement(
+        self, client, monkeypatch
+    ):
+        response = await client.post("/sessions", json={"approval_policy": "auto"})
+        session_id = response.json()["session_id"]
+        await session_manager.ensure_session_runtime(session_id)
+        session = session_manager.get_session(session_id)
+        plugin = session.runtime_pipeline._registry.get("approval")
+        assert isinstance(plugin, ApprovalPlugin)
+        assert isinstance(
+            plugin.approve_tool_call(tool_name="bash_run", arguments={}),
+            AskUser,
+        )
+
+        async def fail_replace_session_runtime_config(*args, **kwargs):
+            del args, kwargs
+            raise AssertionError("approval update should not replace runtime")
+
+        monkeypatch.setattr(
+            session_manager,
+            "replace_session_runtime_config",
+            fail_replace_session_runtime_config,
+        )
+
+        update = await client.post(
+            f"/sessions/{session_id}/runtime-config",
+            json={"approval": "yolo"},
+        )
+
+        assert update.status_code == 200
+        assert session.approval_policy == ApprovalPolicy.YOLO
+        assert isinstance(
+            plugin.approve_tool_call(tool_name="bash_run", arguments={}),
+            Approve,
+        )
+
+    async def test_approval_null_is_rejected(self, client):
+        response = await client.post("/sessions", json={})
+        session_id = response.json()["session_id"]
+
+        update = await client.post(
+            f"/sessions/{session_id}/runtime-config",
+            json={"approval": None},
+        )
+
+        assert update.status_code == 422
+        assert "approval may not be null" in update.text
+
+    async def test_approval_update_rejects_turn_in_progress(self, client):
+        response = await client.post("/sessions", json={})
+        session_id = response.json()["session_id"]
+        session = session_manager.get_session(session_id)
+        session.turn_in_progress = True
+
+        update = await client.post(
+            f"/sessions/{session_id}/runtime-config",
+            json={"approval": "interactive"},
+        )
+
+        assert update.status_code == 409
+        assert update.json()["detail"] == "Turn already in progress"
 
 
 class TestPromptStreaming:
