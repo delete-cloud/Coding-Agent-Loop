@@ -56,6 +56,21 @@ export class AgentClient {
     return (await r.json()).session_id as string;
   }
 
+  async updateRuntimeConfig(
+    sessionId: string,
+    opts: { approval?: ApprovalPolicy },
+  ): Promise<void> {
+    const body: Record<string, unknown> = {};
+    if (opts.approval !== undefined) body.approval = opts.approval;
+    await this.check(
+      await fetch(this.url(`/sessions/${sessionId}/runtime-config`), {
+        method: "POST",
+        headers: this.headers(true),
+        body: JSON.stringify(body),
+      }),
+    );
+  }
+
   async listSessions(): Promise<SessionSummary[]> {
     const data = await (
       await this.check(await fetch(this.url("/sessions"), { headers: this.headers() }))

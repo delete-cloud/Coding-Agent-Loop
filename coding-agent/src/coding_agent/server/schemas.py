@@ -89,8 +89,9 @@ class RuntimeConfigUpdateRequest(BaseModel):
     provider: ProviderName | None = None
     base_url: str | None = Field(None, min_length=1, max_length=500)
     thinking: ThinkingConfigSchema | None = None
+    approval: str | None = Field(None, pattern="^(yolo|interactive|auto)$")
 
-    @field_validator("model", "provider", "thinking")
+    @field_validator("model", "provider", "thinking", "approval")
     @classmethod
     def _reject_explicit_null(cls, value: Any, info: ValidationInfo) -> Any:
         if value is None:

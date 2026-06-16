@@ -1,4 +1,3 @@
-import pytest
 from coding_agent.plugins.approval import ApprovalPlugin, ApprovalPolicy
 from agentkit.directive.types import Approve, Reject, AskUser
 
@@ -17,6 +16,16 @@ class TestApprovalPlugin:
         plugin = ApprovalPlugin(policy=ApprovalPolicy.YOLO)
         result = plugin.approve_tool_call(tool_name="bash_run", arguments={"cmd": "ls"})
         assert isinstance(result, Approve)
+
+    def test_set_policy_updates_approval_behavior(self):
+        plugin = ApprovalPlugin(policy=ApprovalPolicy.INTERACTIVE)
+        before = plugin.approve_tool_call(tool_name="bash_run", arguments={})
+        assert isinstance(before, AskUser)
+
+        plugin.set_policy(ApprovalPolicy.YOLO)
+
+        after = plugin.approve_tool_call(tool_name="bash_run", arguments={})
+        assert isinstance(after, Approve)
 
     def test_interactive_policy_asks_user(self):
         plugin = ApprovalPlugin(policy=ApprovalPolicy.INTERACTIVE)
