@@ -178,9 +178,18 @@ def test_helm_default_runtime_contract_is_runnable() -> None:
     assert "--allow-unauthenticated" not in main["command"]
 
 
-def test_helm_agent_config_checksum_annotation_changes_with_config() -> None:
+def test_helm_agent_config_checksum_annotation_changes_with_config(
+    tmp_path: Path,
+) -> None:
     default_docs = _render()
     custom_docs = _render("--set", "agent.config.model=claude-test-checksum")
+    override_values = tmp_path / "values.yaml"
+    override_values.write_text(
+        "podAnnotations:\n"
+        "  checksum/config: user-override-value\n",
+        encoding="utf-8",
+    )
+    override_docs = _render("-f", str(override_values))
 
     default_annotations = _deployment(default_docs)["spec"]["template"]["metadata"][
         "annotations"
@@ -188,8 +197,14 @@ def test_helm_agent_config_checksum_annotation_changes_with_config() -> None:
     custom_annotations = _deployment(custom_docs)["spec"]["template"]["metadata"][
         "annotations"
     ]
+    override_annotations = _deployment(override_docs)["spec"]["template"]["metadata"][
+        "annotations"
+    ]
 
     assert re.fullmatch(r"[0-9a-f]{64}", default_annotations["checksum/config"])
+    assert re.fullmatch(r"[0-9a-f]{64}", override_annotations["checksum/config"])
+    assert override_annotations["checksum/config"] == default_annotations["checksum/config"]
+    assert override_annotations["checksum/config"] != "user-override-value"
     assert custom_annotations["checksum/config"] != default_annotations["checksum/config"]
 
 

@@ -14,10 +14,10 @@ spec:
       labels:
         {{- include "coding-agent.selectorLabels" . | nindent 8 }}
       annotations:
-        checksum/config: {{ include (print $.Template.BasePath "/configmap-agent-config.yaml") . | sha256sum }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap-agent-config.yaml") . | sha256sum }}
     spec:
       serviceAccountName: {{ include "coding-agent.serviceAccountName" . }}
       automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
