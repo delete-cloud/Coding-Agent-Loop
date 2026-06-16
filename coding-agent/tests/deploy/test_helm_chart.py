@@ -610,7 +610,7 @@ def test_helm_kb_index_disabled_does_not_render_cronjob() -> None:
     assert not _objects_of_kind(docs, "CronJob")
 
 
-def test_helm_kb_index_cronjob_renders_pvc_env_and_netpol_labels() -> None:
+def test_helm_kb_index_cronjob_excluded_from_netpol() -> None:
     docs = _render(
         "--set",
         "kb.enabled=true",
@@ -628,10 +628,19 @@ def test_helm_kb_index_cronjob_renders_pvc_env_and_netpol_labels() -> None:
     container = pod_spec["containers"][0]
 
     assert job["spec"]["schedule"] == "0 * * * *"
-    assert job["spec"]["jobTemplate"]["spec"]["template"]["metadata"]["labels"] == {
-        "app.kubernetes.io/name": "coding-agent",
+    # The index Job must be EXCLUDED from the agent NetworkPolicy so it can reach
+    # the private/mesh git host. Its pod labels must therefore NOT satisfy the
+    # netpol podSelector (which is the agent selectorLabels).
+    job_labels = job["spec"]["jobTemplate"]["spec"]["template"]["metadata"]["labels"]
+    assert job_labels == {
+        "app.kubernetes.io/name": "coding-agent-kb-index",
         "app.kubernetes.io/instance": "coding-agent",
+        "app.kubernetes.io/component": "kb-index",
     }
+    netpol_selector = _network_policy(docs)["spec"]["podSelector"]["matchLabels"]
+    assert not (netpol_selector.items() <= job_labels.items()), (
+        "kb-index Job must not match the agent NetworkPolicy podSelector"
+    )
     assert pod_spec["securityContext"]["fsGroup"] == 10001
     assert container["securityContext"] == {
         "runAsGroup": 10001,

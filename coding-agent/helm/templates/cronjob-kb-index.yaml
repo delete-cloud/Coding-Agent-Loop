@@ -13,7 +13,15 @@ spec:
       template:
         metadata:
           labels:
-            {{- include "coding-agent.selectorLabels" . | nindent 12 }}
+            # Deliberately NOT the agent's selectorLabels: this EXCLUDES the
+            # index Job from the agent NetworkPolicy (whose podSelector IS the
+            # agent selectorLabels). Like the github->forgejo sync job, it runs
+            # with unrestricted egress because it executes a fixed, trusted
+            # pipeline (git clone + kb index), not untrusted tool/LLM calls, and
+            # the CNI cannot honor an ipBlock allow to the in-cluster git host.
+            app.kubernetes.io/name: {{ include "coding-agent.name" . }}-kb-index
+            app.kubernetes.io/instance: {{ .Release.Name }}
+            app.kubernetes.io/component: kb-index
         spec:
           serviceAccountName: {{ include "coding-agent.serviceAccountName" . }}
           automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
