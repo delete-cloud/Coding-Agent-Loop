@@ -28,6 +28,9 @@ class ApprovalPlugin:
     def hooks(self) -> dict[str, Callable[..., Any]]:
         return {"approve_tool_call": self.approve_tool_call}
 
+    def set_policy(self, policy: ApprovalPolicy) -> None:
+        self._policy = policy
+
     def approve_tool_call(
         self,
         tool_name: str = "",

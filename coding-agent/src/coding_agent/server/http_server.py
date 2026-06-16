@@ -30,12 +30,13 @@ from slowapi.errors import RateLimitExceeded
 from sse_starlette.sse import EventSourceResponse
 
 from agentkit.config.loader import load_config as load_agent_toml
-from agentkit.errors import ConfigError
+from agentkit.errors import ConfigError, PluginError
 from agentkit.result.models import ArtifactRef, TurnResult
 from agentkit.result.reducers import result_from_turn_trace
 from agentkit.tape.extract import ToolCallRecord, TurnTrace, extract_turns
 from agentkit.tape.tape import Tape
 from coding_agent.approval import ApprovalPolicy
+from coding_agent.plugins.approval import ApprovalPlugin
 from coding_agent.bee.launch import BeeLaunchRecord, PGBeeLaunchStore
 from coding_agent.bee.template_pack import (
     BeePackRegistry,
@@ -2524,6 +2525,40 @@ async def create_session(
     return SessionResponse(session_id=session_id)
 
 
+def _live_approval_plugin(session: Any) -> ApprovalPlugin | None:
+    pipeline = getattr(session, "runtime_pipeline", None)
+    if pipeline is None:
+        return None
+
+    registry = getattr(pipeline, "_registry", None)
+    if registry is None:
+        raise RuntimeError("session runtime pipeline has no plugin registry")
+
+    try:
+        plugin = registry.get("approval")
+    except PluginError:
+        plugin = None
+
+    if isinstance(plugin, ApprovalPlugin):
+        return plugin
+
+    plugins = getattr(registry, "_plugins", None)
+    if isinstance(plugins, Mapping):
+        for candidate in plugins.values():
+            if isinstance(candidate, ApprovalPlugin):
+                return candidate
+        for candidate in plugins.values():
+            if getattr(candidate, "state_key", None) == "approval":
+                if isinstance(candidate, ApprovalPlugin):
+                    return candidate
+                raise RuntimeError("approval plugin is not an ApprovalPlugin")
+
+    raise RuntimeError("session runtime pipeline is missing approval plugin")
+
+
+@app.post(
+    "/sessions/{session_id}/runtime-config", response_model=RuntimeConfigUpdateResponse
+)
 @app.patch(
     "/sessions/{session_id}/runtime-config", response_model=RuntimeConfigUpdateResponse
 )
@@ -2534,10 +2569,10 @@ async def update_runtime_config(
     body: RuntimeConfigUpdateRequest,
     api_key: str | None = Depends(verify_api_key),
 ) -> RuntimeConfigUpdateResponse:
-    """Update the session runtime provider/model/base_url/thinking config in-place.
+    """Update the session runtime provider/model/base_url/thinking/approval config.
 
     Field semantics are three-state: omitted = leave unchanged, explicit
-    null = reset to default (base_url only; null model/provider/thinking
+    null = reset to default (base_url only; null model/provider/thinking/approval
     are rejected with 422), value = set.
 
     Applies changes next turn. The session's tape and history are preserved.
@@ -2548,7 +2583,7 @@ async def update_runtime_config(
     if not provided:
         raise HTTPException(
             status_code=400,
-            detail="At least one of model, provider, base_url, or thinking must be provided",
+            detail="At least one of model, provider, base_url, thinking, or approval must be provided",
         )
 
     try:
@@ -2559,15 +2594,23 @@ async def update_runtime_config(
     if getattr(session, "turn_in_progress", False):
         raise HTTPException(status_code=409, detail="Turn already in progress")
 
-    # Apply thinking config directly on session's mutable dict reference.
-    # No pipeline rebuild needed — provider reads it per-turn from ctx.config.
-    thinking_only = not (provided & {"model", "provider", "base_url"})
+    # Apply thinking and approval directly on live mutable session/runtime state.
+    # No pipeline rebuild needed for these: provider reads thinking per-turn from
+    # ctx.config, and approval is evaluated by the existing live plugin.
+    no_rebuild_update = not (provided & {"model", "provider", "base_url"})
     if body.thinking is not None:
         session.thinking_config["enabled"] = body.thinking.enabled
         session.thinking_config["effort"] = body.thinking.effort
+    if body.approval is not None:
+        approval_policy = ApprovalPolicy(body.approval)
+        plugin = _live_approval_plugin(session)
+        if plugin is not None:
+            plugin.set_policy(approval_policy)
+        session.approval_policy = approval_policy
+        await session_manager._persist_session_async(session)
 
     try:
-        if thinking_only:
+        if no_rebuild_update:
             updated_session = session
         else:
             updated_session = await session_manager.replace_session_runtime_config(
