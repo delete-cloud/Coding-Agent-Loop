@@ -84,8 +84,10 @@ o6n agent, replacing manual SSH `helm upgrade`.
 Deployment infrastructure; criteria are operational checks plus the existing
 chart/deploy guards that must keep passing.
 
-- [ ] Operational: an ArgoCD `Application` syncs the existing Helm release in
-  `coding-agent-deepseek` to Synced/Healthy from the private values repo.
+- [ ] Operational: an ArgoCD `Application` syncs the existing Helm release in the
+  o6n-prod namespace (`coding-agent-deepseek` — an environment-specific override;
+  the chart/deploy-script default is `coding-agent`) to Synced/Healthy from the
+  private values repo.
 - [ ] Operational: Image Updater promotes a new `:<sha>` by committing to the
   private repo; ArgoCD sync rolls the Deployment to that exact tag.
 - [ ] Operational: ArgoCD rollback to the previous revision restores the prior
@@ -94,7 +96,7 @@ chart/deploy guards that must keep passing.
   `test_deploy_script_apply_mode_rejects_example_values_without_content` keep
   passing (no public-repo values regression, PR #600).
 - [ ] `test_helm_chart_lints` and the chart render contract tests keep passing.
-- [ ] `uv run pytest tests/deploy/test_deploy_script.py tests/deploy/test_helm_chart.py -q`
+- [ ] Existing deploy-script and helm-chart guard tests pass: `uv run pytest tests/deploy/test_deploy_script.py tests/deploy/test_helm_chart.py -q`
 
 ## References
 
