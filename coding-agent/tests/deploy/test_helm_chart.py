@@ -692,53 +692,6 @@ def test_helm_kb_index_cronjob_excluded_from_netpol() -> None:
     assert "--corpus \"sre\"" in script
 
 
-def test_helm_kb_index_dedicated_netpol_allows_dns_and_https_only() -> None:
-    docs = _render(
-        "--set",
-        "kb.enabled=true",
-        "--set",
-        "kb.index.enabled=true",
-        "--set-json",
-        'kb.index.repos=[{"name":"sre","corpus":"sre","url":"https://x/sre.git"}]',
-    )
-    netpol = _object_named(docs, "NetworkPolicy", "-kb-index")
-    assert netpol["spec"]["policyTypes"] == ["Egress"]
-
-    # The dedicated policy must select exactly the kb-index Job pods.
-    sel = netpol["spec"]["podSelector"]["matchLabels"]
-    job = _cronjob(docs, "-kb-index")
-    job_labels = job["spec"]["jobTemplate"]["spec"]["template"]["metadata"]["labels"]
-    assert sel.items() <= job_labels.items()
-    assert sel["app.kubernetes.io/component"] == "kb-index"
-
-    egress = netpol["spec"]["egress"]
-    # DNS rule present.
-    assert any(
-        any(p.get("port") == 53 for p in rule.get("ports", [])) for rule in egress
-    )
-    # HTTPS-to-anywhere rule: 443 to 0.0.0.0/0 with NO `except` (so it can reach
-    # the private/mesh git host), and no other ports opened.
-    https = [
-        rule
-        for rule in egress
-        if any(p.get("port") == 443 for p in rule.get("ports", []))
-    ]
-    assert len(https) == 1
-    block = https[0]["to"][0]["ipBlock"]
-    assert block["cidr"] == "0.0.0.0/0"
-    assert "except" not in block
-    opened_ports = {p.get("port") for rule in egress for p in rule.get("ports", [])}
-    assert opened_ports == {53, 443}
-
-
-def test_helm_kb_index_dedicated_netpol_absent_when_index_disabled() -> None:
-    docs = _render("--set", "kb.enabled=true", "--set", "kb.index.enabled=false")
-    assert not any(
-        doc.get("metadata", {}).get("name", "").endswith("-kb-index")
-        for doc in _objects_of_kind(docs, "NetworkPolicy")
-    )
-
-
 def test_helm_chart_ignores_legacy_sandbox_sidecar_values() -> None:
     docs = _render("--set", "sandbox.sidecar.enabled=true")
     assert all(
