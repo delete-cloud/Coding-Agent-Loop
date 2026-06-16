@@ -2444,6 +2444,64 @@ class TestRuntimeConfigUpdate:
             Approve,
         )
 
+    async def test_mixed_runtime_replacement_failure_leaves_approval_and_thinking_unchanged(
+        self, client, monkeypatch
+    ):
+        response = await client.post("/sessions", json={"approval_policy": "auto"})
+        session_id = response.json()["session_id"]
+        await session_manager.ensure_session_runtime(session_id)
+        session = session_manager.get_session(session_id)
+        original_thinking_config = dict(session.thinking_config)
+        persisted_before = session_manager._store.load(session_id)
+        assert persisted_before is not None
+        assert persisted_before["approval_policy"] == "auto"
+
+        plugin = session.runtime_pipeline._registry.get("approval")
+        assert isinstance(plugin, ApprovalPlugin)
+        assert isinstance(
+            plugin.approve_tool_call(tool_name="bash_run", arguments={}),
+            AskUser,
+        )
+
+        replace_calls: list[dict[str, object]] = []
+
+        async def fail_replace_session_runtime_config(*args, **kwargs):
+            replace_calls.append(dict(kwargs))
+            raise RuntimeError("runtime replacement failed")
+
+        monkeypatch.setattr(
+            session_manager,
+            "replace_session_runtime_config",
+            fail_replace_session_runtime_config,
+        )
+
+        update = await client.post(
+            f"/sessions/{session_id}/runtime-config",
+            json={
+                "approval": "yolo",
+                "thinking": {"enabled": False, "effort": "high"},
+                "model": "replacement-model",
+            },
+        )
+
+        assert update.status_code == 500
+        assert replace_calls == [
+            {
+                "model_name": "replacement-model",
+                "provider_name": None,
+                "base_url": http_server.UNSET,
+            }
+        ]
+        assert session.approval_policy == ApprovalPolicy.AUTO
+        assert session.thinking_config == original_thinking_config
+        assert isinstance(
+            plugin.approve_tool_call(tool_name="bash_run", arguments={}),
+            AskUser,
+        )
+        persisted_after = session_manager._store.load(session_id)
+        assert persisted_after is not None
+        assert persisted_after["approval_policy"] == "auto"
+
     async def test_approval_null_is_rejected(self, client):
         response = await client.post("/sessions", json={})
         session_id = response.json()["session_id"]
