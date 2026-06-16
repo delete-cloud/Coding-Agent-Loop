@@ -178,6 +178,21 @@ def test_helm_default_runtime_contract_is_runnable() -> None:
     assert "--allow-unauthenticated" not in main["command"]
 
 
+def test_helm_agent_config_checksum_annotation_changes_with_config() -> None:
+    default_docs = _render()
+    custom_docs = _render("--set", "agent.config.model=claude-test-checksum")
+
+    default_annotations = _deployment(default_docs)["spec"]["template"]["metadata"][
+        "annotations"
+    ]
+    custom_annotations = _deployment(custom_docs)["spec"]["template"]["metadata"][
+        "annotations"
+    ]
+
+    assert re.fullmatch(r"[0-9a-f]{64}", default_annotations["checksum/config"])
+    assert custom_annotations["checksum/config"] != default_annotations["checksum/config"]
+
+
 def test_helm_default_creates_unprivileged_service_account_without_rbac() -> None:
     docs = _render()
 
