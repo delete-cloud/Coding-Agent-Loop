@@ -22,6 +22,7 @@ spec:
       serviceAccountName: {{ include "coding-agent.serviceAccountName" . }}
       automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
       enableServiceLinks: {{ .Values.enableServiceLinks }}
+      terminationGracePeriodSeconds: {{ .Values.lifecycle.terminationGracePeriodSeconds }}
       {{- with .Values.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}
@@ -30,6 +31,15 @@ spec:
         - name: coding-agent
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if gt (int (default 0 .Values.lifecycle.preStopSleepSeconds)) 0 }}
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - {{ printf "sleep %d" (int .Values.lifecycle.preStopSleepSeconds) | quote }}
+          {{- end }}
           command:
             {{- if .Values.command }}
             {{- toYaml .Values.command | nindent 12 }}

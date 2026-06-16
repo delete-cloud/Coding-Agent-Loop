@@ -5206,7 +5206,12 @@ class TestLifespanShutdown:
         async def fake_list_sessions_async() -> list[str]:
             return ["session-a", "session-b"]
 
-        async def fake_shutdown_session_runtime(session_id: str) -> None:
+        async def fake_shutdown_session_runtime(
+            session_id: str,
+            *,
+            interrupt_active_turn: bool = False,
+        ) -> None:
+            assert interrupt_active_turn is True
             observed_shutdowns.append(session_id)
             if session_id == "session-a":
                 raise RuntimeError("boom")
@@ -5234,6 +5239,98 @@ class TestLifespanShutdown:
 
         assert observed_shutdowns == ["session-a", "session-b"]
         assert close_calls == ["closed"]
+
+    async def test_lifespan_shutdown_marks_active_turn_interrupted(self, monkeypatch):
+        runtime_store = FakeExternalWorkerRuntimeStore()
+        events: list[str] = []
+
+        async def fake_cleanup_idle_sessions() -> None:
+            try:
+                while True:
+                    await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                raise
+
+        async def fake_renew_owner_leases() -> None:
+            try:
+                while True:
+                    await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                raise
+
+        async def fake_close() -> None:
+            events.append("close")
+
+        monkeypatch.setattr(
+            "coding_agent.server.http_server._cleanup_idle_sessions",
+            fake_cleanup_idle_sessions,
+        )
+        monkeypatch.setattr(
+            "coding_agent.server.http_server._renew_owner_leases",
+            fake_renew_owner_leases,
+        )
+        monkeypatch.setattr(session_manager, "close", fake_close)
+        session_manager.configure_runtime_store(runtime_store)
+
+        cm = app.router.lifespan_context(app)
+        await cm.__aenter__()
+        try:
+            session_id = await session_manager.create_session()
+            session = await session_manager.get_session_async(session_id)
+            run_id = "run-shutdown"
+            started_at = datetime(2026, 6, 16, 12, 0, tzinfo=UTC)
+            runtime_store.runs[run_id] = AgentRunRecord(
+                run_id=run_id,
+                session_id=session_id,
+                tape_id="tape-1",
+                parent_run_id=None,
+                agent_id=None,
+                status="running",
+                started_at=started_at,
+                metadata={"provider_name": "test-provider"},
+                result={"steps_taken": 1},
+            )
+
+            async def running_turn() -> None:
+                try:
+                    await asyncio.sleep(3600)
+                except asyncio.CancelledError:
+                    await runtime_store.update_agent_run(
+                        run_id,
+                        status="cancelled",
+                        ended_at=datetime(2026, 6, 16, 12, 1, tzinfo=UTC),
+                        metadata={"provider_name": "test-provider"},
+                        result={"steps_taken": 1},
+                        error="cancelled",
+                    )
+                    raise
+
+            task = asyncio.create_task(running_turn())
+            session.task = task
+            session.current_turn_id = run_id
+            session.turn_in_progress = True
+            session.turn_status = "running"
+            await asyncio.sleep(0)
+        finally:
+            await cm.__aexit__(None, None, None)
+
+        interrupted_run = runtime_store.runs[run_id]
+        assert interrupted_run.status == "interrupted"
+        assert interrupted_run.ended_at is not None
+        assert isinstance(interrupted_run.metadata["recovered_at"], str)
+        metadata_without_time = dict(interrupted_run.metadata)
+        metadata_without_time.pop("recovered_at")
+        assert metadata_without_time == {
+            "provider_name": "test-provider",
+            "reclaimable": True,
+            "recovery_reason": "graceful_shutdown",
+        }
+        assert interrupted_run.result == {"steps_taken": 1}
+        assert (
+            interrupted_run.error
+            == "runtime run was interrupted during graceful shutdown"
+        )
+        assert events == ["close"]
 
     async def test_lifespan_shutdown_logs_failed_owner_renew_task(
         self, monkeypatch, caplog

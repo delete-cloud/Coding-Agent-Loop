@@ -166,6 +166,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+GRACEFUL_SHUTDOWN_INTERRUPTED_RUN_ERROR = (
+    "runtime run was interrupted during graceful shutdown"
+)
+GRACEFUL_SHUTDOWN_RECOVERY_REASON = "graceful_shutdown"
+GRACEFUL_SHUTDOWN_INTERRUPTABLE_RUN_STATUSES = frozenset(
+    {"running", "cancelling", "cancelled"}
+)
+
 
 def _custom_store_names(
     *,
@@ -2942,21 +2950,63 @@ class SessionManager:
 
         logger.info(f"Closed session: {session_id}")
 
-    async def shutdown_session_runtime(self, session_id: str) -> None:
+    async def shutdown_session_runtime(
+        self,
+        session_id: str,
+        *,
+        interrupt_active_turn: bool = False,
+    ) -> None:
         """Release runtime resources without deleting persisted session metadata."""
         async with self._lock:
             await self._assert_owner(session_id)
             session = await self.get_session_async(session_id)
+            interrupted_run_id = (
+                session.current_turn_id
+                if interrupt_active_turn
+                and session.current_turn_id is not None
+                and session.turn_in_progress
+                and session.task is not None
+                and not session.task.done()
+                else None
+            )
 
             await self._runtime_control_services.task_stopper().stop(
                 session_id=session_id,
                 task=session.task,
             )
+            if interrupted_run_id is not None:
+                await self._mark_graceful_shutdown_interrupted_run(interrupted_run_id)
 
             await self._runtime_closer.close(session)
             session.task = None
             session.turn_in_progress = False
             await self._persist_session_async(session)
+
+    async def _mark_graceful_shutdown_interrupted_run(self, run_id: str) -> None:
+        store = self._runtime_store
+        if store is None:
+            return
+        run = await store.load_agent_run(run_id)
+        if run is None:
+            return
+        if run.status not in GRACEFUL_SHUTDOWN_INTERRUPTABLE_RUN_STATUSES:
+            return
+
+        interrupted_at = datetime.now(UTC)
+        metadata = dict(run.metadata)
+        metadata["reclaimable"] = True
+        metadata["recovered_at"] = interrupted_at.isoformat()
+        metadata["recovery_reason"] = GRACEFUL_SHUTDOWN_RECOVERY_REASON
+        if self._owner_id is not None:
+            metadata["recovered_by_owner_id"] = self._owner_id
+        await store.update_agent_run(
+            run_id,
+            status="interrupted",
+            ended_at=interrupted_at,
+            metadata=cast(JSONObject, metadata),
+            result=run.result,
+            error=GRACEFUL_SHUTDOWN_INTERRUPTED_RUN_ERROR,
+        )
 
     async def cancel_session_turn(self, session_id: str) -> CancelTurnResult:
         """Request cancellation for the active turn without closing the session."""

@@ -185,8 +185,7 @@ def test_helm_agent_config_checksum_annotation_changes_with_config(
     custom_docs = _render("--set", "agent.config.model=claude-test-checksum")
     override_values = tmp_path / "values.yaml"
     override_values.write_text(
-        "podAnnotations:\n"
-        "  checksum/config: user-override-value\n",
+        "podAnnotations:\n  checksum/config: user-override-value\n",
         encoding="utf-8",
     )
     override_docs = _render("-f", str(override_values))
@@ -203,9 +202,47 @@ def test_helm_agent_config_checksum_annotation_changes_with_config(
 
     assert re.fullmatch(r"[0-9a-f]{64}", default_annotations["checksum/config"])
     assert re.fullmatch(r"[0-9a-f]{64}", override_annotations["checksum/config"])
-    assert override_annotations["checksum/config"] == default_annotations["checksum/config"]
+    assert (
+        override_annotations["checksum/config"]
+        == default_annotations["checksum/config"]
+    )
     assert override_annotations["checksum/config"] != "user-override-value"
-    assert custom_annotations["checksum/config"] != default_annotations["checksum/config"]
+    assert (
+        custom_annotations["checksum/config"] != default_annotations["checksum/config"]
+    )
+
+
+def test_helm_deployment_sets_graceful_drain() -> None:
+    docs = _render()
+    pod_spec = _deployment(docs)["spec"]["template"]["spec"]
+    main = _container(docs)
+
+    assert pod_spec["terminationGracePeriodSeconds"] == 60
+    assert pod_spec["terminationGracePeriodSeconds"] != 30
+    assert main["lifecycle"]["preStop"]["exec"]["command"] == [
+        "/bin/sh",
+        "-c",
+        "sleep 5",
+    ]
+
+    overridden_docs = _render(
+        "--set",
+        "lifecycle.terminationGracePeriodSeconds=90",
+        "--set",
+        "lifecycle.preStopSleepSeconds=7",
+    )
+    overridden_pod_spec = _deployment(overridden_docs)["spec"]["template"]["spec"]
+    overridden_main = _container(overridden_docs)
+
+    assert overridden_pod_spec["terminationGracePeriodSeconds"] == 90
+    assert overridden_main["lifecycle"]["preStop"]["exec"]["command"] == [
+        "/bin/sh",
+        "-c",
+        "sleep 7",
+    ]
+
+    disabled_docs = _render("--set", "lifecycle.preStopSleepSeconds=0")
+    assert "lifecycle" not in _container(disabled_docs)
 
 
 def test_helm_default_creates_unprivileged_service_account_without_rbac() -> None:
@@ -715,11 +752,11 @@ def test_helm_kb_index_cronjob_excluded_from_netpol() -> None:
         },
     ]
     script = "\n".join(container["command"])
-    assert "git clone --depth 1 --branch \"main\"" in script
+    assert 'git clone --depth 1 --branch "main"' in script
     assert "<forgejo-host>/<owner>/sre.git" in script
     assert "/app/.venv/bin/python -m coding_agent kb index" in script
     assert re.search(r"(^|\n)\s*kb\s+index(\s|$)", script) is None
-    assert "--corpus \"sre\"" in script
+    assert '--corpus "sre"' in script
 
 
 def test_helm_chart_ignores_legacy_sandbox_sidecar_values() -> None:
