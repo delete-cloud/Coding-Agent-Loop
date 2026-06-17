@@ -245,6 +245,31 @@ def test_helm_deployment_sets_graceful_drain() -> None:
     assert "lifecycle" not in _container(disabled_docs)
 
 
+def test_helm_deployment_strategy_defaults_to_recreate() -> None:
+    docs = _render()
+
+    assert _deployment(docs)["spec"]["strategy"] == {"type": "Recreate"}
+
+
+def test_helm_deployment_strategy_can_be_overridden() -> None:
+    docs = _render(
+        "--set",
+        "deploymentStrategy.type=RollingUpdate",
+        "--set",
+        "deploymentStrategy.rollingUpdate.maxSurge=0",
+        "--set",
+        "deploymentStrategy.rollingUpdate.maxUnavailable=1",
+    )
+
+    assert _deployment(docs)["spec"]["strategy"] == {
+        "type": "RollingUpdate",
+        "rollingUpdate": {
+            "maxSurge": 0,
+            "maxUnavailable": 1,
+        },
+    }
+
+
 def test_helm_default_creates_unprivileged_service_account_without_rbac() -> None:
     docs = _render()
 
