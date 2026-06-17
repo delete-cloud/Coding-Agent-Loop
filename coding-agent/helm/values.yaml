@@ -1,5 +1,10 @@
 replicaCount: 1
 
+# Default to Recreate because this single-replica chart uses RWO PVCs with
+# bundled SQLite, so rollouts must not run concurrent writers on the same data.
+deploymentStrategy:
+  type: Recreate
+
 image:
   repository: coding-agent
   tag: latest
