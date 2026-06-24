@@ -12,13 +12,13 @@ import logging
 import time
 from collections.abc import Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager
-from inspect import isawaitable
 from dataclasses import dataclass, field
+from inspect import isawaitable
 from typing import Any, Awaitable, Callable, cast
 
 from agentkit._types import StageName
 from agentkit.directive.types import Directive
-from agentkit.errors import PipelineError
+from agentkit.errors import HookError, HookTypeError, PipelineError
 from agentkit.observability import ObservationSink, record_span
 from agentkit.plugin.registry import PluginRegistry
 from agentkit.providers.models import (
@@ -537,6 +537,29 @@ class Pipeline:
         toolset = self._require_toolset(ctx, stage="load_state")
         ctx.tool_schemas = toolset.collect_schemas()
 
+    async def _call_build_context_hooks(
+        self, ctx: PipelineContext
+    ) -> list[list[dict[str, Any]]]:
+        results: list[list[dict[str, Any]]] = []
+        for fn in self._runtime.get_hooks("build_context"):
+            try:
+                result = fn(tape=ctx.tape)
+                if isawaitable(result):
+                    result = await result
+                if result is not None:
+                    if not isinstance(result, list):
+                        raise HookTypeError(
+                            "Hook 'build_context' declared return_type=list, "
+                            f"got {type(result).__name__}: {repr(result)[:100]}",
+                            hook_name="build_context",
+                        )
+                    results.append(cast(list[dict[str, Any]], result))
+            except HookError:
+                raise
+            except Exception as exc:
+                raise HookError(str(exc), hook_name="build_context") from exc
+        return results
+
     async def _stage_build_context(self, ctx: PipelineContext) -> None:
         from agentkit.tape.view import TapeView
         from agentkit.context.builder import ContextBuilder
@@ -594,14 +617,13 @@ class Pipeline:
                     "Context summarized (legacy): %d entries remaining", len(ctx.tape)
                 )
 
-        grounding_results = self._runtime.call_many("build_context", tape=ctx.tape)
+        grounding_results = await self._call_build_context_hooks(ctx)
         grounding: list[dict[str, Any]] = []
         runtime_context = self._runtime_context_grounding(ctx)
         if runtime_context is not None:
             grounding.append(runtime_context)
         for result in grounding_results:
-            if isinstance(result, list):
-                grounding.extend(result)
+            grounding.extend(result)
 
         interval = max(
             1, int(ctx.config.get("incremental_context_rebuild_interval", 5))
