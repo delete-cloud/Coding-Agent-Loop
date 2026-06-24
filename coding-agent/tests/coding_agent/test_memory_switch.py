@@ -145,6 +145,26 @@ enabled = [{plugins}]
     return config_path
 
 
+def _default_plugin_config(
+    tmp_path: Path,
+    *,
+    memory: str = "",
+    kb: str = "",
+) -> Path:
+    config_path = tmp_path / "agent.toml"
+    config_path.write_text(
+        f"""
+[agent]
+name = "test-agent"
+model = "claude-sonnet-4-20250514"
+provider = "anthropic"
+{memory}
+{kb}
+""".strip()
+    )
+    return config_path
+
+
 def test_read_off_suppresses_grounding_injection() -> None:
     plugin = MemoryPlugin(read_enabled=False)
     plugin._memories = [
@@ -637,6 +657,26 @@ backend = "unknown"
     assert "semantic_memory_index" not in ctx.config
 
 
+def test_default_semantic_disabled_does_not_register_semantic_memory_plugin(
+    tmp_path: Path,
+) -> None:
+    config_path = _default_plugin_config(tmp_path)
+
+    pipeline, ctx = create_agent(
+        config_path=config_path,
+        data_dir=tmp_path / "data",
+        api_key="sk-test",
+    )
+
+    assert ctx.config["memory"]["semantic"] == {
+        "enabled": False,
+        "backend": "fake",
+    }
+    assert "semantic_memory" not in pipeline._registry.plugin_ids()
+    assert "semantic_memory_backend" not in ctx.config
+    assert "semantic_memory_index" not in ctx.config
+
+
 def test_semantic_enabled_unknown_backend_fails_clearly(tmp_path: Path) -> None:
     config_path = _config(
         tmp_path,
@@ -658,10 +698,10 @@ backend = "unknown"
         )
 
 
-def test_semantic_enabled_fake_backend_exposes_backend_and_index_without_changing_defaults(
+def test_semantic_enabled_fake_backend_registers_plugin_and_exposes_index_by_default(
     tmp_path: Path,
 ) -> None:
-    config_path = _config(
+    config_path = _default_plugin_config(
         tmp_path,
         memory="""
 
@@ -675,7 +715,7 @@ backend = "fake"
 """,
     )
 
-    _pipeline, ctx = create_agent(
+    pipeline, ctx = create_agent(
         config_path=config_path,
         data_dir=tmp_path / "data",
         api_key="sk-test",
@@ -699,6 +739,69 @@ backend = "fake"
     assert ctx.config["semantic_memory_index"].__class__.__name__ == (
         "SafeSemanticMemoryIndex"
     )
+    assert "semantic_memory" in pipeline._registry.plugin_ids()
+
+
+def test_semantic_enabled_with_read_disabled_exposes_index_without_registering_plugin(
+    tmp_path: Path,
+) -> None:
+    config_path = _default_plugin_config(
+        tmp_path,
+        memory="""
+
+[memory]
+read_enabled = false
+write_enabled = true
+
+[memory.semantic]
+enabled = true
+backend = "fake"
+""",
+    )
+
+    pipeline, ctx = create_agent(
+        config_path=config_path,
+        data_dir=tmp_path / "data",
+        api_key="sk-test",
+    )
+
+    assert ctx.config["memory"]["effective_read_enabled"] is False
+    assert ctx.config["semantic_memory_backend"].__class__.__name__ == (
+        "FakeSemanticMemoryBackend"
+    )
+    assert ctx.config["semantic_memory_index"].__class__.__name__ == (
+        "SafeSemanticMemoryIndex"
+    )
+    assert "semantic_memory" not in pipeline._registry.plugin_ids()
+
+
+def test_semantic_enabled_explicit_plugin_omission_does_not_register_plugin(
+    tmp_path: Path,
+) -> None:
+    config_path = _config(
+        tmp_path,
+        plugins='"memory"',
+        memory="""
+
+[memory]
+read_enabled = true
+write_enabled = true
+
+[memory.semantic]
+enabled = true
+backend = "fake"
+""",
+    )
+
+    pipeline, ctx = create_agent(
+        config_path=config_path,
+        data_dir=tmp_path / "data",
+        api_key="sk-test",
+    )
+
+    assert ctx.config["memory"]["effective_read_enabled"] is True
+    assert "semantic_memory_index" in ctx.config
+    assert pipeline._registry.plugin_ids() == ["memory"]
 
 
 def test_non_bool_memory_config_rejected(tmp_path: Path) -> None:

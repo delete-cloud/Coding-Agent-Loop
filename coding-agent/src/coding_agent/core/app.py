@@ -33,6 +33,7 @@ from coding_agent.plugins.kb import KBPlugin
 from coding_agent.plugins.metrics import SessionMetricsPlugin
 from coding_agent.observability import build_observation_sink
 from coding_agent.plugins.parallel_executor import ParallelExecutorPlugin
+from coding_agent.plugins.semantic_memory import SemanticMemoryPlugin
 from coding_agent.plugins.shell_session import ShellSessionPlugin
 from coding_agent.plugins.skills import SkillsPlugin
 from coding_agent.plugins.storage import StoragePlugin
@@ -435,6 +436,14 @@ def create_child_pipeline(
         ),
         "shell_session": lambda: shell_session,
     }
+    if memory_cfg.semantic.enabled and memory_cfg.effective_read_enabled:
+        if semantic_memory_index is None:
+            raise TypeError("semantic memory index must be initialized when enabled")
+        plugin_factories["semantic_memory"] = lambda: SemanticMemoryPlugin(
+            semantic_index=semantic_memory_index,
+            memory_review_store=memory_review_store,
+            read_enabled=memory_cfg.effective_read_enabled,
+        )
 
     async def _execute_tool_async(
         name: str,
