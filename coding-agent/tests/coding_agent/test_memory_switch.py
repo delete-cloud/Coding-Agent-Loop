@@ -198,6 +198,10 @@ def test_missing_memory_section_defaults_to_read_and_write_enabled(
         "write_enabled": True,
         "effective_read_enabled": True,
         "effective_write_enabled": True,
+        "semantic": {
+            "enabled": False,
+            "backend": "fake",
+        },
     }
     assert ctx.config["topic_recall"]["enabled"] is True
 
@@ -503,6 +507,10 @@ write_enabled = {str(write_enabled).lower()}
         "write_enabled": write_enabled,
         "effective_read_enabled": effective_read,
         "effective_write_enabled": effective_write,
+        "semantic": {
+            "enabled": False,
+            "backend": "fake",
+        },
     }
 
 
@@ -562,6 +570,135 @@ top_k = 3
         }
     ]
     assert fake_kb.queries == ["how does auth work?"]
+
+
+def test_nested_semantic_config_preserves_existing_memory_switch_defaults(
+    tmp_path: Path,
+) -> None:
+    config_path = _config(
+        tmp_path,
+        memory="""
+
+[memory]
+
+[memory.semantic]
+enabled = false
+backend = "fake"
+""",
+    )
+
+    _pipeline, ctx = create_agent(
+        config_path=config_path,
+        data_dir=tmp_path / "data",
+        api_key="sk-test",
+    )
+
+    assert ctx.config["memory"] == {
+        "enabled": True,
+        "read_enabled": True,
+        "write_enabled": True,
+        "effective_read_enabled": True,
+        "effective_write_enabled": True,
+        "semantic": {
+            "enabled": False,
+            "backend": "fake",
+        },
+    }
+    assert ctx.config["topic_recall"]["enabled"] is True
+    assert "semantic_memory_backend" not in ctx.config
+    assert "semantic_memory_index" not in ctx.config
+
+
+def test_disabled_semantic_config_does_not_initialize_provider_or_backend(
+    tmp_path: Path,
+) -> None:
+    config_path = _config(
+        tmp_path,
+        memory="""
+
+[memory]
+
+[memory.semantic]
+enabled = false
+backend = "unknown"
+""",
+    )
+
+    _pipeline, ctx = create_agent(
+        config_path=config_path,
+        data_dir=tmp_path / "data",
+    )
+
+    assert ctx.config["memory"]["semantic"] == {
+        "enabled": False,
+        "backend": "unknown",
+    }
+    assert "semantic_memory_backend" not in ctx.config
+    assert "semantic_memory_index" not in ctx.config
+
+
+def test_semantic_enabled_unknown_backend_fails_clearly(tmp_path: Path) -> None:
+    config_path = _config(
+        tmp_path,
+        memory="""
+
+[memory]
+
+[memory.semantic]
+enabled = true
+backend = "unknown"
+""",
+    )
+
+    with pytest.raises(ValueError, match="unknown semantic memory backend: unknown"):
+        create_agent(
+            config_path=config_path,
+            data_dir=tmp_path / "data",
+            api_key="sk-test",
+        )
+
+
+def test_semantic_enabled_fake_backend_exposes_backend_and_index_without_changing_defaults(
+    tmp_path: Path,
+) -> None:
+    config_path = _config(
+        tmp_path,
+        memory="""
+
+[memory]
+read_enabled = true
+write_enabled = true
+
+[memory.semantic]
+enabled = true
+backend = "fake"
+""",
+    )
+
+    _pipeline, ctx = create_agent(
+        config_path=config_path,
+        data_dir=tmp_path / "data",
+        api_key="sk-test",
+    )
+
+    assert ctx.config["memory"] == {
+        "enabled": True,
+        "read_enabled": True,
+        "write_enabled": True,
+        "effective_read_enabled": True,
+        "effective_write_enabled": True,
+        "semantic": {
+            "enabled": True,
+            "backend": "fake",
+        },
+    }
+    assert ctx.config["topic_recall"]["enabled"] is True
+    assert ctx.config["semantic_memory_backend"].__class__.__name__ == (
+        "FakeSemanticMemoryBackend"
+    )
+    assert ctx.config["semantic_memory_index"].__class__.__name__ == (
+        "SafeSemanticMemoryIndex"
+    )
 
 
 def test_non_bool_memory_config_rejected(tmp_path: Path) -> None:
