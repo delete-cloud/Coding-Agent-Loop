@@ -4,27 +4,153 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
+import re
 from typing import Any
 
 from agentkit.storage.protocols import MemoryHit, MemoryIndex
+from coding_agent.topics.memory import ReviewedMemoryRecord
+from coding_agent.topics.provenance import topic_entry_range
 from coding_agent.topics.range_index import (
     TopicRangeSearchResult,
     require_recall_safe_text,
 )
+from coding_agent.topics.store import TopicRecord
+
+
+class SemanticDocKind(StrEnum):
+    TOPIC_SUMMARY = "topic-summary"
+    ACCEPTED_REVIEWED_MEMORY = "accepted-memory"
+
+
+class SemanticSourceKind(StrEnum):
+    TOPIC = "topic"
+    ACCEPTED_MEMORY = "memory"
+
+
+_SEMANTIC_ID_PART_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_TOPIC_SOURCE_VERSION_RE = re.compile(r"^[0-9]+-(?:[0-9]+|open)$")
+
+
+@dataclass(frozen=True)
+class SemanticDocId:
+    kind: SemanticDocKind
+    source_id: str
+    source_version: str
+
+    def __post_init__(self) -> None:
+        _require_safe_id_part("semantic document source id", self.source_id)
+        _require_doc_source_version(self.kind, self.source_version)
+
+    @classmethod
+    def for_topic(cls, topic: TopicRecord) -> SemanticDocId:
+        source_range = topic_entry_range(topic)
+        end_seq = (
+            str(source_range.end_seq) if source_range.end_seq is not None else "open"
+        )
+        return cls(
+            kind=SemanticDocKind.TOPIC_SUMMARY,
+            source_id=topic.topic_id,
+            source_version=f"{source_range.start_seq}-{end_seq}",
+        )
+
+    @classmethod
+    def for_reviewed_memory(cls, record: ReviewedMemoryRecord) -> SemanticDocId:
+        if record.status != "accepted":
+            raise ValueError(
+                "semantic reviewed memory document requires accepted status"
+            )
+        candidate_id = record.candidate.candidate_id
+        if candidate_id is None:
+            raise ValueError("reviewed memory candidate is missing candidate_id")
+        return cls(
+            kind=SemanticDocKind.ACCEPTED_REVIEWED_MEMORY,
+            source_id=candidate_id,
+            source_version=record.status,
+        )
+
+    @classmethod
+    def parse(cls, value: str | SemanticDocId) -> SemanticDocId:
+        if isinstance(value, cls):
+            return value
+        require_recall_safe_text("semantic document id", value)
+        parts = value.split(":")
+        if len(parts) != 3:
+            raise ValueError("semantic document id must be kind:source_id:version")
+        kind_value, source_id, source_version = parts
+        try:
+            kind = SemanticDocKind(kind_value)
+        except ValueError as exc:
+            raise ValueError(
+                f"semantic document id kind is not supported: {kind_value}"
+            ) from exc
+        return cls(kind=kind, source_id=source_id, source_version=source_version)
+
+    def __str__(self) -> str:
+        return f"{self.kind.value}:{self.source_id}:{self.source_version}"
+
+
+@dataclass(frozen=True)
+class SemanticSourceRef:
+    kind: SemanticSourceKind
+    source_id: str
+
+    def __post_init__(self) -> None:
+        _require_safe_id_part("semantic source id", self.source_id)
+
+    @classmethod
+    def for_topic(cls, topic: TopicRecord) -> SemanticSourceRef:
+        return cls(kind=SemanticSourceKind.TOPIC, source_id=topic.topic_id)
+
+    @classmethod
+    def for_reviewed_memory(cls, record: ReviewedMemoryRecord) -> SemanticSourceRef:
+        if record.status != "accepted":
+            raise ValueError(
+                "semantic reviewed memory source requires accepted status"
+            )
+        candidate_id = record.candidate.candidate_id
+        if candidate_id is None:
+            raise ValueError("reviewed memory candidate is missing candidate_id")
+        return cls(kind=SemanticSourceKind.ACCEPTED_MEMORY, source_id=candidate_id)
+
+    @classmethod
+    def parse(cls, value: str | SemanticSourceRef) -> SemanticSourceRef:
+        if isinstance(value, cls):
+            return value
+        require_recall_safe_text("semantic source ref", value)
+        parts = value.split(":")
+        if len(parts) != 2:
+            raise ValueError("semantic source ref must be kind:source_id")
+        kind_value, source_id = parts
+        try:
+            kind = SemanticSourceKind(kind_value)
+        except ValueError as exc:
+            raise ValueError(
+                f"semantic source ref kind is not supported: {kind_value}"
+            ) from exc
+        return cls(kind=kind, source_id=source_id)
+
+    def __str__(self) -> str:
+        return f"{self.kind.value}:{self.source_id}"
 
 
 @dataclass(frozen=True)
 class SemanticMemoryDocument:
-    memory_id: str
+    memory_id: str | SemanticDocId
     text: str
     metadata: dict[str, Any]
-    source_refs: tuple[str, ...] = ()
+    source_refs: tuple[str | SemanticSourceRef, ...] = ()
 
     def __post_init__(self) -> None:
-        _require_safe_identity("memory_id", self.memory_id)
-        for index, source_ref in enumerate(self.source_refs):
-            require_recall_safe_text(f"source_refs[{index}]", source_ref)
-        object.__setattr__(self, "source_refs", tuple(sorted(set(self.source_refs))))
+        document_id = SemanticDocId.parse(self.memory_id)
+        source_refs = _canonical_source_refs(
+            document_id,
+            tuple(
+                SemanticSourceRef.parse(source_ref) for source_ref in self.source_refs
+            ),
+        )
+        object.__setattr__(self, "memory_id", str(document_id))
+        object.__setattr__(self, "source_refs", source_refs)
 
 
 class SafeSemanticMemoryIndex:
@@ -34,11 +160,12 @@ class SafeSemanticMemoryIndex:
         self._index = index
 
     async def upsert(self, document: SemanticMemoryDocument) -> None:
+        document_id = SemanticDocId.parse(document.memory_id)
         require_recall_safe_text("text", document.text)
         metadata = dict(document.metadata)
         metadata["source_refs"] = list(document.source_refs)
         _require_safe_metadata("metadata", metadata)
-        await self._index.upsert(document.memory_id, document.text, metadata)
+        await self._index.upsert(str(document_id), document.text, metadata)
 
     async def search(self, query: str, limit: int = 10) -> tuple[MemoryHit, ...]:
         if limit <= 0:
@@ -48,6 +175,57 @@ class SafeSemanticMemoryIndex:
             _require_safe_hit(hit)
             for hit in await self._index.search(query, limit=limit)
         )
+
+    async def delete(self, document_id_or_value: str | SemanticDocId) -> None:
+        document_id = SemanticDocId.parse(document_id_or_value)
+        await self._index.delete(str(document_id))
+
+
+def semantic_document_from_topic(topic: TopicRecord) -> SemanticMemoryDocument:
+    if topic.status != "finalized":
+        raise ValueError("semantic topic document requires finalized topic")
+    if topic.summary is None:
+        raise ValueError("semantic topic document requires summary")
+    source_range = topic_entry_range(topic)
+    return SemanticMemoryDocument(
+        memory_id=SemanticDocId.for_topic(topic),
+        text=_summary_document_text(topic.title, topic.summary),
+        metadata={
+            "kind": "topic_summary",
+            "topic_id": topic.topic_id,
+            "tape_id": topic.tape_id,
+            "session_id": topic.session_id,
+            "topic_kind": topic.kind,
+            "topic_status": topic.status,
+            "source_start_seq": source_range.start_seq,
+            "source_end_seq": source_range.end_seq,
+        },
+        source_refs=(SemanticSourceRef.for_topic(topic),),
+    )
+
+
+def semantic_document_from_reviewed_memory(
+    record: ReviewedMemoryRecord,
+) -> SemanticMemoryDocument:
+    if record.status != "accepted":
+        raise ValueError("semantic reviewed memory document requires accepted status")
+    candidate = record.candidate
+    candidate_id = candidate.candidate_id
+    if candidate_id is None:
+        raise ValueError("reviewed memory candidate is missing candidate_id")
+    return SemanticMemoryDocument(
+        memory_id=SemanticDocId.for_reviewed_memory(record),
+        text=_summary_document_text(candidate.title, candidate.summary),
+        metadata={
+            "kind": "accepted_reviewed_memory",
+            "memory_kind": candidate.kind,
+            "candidate_id": candidate_id,
+            "memory_status": record.status,
+            "scope": candidate.scope,
+            "tags": list(candidate.tags),
+        },
+        source_refs=(SemanticSourceRef.for_reviewed_memory(record),),
+    )
 
 
 @dataclass(frozen=True)
@@ -126,21 +304,24 @@ def _ordered_topic_results(
 
 
 def _semantic_identity(hit: MemoryHit, topic_identities: Sequence[str]) -> str:
-    source_refs = tuple(sorted(set(hit.source_refs)))
+    document_id = SemanticDocId.parse(hit.memory_id)
+    source_refs = _canonical_source_refs(
+        document_id,
+        tuple(SemanticSourceRef.parse(source_ref) for source_ref in hit.source_refs),
+    )
     for identity in topic_identities:
         if identity in source_refs:
             return identity
-    if source_refs:
-        return source_refs[0]
-    _require_safe_identity("memory_id", hit.memory_id)
-    return f"memory:{hit.memory_id}"
+    return str(_primary_source_ref(document_id))
 
 
 def _require_safe_hit(hit: MemoryHit) -> MemoryHit:
-    _require_safe_identity("memory_id", hit.memory_id)
+    document_id = SemanticDocId.parse(hit.memory_id)
     require_recall_safe_text("text", hit.text)
-    for index, source_ref in enumerate(hit.source_refs):
-        require_recall_safe_text(f"source_refs[{index}]", source_ref)
+    _canonical_source_refs(
+        document_id,
+        tuple(SemanticSourceRef.parse(source_ref) for source_ref in hit.source_refs),
+    )
     _require_safe_metadata("metadata", hit.metadata)
     return hit
 
@@ -176,7 +357,64 @@ def _hybrid_sort_key(hit: HybridRecallHit) -> tuple[float, int, int, str]:
     return (-semantic_score, deterministic_rank, semantic_rank, hit.identity)
 
 
-def _require_safe_identity(field_name: str, value: str) -> None:
+def _summary_document_text(title: str | None, summary: str) -> str:
+    if title is None:
+        require_recall_safe_text("summary", summary)
+        return summary
+    require_recall_safe_text("title", title)
+    require_recall_safe_text("summary", summary)
+    return f"{title}\n\n{summary}"
+
+
+def _primary_source_ref(document_id: SemanticDocId) -> SemanticSourceRef:
+    if document_id.kind is SemanticDocKind.TOPIC_SUMMARY:
+        return SemanticSourceRef(
+            kind=SemanticSourceKind.TOPIC,
+            source_id=document_id.source_id,
+        )
+    if document_id.kind is SemanticDocKind.ACCEPTED_REVIEWED_MEMORY:
+        return SemanticSourceRef(
+            kind=SemanticSourceKind.ACCEPTED_MEMORY,
+            source_id=document_id.source_id,
+        )
+    raise ValueError("semantic document kind is not supported")
+
+
+def _canonical_source_refs(
+    document_id: SemanticDocId,
+    source_refs: tuple[SemanticSourceRef, ...],
+) -> tuple[str, ...]:
+    primary = _primary_source_ref(document_id)
+    unique_refs = tuple(sorted({str(source_ref) for source_ref in source_refs}))
+    if str(primary) not in unique_refs:
+        raise ValueError(
+            "semantic source refs must include the document's primary source ref"
+        )
+    return unique_refs
+
+
+def _require_safe_id_part(field_name: str, value: str) -> None:
     require_recall_safe_text(field_name, value)
-    if any(char.isspace() for char in value):
-        raise ValueError(f"{field_name} must not contain whitespace")
+    if _SEMANTIC_ID_PART_RE.fullmatch(value) is None:
+        raise ValueError(
+            f"{field_name} must contain only letters, numbers, dot, underscore, or dash"
+        )
+
+
+def _require_doc_source_version(
+    kind: SemanticDocKind,
+    source_version: str,
+) -> None:
+    require_recall_safe_text("semantic document source version", source_version)
+    if kind is SemanticDocKind.TOPIC_SUMMARY:
+        if _TOPIC_SOURCE_VERSION_RE.fullmatch(source_version) is None:
+            raise ValueError(
+                "semantic topic summary document version must be start-end"
+            )
+        return
+    if (
+        kind is SemanticDocKind.ACCEPTED_REVIEWED_MEMORY
+        and source_version == "accepted"
+    ):
+        return
+    raise ValueError("semantic document source version is not supported")
