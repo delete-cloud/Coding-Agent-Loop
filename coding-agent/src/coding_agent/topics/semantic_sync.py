@@ -5,8 +5,9 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 import re
+from typing import Protocol
 
-from coding_agent.topics.memory import ReviewedMemoryRecord
+from coding_agent.topics.memory import MemoryReviewStore, ReviewedMemoryRecord
 from coding_agent.topics.semantic_backends import (
     SemanticBackendScope,
     SemanticIndexSchema,
@@ -33,6 +34,51 @@ class SemanticSyncReport:
     deleted_count: int = 0
     indexed_ids: tuple[str, ...] = ()
     deleted_ids: tuple[str, ...] = ()
+
+
+class ReviewedMemorySemanticSyncer(Protocol):
+    async def sync_reviewed_memory(
+        self,
+        record: ReviewedMemoryRecord,
+    ) -> object: ...
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticMemoryReviewSyncService:
+    """Coordinate review-store transitions with semantic memory sync."""
+
+    review_store: MemoryReviewStore
+    syncer: ReviewedMemorySemanticSyncer
+
+    async def accept_candidate(
+        self,
+        candidate_id: str,
+        *,
+        reason: str | None = None,
+    ) -> ReviewedMemoryRecord:
+        record = self.review_store.accept_candidate(candidate_id, reason=reason)
+        await self.syncer.sync_reviewed_memory(record)
+        return record
+
+    async def reject_candidate(
+        self,
+        candidate_id: str,
+        *,
+        reason: str | None = None,
+    ) -> ReviewedMemoryRecord:
+        record = self.review_store.reject_candidate(candidate_id, reason=reason)
+        await self.syncer.sync_reviewed_memory(record)
+        return record
+
+    async def archive_candidate(
+        self,
+        candidate_id: str,
+        *,
+        reason: str | None = None,
+    ) -> ReviewedMemoryRecord:
+        record = self.review_store.archive_candidate(candidate_id, reason=reason)
+        await self.syncer.sync_reviewed_memory(record)
+        return record
 
 
 class SemanticMemorySyncer:
