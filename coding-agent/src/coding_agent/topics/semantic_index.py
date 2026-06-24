@@ -358,13 +358,13 @@ def _require_safe_metadata(field_name: str, value: Any) -> None:
     )
 
 
-def _hybrid_sort_key(hit: HybridRecallHit) -> tuple[float, int, int, str]:
-    semantic_score = hit.semantic_score if hit.semantic_score is not None else -1.0
+def _hybrid_sort_key(hit: HybridRecallHit) -> tuple[int, int, int, str]:
     deterministic_rank = (
         hit.deterministic_rank if hit.deterministic_rank is not None else 1_000_000
     )
     semantic_rank = hit.semantic_rank if hit.semantic_rank is not None else 1_000_000
-    return (-semantic_score, deterministic_rank, semantic_rank, hit.identity)
+    deterministic_bucket = 0 if hit.deterministic_rank is not None else 1
+    return (deterministic_bucket, deterministic_rank, semantic_rank, hit.identity)
 
 
 def _summary_document_text(title: str | None, summary: str) -> str:
