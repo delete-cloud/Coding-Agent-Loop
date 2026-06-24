@@ -71,11 +71,13 @@ class TopicLifecycle:
         now: Callable[[], datetime] | None = None,
         topic_id_factory: Callable[[], str] | None = None,
         memory_review_store: MemoryReviewStore | None = None,
+        memory_write_enabled: bool = True,
     ) -> None:
         self._store = store
         self._now = now or (lambda: datetime.now(UTC))
         self._topic_id_factory = topic_id_factory or _new_topic_id
         self._memory_review_store = memory_review_store
+        self._memory_write_enabled = memory_write_enabled
 
     async def create_topic(
         self,
@@ -207,7 +209,12 @@ class TopicLifecycle:
         except Exception:
             _remove_anchor(tape, seq=seq, entry_id=anchor.id)
             raise
-        if close_status == "finalized" and self._memory_review_store is not None:
+        if (
+            close_status == "finalized"
+            and self._memory_write_enabled
+            and self._memory_review_store is not None
+            and self._memory_review_store.candidate_writes_enabled
+        ):
             candidate = propose_memory_candidate_from_topic(stored)
             if candidate is not None:
                 self._memory_review_store.add_candidate(candidate)

@@ -43,6 +43,11 @@ timeout = 30.0
 max_entries = 100
 keep_recent = 20
 
+[memory]
+enabled = true
+read_enabled = true
+write_enabled = true
+
 [kb]
 db_path = "kb"
 embedding_model = "text-embedding-3-small"
