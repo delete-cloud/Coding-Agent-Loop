@@ -71,6 +71,31 @@ class DocIndex(Protocol):
     async def delete(self, doc_id: str) -> None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class MemoryHit:
+    """Generic semantic memory retrieval hit."""
+
+    memory_id: str
+    text: str
+    score: float
+    metadata: dict[str, Any]
+    source_refs: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "source_refs", tuple(self.source_refs))
+
+
+@runtime_checkable
+class MemoryIndex(Protocol):
+    """Protocol for semantic memory storage and retrieval."""
+
+    async def upsert(
+        self, memory_id: str, text: str, metadata: dict[str, Any]
+    ) -> None: ...
+    async def search(self, query: str, limit: int = 10) -> list[MemoryHit]: ...
+    async def delete(self, memory_id: str) -> None: ...
+
+
 @runtime_checkable
 class SessionStore(Protocol):
     """Protocol for session metadata persistence."""
