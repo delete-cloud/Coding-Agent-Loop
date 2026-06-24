@@ -17,7 +17,7 @@ from agentkit.plugin.registry import PluginRegistry
 from agentkit.tape.tape import Tape
 from agentkit.tape.models import Entry
 from agentkit.tape.anchor import Anchor
-from agentkit.errors import PipelineError
+from agentkit.errors import HookError, HookTypeError, PipelineError
 from agentkit.tools import FatalToolExecutionError
 from agentkit.tools import UNHANDLED_TOOL_RESULT
 from agentkit.tools.schema import ToolSchema
@@ -1365,6 +1365,84 @@ class TestPipeline:
         assert entries[0].payload["content"] == "summary"
         assert ctx.messages[1]["role"] == "system"
         assert ctx.messages[1]["content"] == "summary"
+
+    @pytest.mark.asyncio
+    async def test_build_context_awaits_async_hook_grounding(self, setup):
+        _pipeline, plugin = setup
+
+        class AsyncContextPlugin:
+            state_key = "async_context"
+
+            def __init__(self):
+                self.awaited = False
+
+            def hooks(self):
+                return {"build_context": self.build_context}
+
+            async def build_context(self, **kwargs):
+                del kwargs
+                self.awaited = True
+                return [{"role": "system", "content": "async grounding"}]
+
+        async_plugin = AsyncContextPlugin()
+        registry = PluginRegistry()
+        registry.register(plugin)
+        registry.register(async_plugin)
+        pipeline = Pipeline(runtime=HookRuntime(registry), registry=registry)
+        ctx = PipelineContext(tape=Tape(), session_id="s1")
+
+        await pipeline._stage_build_context(ctx)
+
+        assert async_plugin.awaited is True
+        assert {"role": "system", "content": "async grounding"} in ctx.messages
+
+    @pytest.mark.asyncio
+    async def test_build_context_rejects_async_hook_non_list(self, setup):
+        _pipeline, plugin = setup
+
+        class BadAsyncContextPlugin:
+            state_key = "bad_async_context"
+
+            def hooks(self):
+                return {"build_context": self.build_context}
+
+            async def build_context(self, **kwargs):
+                del kwargs
+                return {"role": "system", "content": "not a list"}
+
+        registry = PluginRegistry()
+        registry.register(plugin)
+        registry.register(BadAsyncContextPlugin())
+        pipeline = Pipeline(runtime=HookRuntime(registry), registry=registry)
+        ctx = PipelineContext(tape=Tape(), session_id="s1")
+
+        with pytest.raises(HookTypeError, match="build_context"):
+            await pipeline._stage_build_context(ctx)
+
+    @pytest.mark.asyncio
+    async def test_build_context_wraps_async_hook_exception(self, setup):
+        _pipeline, plugin = setup
+
+        class FailingAsyncContextPlugin:
+            state_key = "failing_async_context"
+
+            def hooks(self):
+                return {"build_context": self.build_context}
+
+            async def build_context(self, **kwargs):
+                del kwargs
+                raise RuntimeError("async context boom")
+
+        registry = PluginRegistry()
+        registry.register(plugin)
+        registry.register(FailingAsyncContextPlugin())
+        pipeline = Pipeline(runtime=HookRuntime(registry), registry=registry)
+        ctx = PipelineContext(tape=Tape(), session_id="s1")
+
+        with pytest.raises(HookError, match="async context boom") as exc_info:
+            await pipeline._stage_build_context(ctx)
+
+        assert exc_info.value.hook_name == "build_context"
 
     @pytest.mark.asyncio
     async def test_build_context_uses_windowing(self, setup):
