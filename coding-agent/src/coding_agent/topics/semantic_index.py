@@ -105,9 +105,7 @@ class SemanticSourceRef:
     @classmethod
     def for_reviewed_memory(cls, record: ReviewedMemoryRecord) -> SemanticSourceRef:
         if record.status != "accepted":
-            raise ValueError(
-                "semantic reviewed memory source requires accepted status"
-            )
+            raise ValueError("semantic reviewed memory source requires accepted status")
         candidate_id = record.candidate.candidate_id
         if candidate_id is None:
             raise ValueError("reviewed memory candidate is missing candidate_id")
@@ -159,13 +157,25 @@ class SafeSemanticMemoryIndex:
     def __init__(self, index: MemoryIndex) -> None:
         self._index = index
 
-    async def upsert(self, document: SemanticMemoryDocument) -> None:
+    def require_safe_document(self, document: SemanticMemoryDocument) -> None:
         document_id = SemanticDocId.parse(document.memory_id)
         require_recall_safe_text("text", document.text)
         metadata = dict(document.metadata)
         metadata["source_refs"] = list(document.source_refs)
         _require_safe_metadata("metadata", metadata)
-        await self._index.upsert(str(document_id), document.text, metadata)
+        _canonical_source_refs(
+            document_id,
+            tuple(
+                SemanticSourceRef.parse(source_ref)
+                for source_ref in document.source_refs
+            ),
+        )
+
+    async def upsert(self, document: SemanticMemoryDocument) -> None:
+        self.require_safe_document(document)
+        metadata = dict(document.metadata)
+        metadata["source_refs"] = list(document.source_refs)
+        await self._index.upsert(str(document.memory_id), document.text, metadata)
 
     async def search(self, query: str, limit: int = 10) -> tuple[MemoryHit, ...]:
         if limit <= 0:
