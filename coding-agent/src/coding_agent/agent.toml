@@ -48,6 +48,10 @@ enabled = true
 read_enabled = true
 write_enabled = true
 
+[memory.semantic]
+enabled = false
+backend = "fake"
+
 [kb]
 db_path = "kb"
 embedding_model = "text-embedding-3-small"

@@ -5,7 +5,7 @@ import inspect
 import uuid
 from collections.abc import Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -39,9 +39,28 @@ from coding_agent.plugins.storage import StoragePlugin
 from coding_agent.plugins.summarizer import SummarizerPlugin
 from coding_agent.subagents.coordinator import ChildWorkerCoordinator
 from coding_agent.topics.memory import MemoryReviewStore
+from coding_agent.topics.semantic_backends import (
+    FAKE_SEMANTIC_INDEX_SCHEMA,
+    FakeSemanticMemoryBackend,
+    SemanticIndexSchema,
+)
+from coding_agent.topics.semantic_index import SafeSemanticMemoryIndex
 from coding_agent.tools.web_search import create_web_search_backend
 
 ToolFilter = Any
+
+
+@dataclass(frozen=True)
+class SemanticMemoryConfig:
+    enabled: bool = False
+    backend: str = "fake"
+    schema: SemanticIndexSchema = FAKE_SEMANTIC_INDEX_SCHEMA
+
+    def to_config_dict(self) -> dict[str, object]:
+        return {
+            "enabled": self.enabled,
+            "backend": self.backend,
+        }
 
 
 @dataclass(frozen=True)
@@ -49,6 +68,7 @@ class MemorySwitchConfig:
     enabled: bool = True
     read_enabled: bool = True
     write_enabled: bool = True
+    semantic: SemanticMemoryConfig = field(default_factory=SemanticMemoryConfig)
 
     @property
     def effective_read_enabled(self) -> bool:
@@ -58,13 +78,14 @@ class MemorySwitchConfig:
     def effective_write_enabled(self) -> bool:
         return self.enabled and self.write_enabled
 
-    def to_config_dict(self) -> dict[str, bool]:
+    def to_config_dict(self) -> dict[str, object]:
         return {
             "enabled": self.enabled,
             "read_enabled": self.read_enabled,
             "write_enabled": self.write_enabled,
             "effective_read_enabled": self.effective_read_enabled,
             "effective_write_enabled": self.effective_write_enabled,
+            "semantic": self.semantic.to_config_dict(),
         }
 
 
@@ -135,6 +156,7 @@ def _parse_memory_switch_config(extra: Mapping[str, Any]) -> MemorySwitchConfig:
         enabled=_memory_bool(raw_memory_cfg, "enabled"),
         read_enabled=_memory_bool(raw_memory_cfg, "read_enabled"),
         write_enabled=_memory_bool(raw_memory_cfg, "write_enabled"),
+        semantic=_parse_semantic_memory_config(raw_memory_cfg),
     )
 
 
@@ -143,6 +165,28 @@ def _memory_bool(config: Mapping[str, Any], field: str) -> bool:
     if type(value) is not bool:
         raise ValueError(f"[memory].{field} must be a boolean")
     return value
+
+
+def _parse_semantic_memory_config(
+    memory_config: Mapping[str, Any],
+) -> SemanticMemoryConfig:
+    raw_semantic_cfg = memory_config.get("semantic", {})
+    if raw_semantic_cfg is None:
+        raw_semantic_cfg = {}
+    if not isinstance(raw_semantic_cfg, Mapping):
+        raise ValueError("[memory.semantic] config must be a table")
+    enabled = raw_semantic_cfg.get("enabled", False)
+    if type(enabled) is not bool:
+        raise ValueError("[memory.semantic].enabled must be a boolean")
+    backend = raw_semantic_cfg.get("backend", "fake")
+    if not isinstance(backend, str):
+        raise ValueError("[memory.semantic].backend must be a string")
+    if enabled and backend != "fake":
+        raise ValueError(f"unknown semantic memory backend: {backend}")
+    return SemanticMemoryConfig(
+        enabled=enabled,
+        backend=backend,
+    )
 
 
 def _child_system_prompt_suffix(tool_filter: ToolFilter) -> str:
@@ -340,6 +384,13 @@ def create_child_pipeline(
         data_dir / kb_db_path / "reviewed_memory.jsonl",
         candidate_writes_enabled=memory_cfg.effective_write_enabled,
     )
+    semantic_memory_backend = None
+    semantic_memory_index = None
+    if memory_cfg.semantic.enabled:
+        semantic_memory_backend = FakeSemanticMemoryBackend(
+            schema=memory_cfg.semantic.schema
+        )
+        semantic_memory_index = SafeSemanticMemoryIndex(semantic_memory_backend)
     observability_cfg = cfg.extra.get("observability", {})
     if not isinstance(observability_cfg, dict):
         raise ValueError("[observability] config must be a table")
@@ -533,6 +584,10 @@ def create_child_pipeline(
         ctx_config["observation_sink"] = observation_sink
     if local_workspace_root is not None:
         ctx_config["workspace_root"] = str(local_workspace_root)
+    if semantic_memory_backend is not None:
+        ctx_config["semantic_memory_backend"] = semantic_memory_backend
+    if semantic_memory_index is not None:
+        ctx_config["semantic_memory_index"] = semantic_memory_index
 
     ctx = PipelineContext(
         tape=tape_fork,
