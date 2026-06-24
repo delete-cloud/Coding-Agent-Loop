@@ -102,6 +102,18 @@ class FailingMemoryReviewStore(MemoryReviewStore):
         raise OSError("review store unavailable")
 
 
+class FakeSemanticSyncer:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.synced_topics: list[TopicRecord] = []
+        self.fail = fail
+
+    async def sync_topic(self, topic: TopicRecord) -> object:
+        self.synced_topics.append(topic)
+        if self.fail:
+            raise RuntimeError("semantic sync unavailable")
+        return object()
+
+
 class FakeClock:
     def __init__(self) -> None:
         self._now = datetime(2026, 5, 21, 9, tzinfo=UTC)
@@ -142,6 +154,7 @@ def _lifecycle(
     store: FakeTopicStore,
     *,
     memory_review_store: MemoryReviewStore | None = None,
+    semantic_syncer: FakeSemanticSyncer | None = None,
 ) -> TopicLifecycle:
     ids = iter(("topic-1", "topic-2", "topic-3"))
     return TopicLifecycle(
@@ -149,6 +162,7 @@ def _lifecycle(
         now=FakeClock(),
         topic_id_factory=lambda: next(ids),
         memory_review_store=memory_review_store,
+        semantic_syncer=semantic_syncer,
     )
 
 
@@ -211,6 +225,32 @@ async def test_finalize_topic_writes_topic_finalized_anchor() -> None:
 
 
 @pytest.mark.asyncio
+async def test_finalize_topic_syncs_stored_finalized_topic() -> None:
+    store = FakeTopicStore()
+    semantic_syncer = FakeSemanticSyncer()
+    lifecycle = _lifecycle(store, semantic_syncer=semantic_syncer)
+    tape = Tape(tape_id="tape-1")
+    topic = await lifecycle.create_topic(
+        tape=tape,
+        session_id="session-1",
+        kind="coding",
+    )
+    tape.append(Entry(kind="event", payload={"kind": "work"}))
+
+    finalized = await lifecycle.finalize_topic(
+        tape=tape,
+        topic=topic,
+        summary="Done safely",
+        metadata={"status_reason": "done"},
+    )
+
+    assert semantic_syncer.synced_topics == [finalized]
+    assert semantic_syncer.synced_topics[0] is store.topics[topic.topic_id]
+    assert semantic_syncer.synced_topics[0].status == "finalized"
+    assert semantic_syncer.synced_topics[0].topic_finalized_seq == 2
+
+
+@pytest.mark.asyncio
 async def test_finalize_topic_adds_memory_candidate_to_review_store() -> None:
     store = FakeTopicStore()
     review_store = MemoryReviewStore()
@@ -261,6 +301,31 @@ async def test_abort_topic_writes_topic_aborted_anchor() -> None:
     assert getattr(anchor, "anchor_type") == "topic_end"
     assert getattr(anchor, "meta")["product_anchor_type"] == TOPIC_ABORTED
     assert store.anchors[-1].anchor_type == TOPIC_ABORTED
+
+
+@pytest.mark.asyncio
+async def test_abort_topic_syncs_stored_aborted_topic() -> None:
+    store = FakeTopicStore()
+    semantic_syncer = FakeSemanticSyncer()
+    lifecycle = _lifecycle(store, semantic_syncer=semantic_syncer)
+    tape = Tape(tape_id="tape-1")
+    topic = await lifecycle.create_topic(
+        tape=tape,
+        session_id="session-1",
+        kind="coding",
+    )
+
+    aborted = await lifecycle.abort_topic(
+        tape=tape,
+        topic=topic,
+        summary="Stopped safely",
+        metadata={"status_reason": "aborted"},
+    )
+
+    assert semantic_syncer.synced_topics == [aborted]
+    assert semantic_syncer.synced_topics[0] is store.topics[topic.topic_id]
+    assert semantic_syncer.synced_topics[0].status == "aborted"
+    assert semantic_syncer.synced_topics[0].topic_finalized_seq == 1
 
 
 @pytest.mark.asyncio
@@ -355,7 +420,8 @@ async def test_topic_lifecycle_rejects_wrong_tape() -> None:
 @pytest.mark.asyncio
 async def test_failed_close_does_not_leave_orphan_topic_anchor() -> None:
     store = FakeTopicStore()
-    lifecycle = _lifecycle(store)
+    semantic_syncer = FakeSemanticSyncer()
+    lifecycle = _lifecycle(store, semantic_syncer=semantic_syncer)
     tape = Tape(tape_id="tape-1")
     topic = await lifecycle.create_topic(
         tape=tape,
@@ -376,12 +442,56 @@ async def test_failed_close_does_not_leave_orphan_topic_anchor() -> None:
     assert [view.product_anchor_type for view in find_topic_anchors(tape)] == [
         TOPIC_INITIAL
     ]
+    assert semantic_syncer.synced_topics == []
+
+
+@pytest.mark.asyncio
+async def test_semantic_sync_failure_keeps_finalized_topic_anchor() -> None:
+    store = FakeTopicStore()
+    review_store = MemoryReviewStore()
+    semantic_syncer = FakeSemanticSyncer(fail=True)
+    lifecycle = _lifecycle(
+        store,
+        memory_review_store=review_store,
+        semantic_syncer=semantic_syncer,
+    )
+    tape = Tape(tape_id="tape-1")
+    topic = await lifecycle.create_topic(
+        tape=tape,
+        session_id="session-1",
+        kind="coding",
+        title="Auth convention",
+    )
+    tape.append(Entry(kind="event", payload={"kind": "work"}))
+
+    with pytest.raises(RuntimeError, match="semantic sync unavailable"):
+        await lifecycle.finalize_topic(
+            tape=tape,
+            topic=topic,
+            summary="Done safely",
+        )
+
+    assert semantic_syncer.synced_topics == [store.topics[topic.topic_id]]
+    assert store.topics[topic.topic_id].status == "finalized"
+    assert [view.product_anchor_type for view in find_topic_anchors(tape)] == [
+        TOPIC_INITIAL,
+        TOPIC_FINALIZED,
+    ]
+    assert store.anchors[-1].metadata["encoded_anchor_type"] == "topic_end"
+    records = review_store.list_memories(status="candidate")
+    assert len(records) == 1
+    assert records[0].candidate.summary == "Done safely"
 
 
 @pytest.mark.asyncio
 async def test_memory_candidate_failure_keeps_finalized_topic_anchor() -> None:
     store = FakeTopicStore()
-    lifecycle = _lifecycle(store, memory_review_store=FailingMemoryReviewStore())
+    semantic_syncer = FakeSemanticSyncer()
+    lifecycle = _lifecycle(
+        store,
+        memory_review_store=FailingMemoryReviewStore(),
+        semantic_syncer=semantic_syncer,
+    )
     tape = Tape(tape_id="tape-1")
     topic = await lifecycle.create_topic(
         tape=tape,
@@ -404,3 +514,37 @@ async def test_memory_candidate_failure_keeps_finalized_topic_anchor() -> None:
         TOPIC_FINALIZED,
     ]
     assert store.anchors[-1].metadata["encoded_anchor_type"] == "topic_end"
+    assert semantic_syncer.synced_topics == [store.topics[topic.topic_id]]
+
+
+@pytest.mark.asyncio
+async def test_memory_candidate_construction_failure_still_syncs_topic() -> None:
+    store = FakeTopicStore()
+    semantic_syncer = FakeSemanticSyncer()
+    lifecycle = _lifecycle(
+        store,
+        memory_review_store=MemoryReviewStore(),
+        semantic_syncer=semantic_syncer,
+    )
+    tape = Tape(tape_id="tape-1")
+    topic = await lifecycle.create_topic(
+        tape=tape,
+        session_id="session-1",
+        kind="coding",
+        title="Auth convention",
+    )
+    tape.append(Entry(kind="event", payload={"kind": "work"}))
+
+    with pytest.raises(ValueError, match="forbidden raw content marker"):
+        await lifecycle.finalize_topic(
+            tape=tape,
+            topic=topic,
+            summary="stdout: raw output",
+        )
+
+    assert semantic_syncer.synced_topics == [store.topics[topic.topic_id]]
+    assert store.topics[topic.topic_id].status == "finalized"
+    assert [view.product_anchor_type for view in find_topic_anchors(tape)] == [
+        TOPIC_INITIAL,
+        TOPIC_FINALIZED,
+    ]
