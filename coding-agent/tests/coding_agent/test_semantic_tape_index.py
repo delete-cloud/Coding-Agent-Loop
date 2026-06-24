@@ -398,6 +398,36 @@ def test_hybrid_merge_is_deterministic_and_dedups() -> None:
     assert first[2].semantic_hit.memory_id == "topic-summary:topic-extra:2-9"
 
 
+def test_hybrid_merge_keeps_deterministic_topics_before_high_score_semantic_refill() -> (
+    None
+):
+    topic_index = TopicRangeIndex()
+    topic_index.index_topic(
+        _topic("topic-auth", title="Auth convention", summary="JWT auth middleware")
+    )
+    topic_results = tuple(
+        topic_index.search(TopicRangeSearchQuery(text="jwt auth", limit=1))
+    )
+    semantic_hits = (
+        MemoryHit(
+            memory_id="topic-summary:topic-extra:2-9",
+            text="High score semantic-only memory must refill after deterministic.",
+            score=0.99,
+            metadata={"kind": "fact"},
+            source_refs=("topic:topic-extra",),
+        ),
+    )
+
+    merged = merge_hybrid_recall_hits(topic_results, semantic_hits, limit=2)
+
+    assert [hit.identity for hit in merged] == [
+        "topic:topic-auth",
+        "topic:topic-extra",
+    ]
+    assert merged[0].deterministic_rank == 0
+    assert merged[1].deterministic_rank is None
+
+
 def _topic(
     topic_id: str,
     *,
