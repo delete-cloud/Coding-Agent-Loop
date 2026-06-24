@@ -108,14 +108,24 @@ class ReviewedMemoryRecord:
 class MemoryReviewStore:
     """Local deterministic review store for topic-derived memory candidates."""
 
-    def __init__(self, path: Path | str | None = None) -> None:
+    def __init__(
+        self,
+        path: Path | str | None = None,
+        *,
+        candidate_writes_enabled: bool = True,
+    ) -> None:
         self._path = Path(path) if path is not None else None
+        self._candidate_writes_enabled = candidate_writes_enabled
         self._records: dict[str, ReviewedMemoryRecord] = {}
         self.load()
 
     @property
     def path(self) -> Path | None:
         return self._path
+
+    @property
+    def candidate_writes_enabled(self) -> bool:
+        return self._candidate_writes_enabled
 
     def load(self) -> None:
         if self._path is None:
@@ -172,6 +182,8 @@ class MemoryReviewStore:
         self,
         candidate: TopicDerivedMemoryCandidate,
     ) -> ReviewedMemoryRecord:
+        if not self._candidate_writes_enabled:
+            return ReviewedMemoryRecord(candidate=candidate, status="candidate")
         candidate_id = _candidate_id_value(candidate)
         existing = self._records.get(candidate_id)
         if existing is not None:

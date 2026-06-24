@@ -5,6 +5,7 @@ import inspect
 import uuid
 from collections.abc import Mapping
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,30 @@ from coding_agent.topics.memory import MemoryReviewStore
 from coding_agent.tools.web_search import create_web_search_backend
 
 ToolFilter = Any
+
+
+@dataclass(frozen=True)
+class MemorySwitchConfig:
+    enabled: bool = True
+    read_enabled: bool = True
+    write_enabled: bool = True
+
+    @property
+    def effective_read_enabled(self) -> bool:
+        return self.enabled and self.read_enabled
+
+    @property
+    def effective_write_enabled(self) -> bool:
+        return self.enabled and self.write_enabled
+
+    def to_config_dict(self) -> dict[str, bool]:
+        return {
+            "enabled": self.enabled,
+            "read_enabled": self.read_enabled,
+            "write_enabled": self.write_enabled,
+            "effective_read_enabled": self.effective_read_enabled,
+            "effective_write_enabled": self.effective_write_enabled,
+        }
 
 
 def _local_workspace_root(environment: Environment) -> Path | None:
@@ -98,6 +123,26 @@ def _merge_shell_config(
     merged = dict(env_shell)
     merged.update(file_config)
     return merged
+
+
+def _parse_memory_switch_config(extra: Mapping[str, Any]) -> MemorySwitchConfig:
+    raw_memory_cfg = extra.get("memory", {})
+    if raw_memory_cfg is None:
+        raw_memory_cfg = {}
+    if not isinstance(raw_memory_cfg, Mapping):
+        raise ValueError("[memory] config must be a table")
+    return MemorySwitchConfig(
+        enabled=_memory_bool(raw_memory_cfg, "enabled"),
+        read_enabled=_memory_bool(raw_memory_cfg, "read_enabled"),
+        write_enabled=_memory_bool(raw_memory_cfg, "write_enabled"),
+    )
+
+
+def _memory_bool(config: Mapping[str, Any], field: str) -> bool:
+    value = config.get(field, True)
+    if type(value) is not bool:
+        raise ValueError(f"[memory].{field} must be a boolean")
+    return value
 
 
 def _child_system_prompt_suffix(tool_filter: ToolFilter) -> str:
@@ -242,6 +287,7 @@ def create_child_pipeline(
     shell_cfg = cfg.extra.get("shell", {})
     if not isinstance(shell_cfg, dict):
         raise ValueError("[shell] config must be a table")
+    memory_cfg = _parse_memory_switch_config(cfg.extra)
     policy_str = approval_mode_override or approval_cfg.get("policy", "auto")
     approval_policy_map = {
         "yolo": ApprovalPolicy.YOLO,
@@ -291,7 +337,8 @@ def create_child_pipeline(
     if not isinstance(kb_db_path, str):
         raise ValueError("[kb].db_path must be a string")
     memory_review_store = MemoryReviewStore(
-        data_dir / kb_db_path / "reviewed_memory.jsonl"
+        data_dir / kb_db_path / "reviewed_memory.jsonl",
+        candidate_writes_enabled=memory_cfg.effective_write_enabled,
     )
     observability_cfg = cfg.extra.get("observability", {})
     if not isinstance(observability_cfg, dict):
@@ -331,7 +378,10 @@ def create_child_pipeline(
             max_entries=sum_cfg.get("max_entries", 100),
             keep_recent=sum_cfg.get("keep_recent", 20),
         ),
-        "memory": lambda: MemoryPlugin(),
+        "memory": lambda: MemoryPlugin(
+            read_enabled=memory_cfg.effective_read_enabled,
+            write_enabled=memory_cfg.effective_write_enabled,
+        ),
         "shell_session": lambda: shell_session,
     }
 
@@ -421,7 +471,11 @@ def create_child_pipeline(
             memory_plugin.add_memory(directive)
 
     directive_executor = DirectiveExecutor(
-        memory_handler=_memory_handler if memory_plugin is not None else None,
+        memory_handler=(
+            _memory_handler
+            if memory_plugin is not None and memory_cfg.effective_write_enabled
+            else None
+        ),
     )
 
     pipeline = Pipeline(
@@ -466,6 +520,8 @@ def create_child_pipeline(
         "shell": _merge_shell_config(environment_config, shell_cfg),
         "structured_tool_result_scope": structured_tool_result_scope,
         "memory_review_store": memory_review_store,
+        "memory": memory_cfg.to_config_dict(),
+        "topic_recall": {"enabled": memory_cfg.effective_read_enabled},
     }
     if "isolation_policy" in environment_config:
         ctx_config["isolation_policy"] = environment_config["isolation_policy"]

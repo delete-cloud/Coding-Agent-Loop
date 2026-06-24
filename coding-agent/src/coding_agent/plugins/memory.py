@@ -37,8 +37,16 @@ class MemoryPlugin:
 
     state_key = "memory"
 
-    def __init__(self, max_grounding: int = 5) -> None:
+    def __init__(
+        self,
+        max_grounding: int = 5,
+        *,
+        read_enabled: bool = True,
+        write_enabled: bool = True,
+    ) -> None:
         self._max_grounding = max_grounding
+        self._read_enabled = read_enabled
+        self._write_enabled = write_enabled
         self._memories: list[dict[str, Any]] = []
         self._working_memories: list[dict[str, Any]] = []
         self._topic_file_tags: set[str] = set()
@@ -63,14 +71,19 @@ class MemoryPlugin:
             if isinstance(storage_state, dict):
                 self._storage_plugin = storage_state.get("plugin")
 
-        if self._storage_plugin is not None and self._session_id is not None:
+        if (
+            self._read_enabled
+            and self._storage_plugin is not None
+            and self._session_id is not None
+        ):
             persisted = self._storage_plugin.load_memory_records(self._session_id)
             self._memories = [
                 self._apply_importance_decay(record) for record in persisted
             ]
-            self._storage_plugin.replace_memory_records(
-                self._session_id, self._memories
-            )
+            if self._write_enabled:
+                self._storage_plugin.replace_memory_records(
+                    self._session_id, self._memories
+                )
 
         return {
             "memories": self._memories,
@@ -101,6 +114,8 @@ class MemoryPlugin:
         self, event_type: str = "", payload: dict[str, Any] | None = None, **kwargs: Any
     ) -> None:
         payload = payload or {}
+        if not self._write_enabled:
+            return
         if event_type != "topic_end":
             return
 
@@ -126,6 +141,8 @@ class MemoryPlugin:
         If topic file tags are available, filter memories to those with
         overlapping tags. Falls back to importance-sorted top-N otherwise.
         """
+        if not self._read_enabled:
+            return []
         if not self._memories:
             return []
 
@@ -188,6 +205,8 @@ class MemoryPlugin:
           - tags: Extracted topic tags
           - importance: Heuristic score (0-1)
         """
+        if not self._write_enabled:
+            return None
         if tape is None or len(tape) == 0:
             return None
 
@@ -221,6 +240,8 @@ class MemoryPlugin:
         return record
 
     def add_memory(self, record: MemoryRecord) -> None:
+        if not self._write_enabled:
+            return
         tags = list(record.tags)
         self._working_memories.append(
             {
