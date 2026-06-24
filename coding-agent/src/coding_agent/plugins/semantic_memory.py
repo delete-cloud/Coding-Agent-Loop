@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import inspect
 from typing import Any, Callable
 
 from agentkit.tape.tape import Tape
@@ -14,7 +15,10 @@ from coding_agent.topics.recall_context import (
     recall_context_messages,
 )
 from coding_agent.topics.semantic_index import SafeSemanticMemoryIndex
-from coding_agent.topics.semantic_recall import SemanticRecallPlanner
+from coding_agent.topics.semantic_recall import (
+    SemanticRecallPlanner,
+    SemanticTopicStore,
+)
 from coding_agent.topics.store import TopicRecord
 
 
@@ -35,6 +39,8 @@ class SemanticMemoryPlugin:
         semantic_index: SafeSemanticMemoryIndex,
         memory_review_store: MemoryReviewStore,
         read_enabled: bool,
+        topic_store: SemanticTopicStore | None = None,
+        topic_index: TopicRangeIndex | None = None,
         limit: int = 5,
     ) -> None:
         if limit <= 0:
@@ -43,7 +49,8 @@ class SemanticMemoryPlugin:
         self._memory_review_store = memory_review_store
         self._read_enabled = read_enabled
         self._limit = limit
-        self._topic_store = _NoopTopicStore()
+        self._topic_store = _validate_topic_store(topic_store)
+        self._topic_index = _validate_topic_index(topic_index)
 
     def hooks(self) -> dict[str, Callable[..., Any]]:
         return {"build_context": self.build_context}
@@ -65,7 +72,7 @@ class SemanticMemoryPlugin:
 
         planner = SemanticRecallPlanner(
             topic_planner=TopicRecallPlanner(
-                topic_index=TopicRangeIndex(),
+                topic_index=self._topic_index,
                 accepted_memories=self._memory_review_store.accepted_memories(),
             ),
             semantic_index=self._semantic_index,
@@ -103,6 +110,25 @@ def _is_recall_safe_query(value: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _validate_topic_store(
+    topic_store: SemanticTopicStore | None,
+) -> SemanticTopicStore:
+    if topic_store is None:
+        return _NoopTopicStore()
+    load_topic = getattr(topic_store, "load_topic", None)
+    if not callable(load_topic) or not inspect.iscoroutinefunction(load_topic):
+        raise TypeError("topic_store must provide async load_topic(topic_id)")
+    return topic_store
+
+
+def _validate_topic_index(topic_index: TopicRangeIndex | None) -> TopicRangeIndex:
+    if topic_index is None:
+        return TopicRangeIndex()
+    if not isinstance(topic_index, TopicRangeIndex):
+        raise TypeError("topic_index must be TopicRangeIndex")
+    return topic_index
 
 
 def _source_topic_from_tape(tape: Tape) -> TopicRecord:

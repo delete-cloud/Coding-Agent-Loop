@@ -40,12 +40,14 @@ from coding_agent.plugins.storage import StoragePlugin
 from coding_agent.plugins.summarizer import SummarizerPlugin
 from coding_agent.subagents.coordinator import ChildWorkerCoordinator
 from coding_agent.topics.memory import MemoryReviewStore
+from coding_agent.topics.range_index import TopicRangeIndex
 from coding_agent.topics.semantic_backends import (
     FAKE_SEMANTIC_INDEX_SCHEMA,
     FakeSemanticMemoryBackend,
     SemanticIndexSchema,
 )
 from coding_agent.topics.semantic_index import SafeSemanticMemoryIndex
+from coding_agent.topics.semantic_recall import SemanticTopicStore
 from coding_agent.tools.web_search import create_web_search_backend
 
 ToolFilter = Any
@@ -131,6 +133,23 @@ def _resolve_additional_workspace_roots(
     if roots is None:
         return ()
     return tuple(Path(root).expanduser().resolve() for root in roots)
+
+
+def _validate_semantic_topic_dependencies(
+    *,
+    semantic_topic_store: SemanticTopicStore | None,
+    semantic_topic_index: TopicRangeIndex | None,
+) -> None:
+    if semantic_topic_store is not None:
+        load_topic = getattr(semantic_topic_store, "load_topic", None)
+        if not callable(load_topic) or not inspect.iscoroutinefunction(load_topic):
+            raise TypeError(
+                "semantic_topic_store must provide async load_topic(topic_id)"
+            )
+    if semantic_topic_index is not None and not isinstance(
+        semantic_topic_index, TopicRangeIndex
+    ):
+        raise TypeError("semantic_topic_index must be TopicRangeIndex")
 
 
 def _merge_shell_config(
@@ -275,6 +294,8 @@ def create_child_pipeline(
     trace_metadata: Mapping[str, Any] | None = None,
     mcp_servers_override: dict[str, dict[str, Any]] | None = None,
     additional_workspace_roots_override: list[str] | None = None,
+    semantic_topic_store: SemanticTopicStore | None = None,
+    semantic_topic_index: TopicRangeIndex | None = None,
 ) -> tuple[Any, Any]:
     if config_path is None:
         config_path = Path(__file__).parents[1] / "agent.toml"
@@ -283,6 +304,10 @@ def create_child_pipeline(
 
     if environment is None:
         environment = LocalEnvironment(workspace_root or Path.cwd())
+    _validate_semantic_topic_dependencies(
+        semantic_topic_store=semantic_topic_store,
+        semantic_topic_index=semantic_topic_index,
+    )
     resolved_additional_workspace_roots = _resolve_additional_workspace_roots(
         additional_workspace_roots_override
     )
@@ -404,6 +429,8 @@ def create_child_pipeline(
             "additional_workspace_roots_override",
             [str(root) for root in resolved_additional_workspace_roots],
         )
+        kwargs.setdefault("semantic_topic_store", semantic_topic_store)
+        kwargs.setdefault("semantic_topic_index", semantic_topic_index)
         return create_child_pipeline(**kwargs)
 
     plugin_factories: dict[str, Any] = {
@@ -443,6 +470,8 @@ def create_child_pipeline(
             semantic_index=semantic_memory_index,
             memory_review_store=memory_review_store,
             read_enabled=memory_cfg.effective_read_enabled,
+            topic_store=semantic_topic_store,
+            topic_index=semantic_topic_index,
         )
 
     async def _execute_tool_async(
@@ -597,6 +626,10 @@ def create_child_pipeline(
         ctx_config["semantic_memory_backend"] = semantic_memory_backend
     if semantic_memory_index is not None:
         ctx_config["semantic_memory_index"] = semantic_memory_index
+    if semantic_topic_store is not None:
+        ctx_config["semantic_topic_store"] = semantic_topic_store
+    if semantic_topic_index is not None:
+        ctx_config["semantic_topic_index"] = semantic_topic_index
 
     ctx = PipelineContext(
         tape=tape_fork,
@@ -638,6 +671,8 @@ def create_agent(
     mcp_servers_override: dict[str, dict[str, Any]] | None = None,
     additional_workspace_roots_override: list[str] | None = None,
     tape: Tape | None = None,
+    semantic_topic_store: SemanticTopicStore | None = None,
+    semantic_topic_index: TopicRangeIndex | None = None,
 ) -> tuple[Any, Any]:
     return create_child_pipeline(
         parent_provider=None,
@@ -661,4 +696,6 @@ def create_agent(
         trace_metadata=trace_metadata,
         mcp_servers_override=mcp_servers_override,
         additional_workspace_roots_override=additional_workspace_roots_override,
+        semantic_topic_store=semantic_topic_store,
+        semantic_topic_index=semantic_topic_index,
     )

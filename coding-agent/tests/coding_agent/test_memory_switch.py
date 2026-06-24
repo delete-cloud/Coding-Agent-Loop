@@ -11,8 +11,10 @@ from agentkit.tape.tape import Tape
 from coding_agent.core.app import create_agent
 from coding_agent.kb import DocumentChunk, KBSearchResult
 from coding_agent.plugins.memory import MemoryPlugin
+from coding_agent.plugins.semantic_memory import SemanticMemoryPlugin
 from coding_agent.topics.lifecycle import TOPIC_FINALIZED, TOPIC_INITIAL, TopicLifecycle
 from coding_agent.topics.memory import MemoryReviewStore
+from coding_agent.topics.range_index import TopicRangeIndex
 from coding_agent.topics.store import JSONObject, TopicAnchorRecord, TopicRecord
 
 
@@ -70,6 +72,9 @@ class FakeTopicStore:
     ) -> TopicAnchorRecord:
         self.anchors.append(record)
         return record
+
+    async def load_topic(self, topic_id: str) -> TopicRecord | None:
+        return self.topics.get(topic_id)
 
 
 class FakeStoragePlugin:
@@ -740,6 +745,124 @@ backend = "fake"
         "SafeSemanticMemoryIndex"
     )
     assert "semantic_memory" in pipeline._registry.plugin_ids()
+
+
+def test_semantic_enabled_forwards_explicit_topic_dependencies_to_plugin(
+    tmp_path: Path,
+) -> None:
+    config_path = _default_plugin_config(
+        tmp_path,
+        memory="""
+
+[memory]
+read_enabled = true
+write_enabled = true
+
+[memory.semantic]
+enabled = true
+backend = "fake"
+""",
+    )
+    topic_store = FakeTopicStore()
+    topic_index = TopicRangeIndex()
+
+    pipeline, _ctx = create_agent(
+        config_path=config_path,
+        data_dir=tmp_path / "data",
+        api_key="sk-test",
+        semantic_topic_store=topic_store,
+        semantic_topic_index=topic_index,
+    )
+
+    plugin = pipeline._registry.get("semantic_memory")
+    assert isinstance(plugin, SemanticMemoryPlugin)
+    assert plugin._topic_store is topic_store
+    assert plugin._topic_index is topic_index
+
+
+def test_semantic_topic_dependencies_propagate_to_child_pipeline(
+    tmp_path: Path,
+) -> None:
+    config_path = _default_plugin_config(
+        tmp_path,
+        memory="""
+
+[memory]
+read_enabled = true
+write_enabled = true
+
+[memory.semantic]
+enabled = true
+backend = "fake"
+""",
+    )
+    topic_store = FakeTopicStore()
+    topic_index = TopicRangeIndex()
+
+    pipeline, _ctx = create_agent(
+        config_path=config_path,
+        data_dir=tmp_path / "data",
+        api_key="sk-test",
+        semantic_topic_store=topic_store,
+        semantic_topic_index=topic_index,
+    )
+    core_tools = pipeline._registry.get("core_tools")
+
+    child_pipeline, _child_ctx = core_tools._child_pipeline_builder(
+        parent_provider=None,
+        tape_fork=Tape(tape_id="child-tape"),
+        config_path=config_path,
+        data_dir=tmp_path / "child-data",
+        api_key="sk-test",
+    )
+
+    child_plugin = child_pipeline._registry.get("semantic_memory")
+    assert isinstance(child_plugin, SemanticMemoryPlugin)
+    assert child_plugin._topic_store is topic_store
+    assert child_plugin._topic_index is topic_index
+
+
+def test_explicit_semantic_topic_dependencies_fail_fast_when_semantic_disabled(
+    tmp_path: Path,
+) -> None:
+    config_path = _default_plugin_config(tmp_path)
+
+    with pytest.raises(
+        TypeError,
+        match="semantic_topic_store must provide async load_topic",
+    ):
+        create_agent(
+            config_path=config_path,
+            data_dir=tmp_path / "data",
+            api_key="sk-test",
+            semantic_topic_store=object(),
+        )
+
+
+def test_explicit_semantic_topic_dependencies_fail_fast_when_read_disabled(
+    tmp_path: Path,
+) -> None:
+    config_path = _default_plugin_config(
+        tmp_path,
+        memory="""
+
+[memory]
+read_enabled = false
+write_enabled = true
+
+[memory.semantic]
+enabled = true
+backend = "fake"
+""",
+    )
+
+    with pytest.raises(TypeError, match="semantic_topic_index must be TopicRangeIndex"):
+        create_agent(
+            config_path=config_path,
+            data_dir=tmp_path / "data",
+            api_key="sk-test",
+            semantic_topic_index=object(),
+        )
 
 
 def test_semantic_enabled_with_read_disabled_exposes_index_without_registering_plugin(
