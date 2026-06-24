@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 import pytest
 
 from coding_agent.topics.memory import (
+    MemoryReviewStore,
     ReviewedMemoryRecord,
     TopicDerivedMemoryCandidate,
 )
@@ -15,7 +16,10 @@ from coding_agent.topics.semantic_backends import (
     SemanticSchemaMismatch,
 )
 from coding_agent.topics.semantic_index import SafeSemanticMemoryIndex
-from coding_agent.topics.semantic_sync import SemanticMemorySyncer
+from coding_agent.topics.semantic_sync import (
+    SemanticMemoryReviewSyncService,
+    SemanticMemorySyncer,
+)
 from coding_agent.topics.store import TopicRecord
 
 
@@ -246,6 +250,102 @@ async def test_event_sync_deletes_unaccepted_reviewed_memory_scope() -> None:
 
 
 @pytest.mark.asyncio
+async def test_review_sync_service_accept_indexes_accepted_memory() -> None:
+    backend, syncer = _syncer()
+    store = MemoryReviewStore()
+    candidate = _candidate("memory-auth", title="Auth memory", summary="Use JWT")
+    store.add_candidate(candidate)
+    service = SemanticMemoryReviewSyncService(review_store=store, syncer=syncer)
+
+    record = await service.accept_candidate("memory-auth", reason="Useful")
+
+    assert record.status == "accepted"
+    assert record.review_reason == "Useful"
+    assert store.load_memory("memory-auth") == record
+    assert await backend.list_ids() == ["accepted-memory:memory-auth:accepted"]
+    hits = await backend.search("JWT", limit=5)
+    assert [
+        (hit.memory_id, hit.text, hit.metadata["memory_status"]) for hit in hits
+    ] == [
+        (
+            "accepted-memory:memory-auth:accepted",
+            "Auth memory\n\nUse JWT",
+            "accepted",
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_review_sync_service_reject_deletes_stale_accepted_memory() -> None:
+    backend, syncer = _syncer()
+    candidate = _candidate("memory-auth")
+    await syncer.sync_reviewed_memory(
+        ReviewedMemoryRecord(candidate=candidate, status="accepted")
+    )
+    store = MemoryReviewStore()
+    store.add_candidate(candidate)
+    service = SemanticMemoryReviewSyncService(review_store=store, syncer=syncer)
+
+    record = await service.reject_candidate("memory-auth", reason="Too narrow")
+
+    assert record.status == "rejected"
+    assert record.review_reason == "Too narrow"
+    assert store.load_memory("memory-auth") == record
+    assert await backend.list_ids() == []
+    assert await backend.search("JWT", limit=5) == []
+
+
+@pytest.mark.asyncio
+async def test_review_sync_service_archive_deletes_stale_accepted_memory() -> None:
+    backend, syncer = _syncer()
+    candidate = _candidate("memory-auth")
+    await syncer.sync_reviewed_memory(
+        ReviewedMemoryRecord(candidate=candidate, status="accepted")
+    )
+    store = MemoryReviewStore()
+    store.add_candidate(candidate)
+    service = SemanticMemoryReviewSyncService(review_store=store, syncer=syncer)
+
+    record = await service.archive_candidate("memory-auth", reason="Superseded")
+
+    assert record.status == "archived"
+    assert record.review_reason == "Superseded"
+    assert store.load_memory("memory-auth") == record
+    assert await backend.list_ids() == []
+    assert await backend.search("JWT", limit=5) == []
+
+
+@pytest.mark.asyncio
+async def test_review_sync_service_sync_failure_leaves_store_accepted() -> None:
+    store = MemoryReviewStore()
+    store.add_candidate(_candidate("memory-auth"))
+    syncer = _FailingReviewedMemorySyncer(RuntimeError("semantic sync unavailable"))
+    service = SemanticMemoryReviewSyncService(review_store=store, syncer=syncer)
+
+    with pytest.raises(RuntimeError, match="semantic sync unavailable"):
+        await service.accept_candidate("memory-auth", reason="Useful")
+
+    stored = store.load_memory("memory-auth")
+    assert stored is not None
+    assert stored.status == "accepted"
+    assert stored.review_reason == "Useful"
+    assert syncer.calls == (("memory-auth", "accepted"),)
+
+
+@pytest.mark.asyncio
+async def test_review_sync_service_store_failure_does_not_call_syncer() -> None:
+    store = MemoryReviewStore()
+    syncer = _RecordingReviewedMemorySyncer()
+    service = SemanticMemoryReviewSyncService(review_store=store, syncer=syncer)
+
+    with pytest.raises(KeyError, match="memory candidate not found"):
+        await service.accept_candidate("memory-missing")
+
+    assert store.load_memory("memory-missing") is None
+    assert syncer.calls == ()
+
+
+@pytest.mark.asyncio
 async def test_sync_rejects_raw_topic_summary_before_backend_upsert() -> None:
     backend, syncer = _syncer()
 
@@ -418,3 +518,31 @@ async def _snapshot(
             for hit in hits
         )
     )
+
+
+class _RecordingReviewedMemorySyncer:
+    def __init__(self) -> None:
+        self.calls: tuple[tuple[str, str], ...] = ()
+
+    async def sync_reviewed_memory(
+        self,
+        record: ReviewedMemoryRecord,
+    ) -> object:
+        self.calls = (
+            *self.calls,
+            (record.candidate.candidate_id or "", record.status),
+        )
+        return object()
+
+
+class _FailingReviewedMemorySyncer(_RecordingReviewedMemorySyncer):
+    def __init__(self, error: Exception) -> None:
+        super().__init__()
+        self._error = error
+
+    async def sync_reviewed_memory(
+        self,
+        record: ReviewedMemoryRecord,
+    ) -> object:
+        await super().sync_reviewed_memory(record)
+        raise self._error
