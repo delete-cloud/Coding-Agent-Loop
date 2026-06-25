@@ -112,6 +112,7 @@ from coding_agent.topics.memory import (
     MemoryReviewStore,
     ReviewedMemoryRecord,
     memory_candidate_belongs_to_session,
+    memory_candidate_session_id,
 )
 from coding_agent.topics.range_index import require_recall_safe_text
 from coding_agent.topics.semantic_sync import SemanticMemoryReviewSyncService
@@ -2693,7 +2694,11 @@ def _validate_memory_review_transition(
     record = review_store.load_memory_for_session(session_id, candidate_id)
     if record is None:
         raise KeyError(f"memory candidate not found: {candidate_id}")
-    if not memory_candidate_belongs_to_session(record.candidate, session_id=session_id):
+    record_session_id = memory_candidate_session_id(record.candidate)
+    if record_session_id is not None and not memory_candidate_belongs_to_session(
+        record.candidate,
+        session_id=session_id,
+    ):
         raise KeyError(f"memory candidate not found: {candidate_id}")
     if record.status != "candidate" and record.status != status:
         raise ValueError(f"memory candidate {candidate_id} is already {record.status}")

@@ -141,6 +141,25 @@ async def test_build_context_scopes_accepted_memory_to_pipeline_session() -> Non
             summary="Current session retry convention",
         )
     )
+    review_store.add_candidate(
+        TopicDerivedMemoryCandidate(
+            kind="fact",
+            title="Legacy auth retry",
+            summary="Legacy retry convention",
+            scope="topic:topic-auth",
+            tags=("auth", "retry"),
+            confidence=0.8,
+            provenance={
+                "topic_id": "topic-auth",
+                "topic_status": "finalized",
+                "topic_kind": "coding",
+                "source_entry_ranges": [
+                    {"topic_id": "topic-auth", "start_seq": 2, "end_seq": 9}
+                ],
+            },
+            candidate_id="memory-legacy",
+        )
+    )
     other = review_store.add_candidate(
         _candidate(
             "memory-other",
@@ -155,6 +174,7 @@ async def test_build_context_scopes_accepted_memory_to_pipeline_session() -> Non
         "memory-current",
         reason="verified",
     )
+    review_store.accept_candidate("memory-legacy", reason="verified")
     other = review_store.accept_candidate_for_session(
         "session-other",
         "memory-other",
@@ -184,6 +204,7 @@ async def test_build_context_scopes_accepted_memory_to_pipeline_session() -> Non
 
     rendered = "\n".join(str(item["content"]) for item in result)
     assert "Current session retry convention" in rendered
+    assert "Legacy retry convention" in rendered
     assert "Other session retry convention" not in rendered
 
 
