@@ -793,8 +793,14 @@ backend = "fake"
         backend: str,
         *,
         schema: object,
+        data_dir: object,
+        db_path: object,
+        table_name: object,
+        embedding_base_url: object,
     ) -> FakeSemanticMemoryBackend:
-        calls.append((backend, schema))
+        calls.append(
+            (backend, schema, data_dir, db_path, table_name, embedding_base_url)
+        )
         return RecordingBackend(schema=schema)
 
     monkeypatch.setattr(
@@ -809,10 +815,59 @@ backend = "fake"
         api_key="sk-test",
     )
 
-    assert calls == [("fake", ctx.config["semantic_memory_backend"].schema)]
+    assert calls == [
+        (
+            "fake",
+            ctx.config["semantic_memory_backend"].schema,
+            tmp_path / "data" / "kb",
+            None,
+            "semantic_memory",
+            None,
+        )
+    ]
     assert isinstance(ctx.config["semantic_memory_backend"], RecordingBackend)
     syncer = ctx.config["semantic_memory_syncer"]
     assert syncer._backend is ctx.config["semantic_memory_backend"]
+
+
+def test_semantic_enabled_lancedb_backend_uses_configured_local_path(
+    tmp_path: Path,
+) -> None:
+    config_path = _default_plugin_config(
+        tmp_path,
+        memory="""
+
+[memory]
+read_enabled = true
+write_enabled = true
+
+[memory.semantic]
+enabled = true
+backend = "lancedb"
+db_path = "custom-semantic"
+table_name = "semantic_docs"
+embedding_base_url = "https://example.invalid/v1"
+""",
+    )
+
+    pipeline, ctx = create_agent(
+        config_path=config_path,
+        data_dir=tmp_path / "data",
+        api_key="sk-test",
+    )
+
+    backend = ctx.config["semantic_memory_backend"]
+    assert backend.__class__.__name__ == "LanceDBSemanticMemoryBackend"
+    assert backend.db_path == tmp_path / "data" / "kb" / "custom-semantic"
+    assert backend.table_name == "semantic_docs"
+    assert ctx.config["memory"]["semantic"] == {
+        "enabled": True,
+        "backend": "lancedb",
+        "db_path": "custom-semantic",
+        "table_name": "semantic_docs",
+        "embedding_base_url": "https://example.invalid/v1",
+    }
+    assert "semantic_memory" in pipeline._registry.plugin_ids()
 
 
 def test_semantic_enabled_forwards_explicit_topic_dependencies_to_plugin(
