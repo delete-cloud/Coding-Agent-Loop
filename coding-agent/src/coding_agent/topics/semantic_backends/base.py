@@ -35,9 +35,7 @@ class SemanticIndexSchema:
         )
         _require_non_empty_token("semantic embedding model", self.embedding_model)
         _require_positive_int("semantic embedding dimension", self.embedding_dim)
-        _require_non_empty_token(
-            "semantic backend adapter id", self.backend_adapter_id
-        )
+        _require_non_empty_token("semantic backend adapter id", self.backend_adapter_id)
         _require_positive_int(
             "semantic backend schema version", self.backend_schema_version
         )
@@ -102,9 +100,7 @@ class SemanticBackendScope:
     def source_ref(self) -> str:
         if not isinstance(self.source_kind, SemanticSourceKind):
             raise TypeError("semantic backend scope source kind was not normalized")
-        return str(
-            SemanticSourceRef(kind=self.source_kind, source_id=self.source_id)
-        )
+        return str(SemanticSourceRef(kind=self.source_kind, source_id=self.source_id))
 
     def matches(
         self,
@@ -116,7 +112,10 @@ class SemanticBackendScope:
         refs = source_refs or (_primary_source_ref_for_memory_id(memory_id),)
         if self.source_ref not in refs:
             return False
-        if self.session_id is not None and metadata.get("session_id") != self.session_id:
+        if (
+            self.session_id is not None
+            and metadata.get("session_id") != self.session_id
+        ):
             return False
         if self.profile is not None:
             metadata_profile = metadata.get("profile", metadata.get("profile_id"))
@@ -158,9 +157,7 @@ def normalize_source_refs(
         refs = tuple(raw_refs)
     else:
         raise TypeError("semantic memory metadata source_refs must be a string list")
-    normalized = tuple(
-        sorted({str(SemanticSourceRef.parse(ref)) for ref in refs})
-    )
+    normalized = tuple(sorted({str(SemanticSourceRef.parse(ref)) for ref in refs}))
     if not normalized:
         return (_primary_source_ref_for_memory_id(memory_id),)
     return normalized

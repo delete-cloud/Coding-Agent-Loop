@@ -8,6 +8,7 @@ import pytest
 from agentkit.directive.types import MemoryRecord
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
+from coding_agent.core import app as app_module
 from coding_agent.core.app import create_agent
 from coding_agent.kb import DocumentChunk, KBSearchResult
 from coding_agent.plugins.memory import MemoryPlugin
@@ -15,6 +16,7 @@ from coding_agent.plugins.semantic_memory import SemanticMemoryPlugin
 from coding_agent.topics.lifecycle import TOPIC_FINALIZED, TOPIC_INITIAL, TopicLifecycle
 from coding_agent.topics.memory import MemoryReviewStore
 from coding_agent.topics.range_index import TopicRangeIndex
+from coding_agent.topics.semantic_backends import FakeSemanticMemoryBackend
 from coding_agent.topics.semantic_sync import (
     SemanticMemoryReviewSyncService,
     SemanticMemorySyncer,
@@ -763,6 +765,54 @@ backend = "fake"
     assert service.review_store is ctx.config["memory_review_store"]
     assert service.syncer is syncer
     assert "semantic_memory" in pipeline._registry.plugin_ids()
+
+
+def test_semantic_enabled_uses_backend_registry_factory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = _default_plugin_config(
+        tmp_path,
+        memory="""
+
+[memory]
+read_enabled = true
+write_enabled = true
+
+[memory.semantic]
+enabled = true
+backend = "fake"
+""",
+    )
+    calls: list[tuple[str, object]] = []
+
+    class RecordingBackend(FakeSemanticMemoryBackend):
+        pass
+
+    def create_backend(
+        backend: str,
+        *,
+        schema: object,
+    ) -> FakeSemanticMemoryBackend:
+        calls.append((backend, schema))
+        return RecordingBackend(schema=schema)
+
+    monkeypatch.setattr(
+        app_module.semantic_backend_registry,
+        "create_semantic_memory_backend",
+        create_backend,
+    )
+
+    _pipeline, ctx = app_module.create_agent(
+        config_path=config_path,
+        data_dir=tmp_path / "data",
+        api_key="sk-test",
+    )
+
+    assert calls == [("fake", ctx.config["semantic_memory_backend"].schema)]
+    assert isinstance(ctx.config["semantic_memory_backend"], RecordingBackend)
+    syncer = ctx.config["semantic_memory_syncer"]
+    assert syncer._backend is ctx.config["semantic_memory_backend"]
 
 
 def test_semantic_enabled_forwards_explicit_topic_dependencies_to_plugin(
