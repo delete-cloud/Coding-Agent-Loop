@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from agentkit.storage.protocols import MemoryHit
-from coding_agent.topics.memory import ReviewedMemoryRecord
+from coding_agent.topics.memory import ReviewedMemoryRecord, memory_candidate_session_id
 from coding_agent.topics.provenance import topic_entry_range
 from coding_agent.topics.range_index import (
     TopicRangeSearchQuery,
@@ -141,7 +141,11 @@ class SemanticRecallPlanner:
         rehydrated: list[ReviewedMemoryRecord] = []
         for hit in hits:
             document_id = SemanticDocId.parse(hit.memory_id)
-            record = self._memory_review_store.load_memory(document_id.source_id)
+            record = _load_memory_for_session(
+                self._memory_review_store,
+                session_id=planner_input.source_topic.session_id,
+                document_id=document_id,
+            )
             if record is None:
                 continue
             if not _memory_hit_is_current(record, document_id):
@@ -216,6 +220,27 @@ def _memory_hit_is_current(
     if record.status != "accepted":
         return False
     return str(SemanticDocId.for_reviewed_memory(record)) == str(document_id)
+
+
+def _load_memory_for_session(
+    store: SemanticMemoryReviewStore,
+    *,
+    session_id: str,
+    document_id: SemanticDocId,
+) -> ReviewedMemoryRecord | None:
+    load_for_session = getattr(store, "load_memory_for_session", None)
+    if callable(load_for_session):
+        record = load_for_session(session_id, document_id.source_id)
+        if record is not None:
+            return record
+    if document_id.source_version != "accepted":
+        return None
+    record = store.load_memory(document_id.source_id)
+    if record is None:
+        return None
+    if memory_candidate_session_id(record.candidate) is not None:
+        return None
+    return record
 
 
 def _topic_satisfies_query_filters(

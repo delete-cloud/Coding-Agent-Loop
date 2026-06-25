@@ -80,7 +80,7 @@ from coding_agent.topics.semantic_backends import (
     FAKE_SEMANTIC_INDEX_SCHEMA,
     FakeSemanticMemoryBackend,
 )
-from coding_agent.topics.semantic_index import SafeSemanticMemoryIndex
+from coding_agent.topics.semantic_index import SafeSemanticMemoryIndex, SemanticDocId
 from coding_agent.topics.semantic_sync import (
     SemanticMemoryReviewSyncService,
     SemanticMemorySyncer,
@@ -254,6 +254,10 @@ def _review_candidate(
         },
         candidate_id=candidate_id,
     )
+
+
+def _reviewed_memory_doc_id(record: ReviewedMemoryRecord) -> str:
+    return str(SemanticDocId.for_reviewed_memory(record))
 
 
 def _semantic_review_runtime_config() -> tuple[
@@ -2687,13 +2691,14 @@ class TestMemoryReviewTransitions:
         assert stored is not None
         assert stored.status == "accepted"
         assert stored.review_reason == "Useful for future auth work"
-        assert await backend.list_ids() == ["accepted-memory:memory-auth:accepted"]
+        expected_id = _reviewed_memory_doc_id(stored)
+        assert await backend.list_ids() == [expected_id]
         hits = await backend.search("JWT", limit=5)
         assert [
             (hit.memory_id, hit.text, hit.metadata["candidate_id"]) for hit in hits
         ] == [
             (
-                "accepted-memory:memory-auth:accepted",
+                expected_id,
                 "Auth memory\n\nUse JWT middleware",
                 "memory-auth",
             )
@@ -2711,9 +2716,8 @@ class TestMemoryReviewTransitions:
             tape_id="other-tape",
         )
         review_store.add_candidate(candidate)
-        await syncer.sync_reviewed_memory(
-            ReviewedMemoryRecord(candidate=candidate, status="accepted")
-        )
+        accepted_other = ReviewedMemoryRecord(candidate=candidate, status="accepted")
+        await syncer.sync_reviewed_memory(accepted_other)
         _install_memory_review_runtime(
             monkeypatch,
             "memory-review-session",
@@ -2732,9 +2736,49 @@ class TestMemoryReviewTransitions:
         stored = review_store.load_memory("memory-other-session")
         assert stored is not None
         assert stored.status == "candidate"
-        assert await backend.list_ids() == [
-            "accepted-memory:memory-other-session:accepted"
-        ]
+        assert await backend.list_ids() == [_reviewed_memory_doc_id(accepted_other)]
+
+    async def test_transitions_only_candidate_from_path_session_when_id_is_shared(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config, review_store, backend, syncer = _semantic_review_runtime_config()
+        current = _review_candidate("memory-shared")
+        other = _review_candidate(
+            "memory-shared",
+            session_id="other-session",
+            tape_id="other-tape",
+        )
+        review_store.add_candidate(current)
+        review_store.add_candidate(other)
+        accepted_other = ReviewedMemoryRecord(candidate=other, status="accepted")
+        await syncer.sync_reviewed_memory(accepted_other)
+        _install_memory_review_runtime(
+            monkeypatch,
+            "memory-review-session",
+            _runtime_ctx(config),
+        )
+
+        response = await client.post(
+            "/sessions/memory-review-session/memory/reviews/memory-shared",
+            json={"status": "rejected", "reason": "Wrong for this session"},
+        )
+
+        assert response.status_code == 200
+        current_record = review_store.load_memory_for_session(
+            "memory-review-session",
+            "memory-shared",
+        )
+        other_record = review_store.load_memory_for_session(
+            "other-session",
+            "memory-shared",
+        )
+        assert current_record is not None
+        assert current_record.status == "rejected"
+        assert other_record is not None
+        assert other_record.status == "candidate"
+        assert await backend.list_ids() == [_reviewed_memory_doc_id(accepted_other)]
 
     async def test_reject_candidate_deletes_stale_semantic_index(
         self,
@@ -2819,7 +2863,7 @@ class TestMemoryReviewTransitions:
         stored = review_store.load_memory("memory-accepted")
         assert stored is not None
         assert stored.status == "accepted"
-        assert await backend.list_ids() == ["accepted-memory:memory-accepted:accepted"]
+        assert await backend.list_ids() == [_reviewed_memory_doc_id(stored)]
 
     async def test_same_status_terminal_transition_resyncs_existing_record(
         self,
@@ -2861,9 +2905,7 @@ class TestMemoryReviewTransitions:
         assert stored is not None
         assert stored.status == "accepted"
         assert stored.review_reason == "Useful"
-        assert await backend.list_ids() == [
-            "accepted-memory:memory-idempotent:accepted"
-        ]
+        assert await backend.list_ids() == [_reviewed_memory_doc_id(stored)]
 
     async def test_unsafe_reason_returns_400_without_store_or_index_side_effects(
         self,
@@ -2983,15 +3025,18 @@ class TestMemoryReviewTransitions:
         )
 
         def fail_accept_after_prevalidation(
+            session_id: str,
             candidate_id: str,
             *,
             reason: str | None = None,
         ) -> ReviewedMemoryRecord:
-            del candidate_id, reason
+            del session_id, candidate_id, reason
             raise ValueError("memory candidate memory-race is already rejected")
 
         monkeypatch.setattr(
-            review_store, "accept_candidate", fail_accept_after_prevalidation
+            review_store,
+            "accept_candidate_for_session",
+            fail_accept_after_prevalidation,
         )
         _install_memory_review_runtime(
             monkeypatch,

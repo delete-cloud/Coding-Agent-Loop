@@ -6,6 +6,7 @@ import pytest
 
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
+from agentkit.runtime.pipeline import PipelineContext
 from coding_agent.plugins.semantic_memory import SemanticMemoryPlugin
 from coding_agent.topics.memory import (
     MemoryReviewStore,
@@ -125,6 +126,64 @@ async def test_build_context_rehydrates_topic_hits_from_authoritative_store() ->
     assert "jwt middleware backend sentinel must never render" not in rendered
 
 
+@pytest.mark.asyncio
+async def test_build_context_scopes_accepted_memory_to_pipeline_session() -> None:
+    review_store = MemoryReviewStore()
+    current = review_store.add_candidate(
+        _candidate(
+            "memory-current",
+            session_id="session-current",
+            tape_id="tape-current",
+            title="Current auth retry",
+            summary="Current session retry convention",
+        )
+    )
+    other = review_store.add_candidate(
+        _candidate(
+            "memory-other",
+            session_id="session-other",
+            tape_id="tape-other",
+            title="Other auth retry",
+            summary="Other session retry convention",
+        )
+    )
+    current = review_store.accept_candidate_for_session(
+        "session-current",
+        "memory-current",
+        reason="verified",
+    )
+    other = review_store.accept_candidate_for_session(
+        "session-other",
+        "memory-other",
+        reason="verified",
+    )
+    index = SafeSemanticMemoryIndex(FakeSemanticMemoryBackend())
+    for record in (current, other):
+        await index.upsert(
+            SemanticMemoryDocument(
+                memory_id=SemanticDocId.for_reviewed_memory(record),
+                text=f"{record.candidate.title}\n\n{record.candidate.summary}",
+                metadata={"kind": "accepted_reviewed_memory"},
+                source_refs=(SemanticSourceRef.for_reviewed_memory(record),),
+            )
+        )
+    plugin = SemanticMemoryPlugin(
+        semantic_index=index,
+        memory_review_store=review_store,
+        read_enabled=True,
+    )
+    tape = _tape("auth retry", tape_id="shared-tape")
+
+    result = await plugin.build_context(
+        tape=tape,
+        ctx=PipelineContext(tape=tape, session_id="session-current"),
+    )
+
+    rendered = "\n".join(str(item["content"]) for item in result)
+    assert "Current session retry convention" in rendered
+    assert "Other session retry convention" not in rendered
+
+
 def test_constructor_rejects_invalid_explicit_topic_dependencies() -> None:
     with pytest.raises(TypeError, match="topic_store must provide async load_topic"):
         SemanticMemoryPlugin(
@@ -183,8 +242,8 @@ async def test_build_context_skips_unsafe_raw_prompt_without_failing() -> None:
     assert await plugin.build_context(tape=_tape("stderr: traceback from pytest")) == []
 
 
-def _tape(content: str) -> Tape:
-    tape = Tape(tape_id="tape-semantic")
+def _tape(content: str, *, tape_id: str = "tape-semantic") -> Tape:
+    tape = Tape(tape_id=tape_id)
     tape.append(
         Entry(
             kind="message",
@@ -193,6 +252,36 @@ def _tape(content: str) -> Tape:
         )
     )
     return tape
+
+
+def _candidate(
+    candidate_id: str,
+    *,
+    session_id: str,
+    tape_id: str,
+    title: str,
+    summary: str,
+) -> TopicDerivedMemoryCandidate:
+    return TopicDerivedMemoryCandidate(
+        kind="fact",
+        title=title,
+        summary=summary,
+        scope="topic:topic-auth",
+        tags=("auth", "retry"),
+        confidence=0.8,
+        provenance={
+            "topic_id": "topic-auth",
+            "session_id": session_id,
+            "tape_id": tape_id,
+            "topic_status": "finalized",
+            "topic_kind": "coding",
+            "profile": "local",
+            "source_entry_ranges": [
+                {"topic_id": "topic-auth", "start_seq": 2, "end_seq": 9}
+            ],
+        },
+        candidate_id=candidate_id,
+    )
 
 
 def _topic(

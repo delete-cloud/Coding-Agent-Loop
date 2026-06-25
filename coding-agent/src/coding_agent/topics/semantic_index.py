@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+import hashlib
+import json
 import re
 from typing import Any
 
@@ -35,6 +37,7 @@ class SemanticSourceKind(StrEnum):
 
 _SEMANTIC_ID_PART_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _TOPIC_SOURCE_VERSION_RE = re.compile(r"^[0-9]+-(?:[0-9]+|open)$")
+_ACCEPTED_MEMORY_SOURCE_VERSION_RE = re.compile(r"^accepted\.[0-9a-f]{16}$")
 
 
 @dataclass(frozen=True)
@@ -68,10 +71,15 @@ class SemanticDocId:
         candidate_id = record.candidate.candidate_id
         if candidate_id is None:
             raise ValueError("reviewed memory candidate is missing candidate_id")
+        source_version = "accepted"
+        session_id = memory_candidate_session_id(record.candidate)
+        if session_id is not None:
+            profile = memory_candidate_profile(record.candidate)
+            source_version = f"accepted.{_reviewed_memory_scope_digest(session_id=session_id, profile=profile)}"
         return cls(
             kind=SemanticDocKind.ACCEPTED_REVIEWED_MEMORY,
             source_id=candidate_id,
-            source_version=record.status,
+            source_version=source_version,
         )
 
     @classmethod
@@ -391,6 +399,18 @@ def _summary_document_text(title: str | None, summary: str) -> str:
     return f"{title}\n\n{summary}"
 
 
+def _reviewed_memory_scope_digest(
+    *,
+    session_id: str,
+    profile: str | None,
+) -> str:
+    payload = {"profile": profile, "session_id": session_id}
+    encoded = json.dumps(
+        payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
+
+
 def _primary_source_ref(document_id: SemanticDocId) -> SemanticSourceRef:
     if document_id.kind is SemanticDocKind.TOPIC_SUMMARY:
         return SemanticSourceRef(
@@ -437,9 +457,9 @@ def _require_doc_source_version(
                 "semantic topic summary document version must be start-end"
             )
         return
-    if (
-        kind is SemanticDocKind.ACCEPTED_REVIEWED_MEMORY
-        and source_version == "accepted"
-    ):
-        return
+    if kind is SemanticDocKind.ACCEPTED_REVIEWED_MEMORY:
+        if source_version == "accepted":
+            return
+        if _ACCEPTED_MEMORY_SOURCE_VERSION_RE.fullmatch(source_version) is not None:
+            return
     raise ValueError("semantic document source version is not supported")

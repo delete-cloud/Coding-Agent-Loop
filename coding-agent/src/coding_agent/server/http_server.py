@@ -2690,7 +2690,7 @@ def _validate_memory_review_transition(
 ) -> ReviewedMemoryRecord:
     if reason is not None:
         require_recall_safe_text("review_reason", reason)
-    record = review_store.load_memory(candidate_id)
+    record = review_store.load_memory_for_session(session_id, candidate_id)
     if record is None:
         raise KeyError(f"memory candidate not found: {candidate_id}")
     if not memory_candidate_belongs_to_session(record.candidate, session_id=session_id):
@@ -2703,15 +2703,28 @@ def _validate_memory_review_transition(
 def _transition_memory_review_store(
     review_store: MemoryReviewStore,
     *,
+    session_id: str,
     candidate_id: str,
     status: Literal["accepted", "rejected", "archived"],
     reason: str | None,
 ) -> ReviewedMemoryRecord:
     if status == "accepted":
-        return review_store.accept_candidate(candidate_id, reason=reason)
+        return review_store.accept_candidate_for_session(
+            session_id,
+            candidate_id,
+            reason=reason,
+        )
     if status == "rejected":
-        return review_store.reject_candidate(candidate_id, reason=reason)
-    return review_store.archive_candidate(candidate_id, reason=reason)
+        return review_store.reject_candidate_for_session(
+            session_id,
+            candidate_id,
+            reason=reason,
+        )
+    return review_store.archive_candidate_for_session(
+        session_id,
+        candidate_id,
+        reason=reason,
+    )
 
 
 async def _sync_memory_review_service(
@@ -2797,6 +2810,7 @@ async def transition_memory_review(
         try:
             record = _transition_memory_review_store(
                 review_store,
+                session_id=session_id,
                 candidate_id=candidate_id,
                 status=body.status,
                 reason=body.reason,

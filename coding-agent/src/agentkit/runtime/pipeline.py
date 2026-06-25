@@ -13,7 +13,7 @@ import time
 from collections.abc import Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
-from inspect import isawaitable
+from inspect import Parameter, isawaitable, signature
 from typing import Any, Awaitable, Callable, cast
 
 from agentkit._types import StageName
@@ -224,6 +224,26 @@ def _format_active_approvals(value: Any) -> str:
             else:
                 formatted.append(request_id)
     return ", ".join(formatted)
+
+
+def _build_context_hook_kwargs(
+    fn: Callable[..., Any],
+    ctx: "PipelineContext",
+) -> dict[str, Any]:
+    try:
+        parameters = signature(fn).parameters
+    except (TypeError, ValueError):
+        return {"tape": ctx.tape}
+    if any(
+        parameter.kind is Parameter.VAR_KEYWORD for parameter in parameters.values()
+    ):
+        return {"tape": ctx.tape, "ctx": ctx}
+    kwargs: dict[str, Any] = {}
+    if "tape" in parameters:
+        kwargs["tape"] = ctx.tape
+    if "ctx" in parameters:
+        kwargs["ctx"] = ctx
+    return kwargs
 
 
 def _format_runtime_prompt_messages(
@@ -543,7 +563,7 @@ class Pipeline:
         results: list[list[dict[str, Any]]] = []
         for fn in self._runtime.get_hooks("build_context"):
             try:
-                result = fn(tape=ctx.tape)
+                result = fn(**_build_context_hook_kwargs(fn, ctx))
                 if isawaitable(result):
                     result = await result
                 if result is not None:
