@@ -48,6 +48,10 @@ from coding_agent.topics.semantic_backends import (
 )
 from coding_agent.topics.semantic_index import SafeSemanticMemoryIndex
 from coding_agent.topics.semantic_recall import SemanticTopicStore
+from coding_agent.topics.semantic_sync import (
+    SemanticMemoryReviewSyncService,
+    SemanticMemorySyncer,
+)
 from coding_agent.tools.web_search import create_web_search_backend
 
 ToolFilter = Any
@@ -412,11 +416,22 @@ def create_child_pipeline(
     )
     semantic_memory_backend = None
     semantic_memory_index = None
+    semantic_memory_syncer = None
+    semantic_memory_review_sync_service = None
     if memory_cfg.semantic.enabled:
         semantic_memory_backend = FakeSemanticMemoryBackend(
             schema=memory_cfg.semantic.schema
         )
         semantic_memory_index = SafeSemanticMemoryIndex(semantic_memory_backend)
+        semantic_memory_syncer = SemanticMemorySyncer(
+            index=semantic_memory_index,
+            backend=semantic_memory_backend,
+            schema=memory_cfg.semantic.schema,
+        )
+        semantic_memory_review_sync_service = SemanticMemoryReviewSyncService(
+            review_store=memory_review_store,
+            syncer=semantic_memory_syncer,
+        )
     observability_cfg = cfg.extra.get("observability", {})
     if not isinstance(observability_cfg, dict):
         raise ValueError("[observability] config must be a table")
@@ -626,6 +641,12 @@ def create_child_pipeline(
         ctx_config["semantic_memory_backend"] = semantic_memory_backend
     if semantic_memory_index is not None:
         ctx_config["semantic_memory_index"] = semantic_memory_index
+    if semantic_memory_syncer is not None:
+        ctx_config["semantic_memory_syncer"] = semantic_memory_syncer
+    if semantic_memory_review_sync_service is not None:
+        ctx_config["semantic_memory_review_sync_service"] = (
+            semantic_memory_review_sync_service
+        )
     if semantic_topic_store is not None:
         ctx_config["semantic_topic_store"] = semantic_topic_store
     if semantic_topic_index is not None:

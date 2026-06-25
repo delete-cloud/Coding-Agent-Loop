@@ -110,6 +110,28 @@ class RuntimeConfigUpdateResponse(BaseModel):
     base_url: str | None
 
 
+class MemoryReviewTransitionRequest(BaseModel):
+    """Request schema for changing a reviewed-memory candidate state."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["accepted", "rejected", "archived"]
+    reason: str | None = Field(None, min_length=1, max_length=1000)
+
+
+class MemoryReviewTransitionResponse(BaseModel):
+    """Response schema for a reviewed-memory candidate transition."""
+
+    candidate_id: str
+    status: Literal["accepted", "rejected", "archived"]
+    review_reason: str | None = None
+    kind: str
+    title: str
+    scope: str
+    tags: list[str]
+    confidence: float
+
+
 class ApproveRequest(BaseModel):
     """Request schema for approval response."""
 

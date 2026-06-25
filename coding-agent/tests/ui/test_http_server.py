@@ -71,6 +71,20 @@ from coding_agent.server.auth import AuthContext
 from coding_agent.server.stores.workspace_store import JSONValue, WorkspaceRecord
 from coding_agent.server.stores.session_owner_store import SessionOwnerRecord
 from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictError
+from coding_agent.topics.memory import (
+    MemoryReviewStore,
+    ReviewedMemoryRecord,
+    TopicDerivedMemoryCandidate,
+)
+from coding_agent.topics.semantic_backends import (
+    FAKE_SEMANTIC_INDEX_SCHEMA,
+    FakeSemanticMemoryBackend,
+)
+from coding_agent.topics.semantic_index import SafeSemanticMemoryIndex
+from coding_agent.topics.semantic_sync import (
+    SemanticMemoryReviewSyncService,
+    SemanticMemorySyncer,
+)
 from coding_agent.server.http_server import (
     SESSION_IDLE_TIMEOUT_MINUTES,
     _build_session_manager,
@@ -209,6 +223,104 @@ def register_session(
     )
     session_manager.register_session(session)
     return session
+
+
+def _review_candidate(
+    candidate_id: str,
+    *,
+    title: str = "Auth convention",
+    summary: str = "JWT middleware convention",
+) -> TopicDerivedMemoryCandidate:
+    return TopicDerivedMemoryCandidate(
+        kind="fact",
+        title=title,
+        summary=summary,
+        scope="topic:topic-auth",
+        tags=("auth", "jwt"),
+        confidence=0.8,
+        provenance={
+            "topic_id": "topic-auth",
+            "topic_status": "finalized",
+            "topic_kind": "coding",
+            "source_entry_ranges": [
+                {"topic_id": "topic-auth", "start_seq": 2, "end_seq": 9}
+            ],
+        },
+        candidate_id=candidate_id,
+    )
+
+
+def _semantic_review_runtime_config() -> tuple[
+    dict[str, object],
+    MemoryReviewStore,
+    FakeSemanticMemoryBackend,
+    SemanticMemorySyncer,
+]:
+    review_store = MemoryReviewStore()
+    backend = FakeSemanticMemoryBackend()
+    index = SafeSemanticMemoryIndex(backend)
+    syncer = SemanticMemorySyncer(
+        index=index,
+        backend=backend,
+        schema=FAKE_SEMANTIC_INDEX_SCHEMA,
+    )
+    service = SemanticMemoryReviewSyncService(
+        review_store=review_store,
+        syncer=syncer,
+    )
+    return (
+        {
+            "memory_review_store": review_store,
+            "semantic_memory_backend": backend,
+            "semantic_memory_index": index,
+            "semantic_memory_syncer": syncer,
+            "semantic_memory_review_sync_service": service,
+        },
+        review_store,
+        backend,
+        syncer,
+    )
+
+
+def _direct_review_runtime_config() -> tuple[dict[str, object], MemoryReviewStore]:
+    review_store = MemoryReviewStore()
+    return {"memory_review_store": review_store}, review_store
+
+
+def _runtime_ctx(config: dict[str, object]) -> SimpleNamespace:
+    return SimpleNamespace(config=config, tape=Tape(tape_id="memory-review-tape"))
+
+
+def _install_memory_review_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    session_id: str,
+    ctx: SimpleNamespace,
+) -> list[str]:
+    register_session(session_id)
+    ensure_calls: list[str] = []
+
+    async def fake_ensure_session_runtime(candidate_session_id: str) -> object:
+        ensure_calls.append(candidate_session_id)
+        return ctx
+
+    monkeypatch.setattr(
+        session_manager,
+        "ensure_session_runtime",
+        fake_ensure_session_runtime,
+    )
+    return ensure_calls
+
+
+class _FailingReviewedMemorySyncer:
+    def __init__(self, exc: Exception | None = None) -> None:
+        self._exc = exc or RuntimeError("semantic backend unavailable")
+
+    async def sync_reviewed_memory(
+        self,
+        record: ReviewedMemoryRecord,
+    ) -> object:
+        del record
+        raise self._exc
 
 
 def test_http_server_uses_canonical_rate_limiter_module():
@@ -2527,6 +2639,353 @@ class TestRuntimeConfigUpdate:
 
         assert update.status_code == 409
         assert update.json()["detail"] == "Turn already in progress"
+
+
+class TestMemoryReviewTransitions:
+    async def test_accept_candidate_updates_semantic_index(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config, review_store, backend, _syncer = _semantic_review_runtime_config()
+        candidate = _review_candidate(
+            "memory-auth",
+            title="Auth memory",
+            summary="Use JWT middleware",
+        )
+        review_store.add_candidate(candidate)
+        ensure_calls = _install_memory_review_runtime(
+            monkeypatch,
+            "memory-review-session",
+            _runtime_ctx(config),
+        )
+
+        response = await client.post(
+            "/sessions/memory-review-session/memory/reviews/memory-auth",
+            json={"status": "accepted", "reason": "Useful for future auth work"},
+        )
+
+        assert response.status_code == 200
+        assert ensure_calls == ["memory-review-session"]
+        assert response.json() == {
+            "candidate_id": "memory-auth",
+            "status": "accepted",
+            "review_reason": "Useful for future auth work",
+            "kind": "fact",
+            "title": "Auth memory",
+            "scope": "topic:topic-auth",
+            "tags": ["auth", "jwt"],
+            "confidence": 0.8,
+        }
+        stored = review_store.load_memory("memory-auth")
+        assert stored is not None
+        assert stored.status == "accepted"
+        assert stored.review_reason == "Useful for future auth work"
+        assert await backend.list_ids() == ["accepted-memory:memory-auth:accepted"]
+        hits = await backend.search("JWT", limit=5)
+        assert [
+            (hit.memory_id, hit.text, hit.metadata["candidate_id"]) for hit in hits
+        ] == [
+            (
+                "accepted-memory:memory-auth:accepted",
+                "Auth memory\n\nUse JWT middleware",
+                "memory-auth",
+            )
+        ]
+
+    async def test_reject_candidate_deletes_stale_semantic_index(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config, review_store, backend, syncer = _semantic_review_runtime_config()
+        candidate = _review_candidate("memory-auth")
+        await syncer.sync_reviewed_memory(
+            ReviewedMemoryRecord(candidate=candidate, status="accepted")
+        )
+        review_store.add_candidate(candidate)
+        _install_memory_review_runtime(
+            monkeypatch,
+            "memory-reject-session",
+            _runtime_ctx(config),
+        )
+
+        response = await client.post(
+            "/sessions/memory-reject-session/memory/reviews/memory-auth",
+            json={"status": "rejected", "reason": "Too narrow"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "rejected"
+        assert response.json()["review_reason"] == "Too narrow"
+        stored = review_store.load_memory("memory-auth")
+        assert stored is not None
+        assert stored.status == "rejected"
+        assert await backend.list_ids() == []
+        assert await backend.search("JWT", limit=5) == []
+
+    async def test_missing_candidate_returns_404_without_index_side_effects(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config, _review_store, backend, _syncer = _semantic_review_runtime_config()
+        _install_memory_review_runtime(
+            monkeypatch,
+            "memory-missing-session",
+            _runtime_ctx(config),
+        )
+
+        response = await client.post(
+            "/sessions/memory-missing-session/memory/reviews/memory-missing",
+            json={"status": "accepted", "reason": "Useful"},
+        )
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "memory candidate not found: memory-missing"
+        assert await backend.list_ids() == []
+
+    async def test_terminal_transition_returns_400_without_index_side_effects(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config, review_store, backend, syncer = _semantic_review_runtime_config()
+        candidate = _review_candidate("memory-accepted")
+        review_store.add_candidate(candidate)
+        accepted = review_store.accept_candidate("memory-accepted", reason="Useful")
+        await syncer.sync_reviewed_memory(accepted)
+        _install_memory_review_runtime(
+            monkeypatch,
+            "memory-terminal-session",
+            _runtime_ctx(config),
+        )
+
+        response = await client.post(
+            "/sessions/memory-terminal-session/memory/reviews/memory-accepted",
+            json={"status": "rejected", "reason": "Too narrow"},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == (
+            "memory candidate memory-accepted is already accepted"
+        )
+        stored = review_store.load_memory("memory-accepted")
+        assert stored is not None
+        assert stored.status == "accepted"
+        assert await backend.list_ids() == ["accepted-memory:memory-accepted:accepted"]
+
+    async def test_same_status_terminal_transition_resyncs_existing_record(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config, review_store, backend, syncer = _semantic_review_runtime_config()
+        candidate = _review_candidate("memory-idempotent")
+        review_store.add_candidate(candidate)
+        accepted = review_store.accept_candidate("memory-idempotent", reason="Useful")
+        await syncer.sync_reviewed_memory(accepted)
+        sync_calls: list[str] = []
+        original_sync_reviewed_memory = syncer.sync_reviewed_memory
+
+        async def record_sync_call(record: ReviewedMemoryRecord) -> object:
+            sync_calls.append(record.status)
+            return await original_sync_reviewed_memory(record)
+
+        monkeypatch.setattr(syncer, "sync_reviewed_memory", record_sync_call)
+        _install_memory_review_runtime(
+            monkeypatch,
+            "memory-idempotent-session",
+            _runtime_ctx(config),
+        )
+
+        response = await client.post(
+            "/sessions/memory-idempotent-session/memory/reviews/memory-idempotent",
+            json={"status": "accepted", "reason": "Still useful"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "accepted"
+        assert response.json()["review_reason"] == "Useful"
+        assert sync_calls == ["accepted"]
+        stored = review_store.load_memory("memory-idempotent")
+        assert stored is not None
+        assert stored.status == "accepted"
+        assert stored.review_reason == "Useful"
+        assert await backend.list_ids() == ["accepted-memory:memory-idempotent:accepted"]
+
+    async def test_unsafe_reason_returns_400_without_store_or_index_side_effects(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config, review_store, backend, _syncer = _semantic_review_runtime_config()
+        review_store.add_candidate(_review_candidate("memory-unsafe-reason"))
+        _install_memory_review_runtime(
+            monkeypatch,
+            "memory-unsafe-reason-session",
+            _runtime_ctx(config),
+        )
+
+        response = await client.post(
+            "/sessions/memory-unsafe-reason-session/memory/reviews/memory-unsafe-reason",
+            json={"status": "accepted", "reason": "stdout: raw output"},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == (
+            "review_reason contains forbidden raw content marker"
+        )
+        stored = review_store.load_memory("memory-unsafe-reason")
+        assert stored is not None
+        assert stored.status == "candidate"
+        assert await backend.list_ids() == []
+
+    async def test_semantic_disabled_updates_review_store_directly(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config, review_store = _direct_review_runtime_config()
+        review_store.add_candidate(_review_candidate("memory-direct"))
+        _install_memory_review_runtime(
+            monkeypatch,
+            "memory-direct-session",
+            _runtime_ctx(config),
+        )
+
+        response = await client.post(
+            "/sessions/memory-direct-session/memory/reviews/memory-direct",
+            json={"status": "archived", "reason": "Superseded"},
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "candidate_id": "memory-direct",
+            "status": "archived",
+            "review_reason": "Superseded",
+            "kind": "fact",
+            "title": "Auth convention",
+            "scope": "topic:topic-auth",
+            "tags": ["auth", "jwt"],
+            "confidence": 0.8,
+        }
+        stored = review_store.load_memory("memory-direct")
+        assert stored is not None
+        assert stored.status == "archived"
+        assert stored.review_reason == "Superseded"
+        assert "semantic_memory_review_sync_service" not in config
+
+    async def test_semantic_sync_failure_returns_500(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        review_store = MemoryReviewStore()
+        review_store.add_candidate(_review_candidate("memory-failure"))
+        service = SemanticMemoryReviewSyncService(
+            review_store=review_store,
+            syncer=_FailingReviewedMemorySyncer(),
+        )
+        _install_memory_review_runtime(
+            monkeypatch,
+            "memory-failure-session",
+            _runtime_ctx(
+                {
+                    "memory_review_store": review_store,
+                    "semantic_memory_review_sync_service": service,
+                }
+            ),
+        )
+
+        response = await client.post(
+            "/sessions/memory-failure-session/memory/reviews/memory-failure",
+            json={"status": "accepted", "reason": "Useful"},
+        )
+
+        assert response.status_code == 500
+        assert response.json()["detail"] == (
+            "Semantic memory review sync failed: semantic backend unavailable"
+        )
+        stored = review_store.load_memory("memory-failure")
+        assert stored is not None
+        assert stored.status == "accepted"
+        assert stored.review_reason == "Useful"
+
+    async def test_semantic_transition_race_value_error_returns_400(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config, review_store, backend, _syncer = _semantic_review_runtime_config()
+        review_store.add_candidate(_review_candidate("memory-race"))
+
+        def fail_accept_after_prevalidation(
+            candidate_id: str,
+            *,
+            reason: str | None = None,
+        ) -> ReviewedMemoryRecord:
+            del candidate_id, reason
+            raise ValueError("memory candidate memory-race is already rejected")
+
+        monkeypatch.setattr(review_store, "accept_candidate", fail_accept_after_prevalidation)
+        _install_memory_review_runtime(
+            monkeypatch,
+            "memory-race-session",
+            _runtime_ctx(config),
+        )
+
+        response = await client.post(
+            "/sessions/memory-race-session/memory/reviews/memory-race",
+            json={"status": "accepted", "reason": "Useful"},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == (
+            "memory candidate memory-race is already rejected"
+        )
+        stored = review_store.load_memory("memory-race")
+        assert stored is not None
+        assert stored.status == "candidate"
+        assert await backend.list_ids() == []
+
+    async def test_semantic_sync_value_error_after_transition_returns_500(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        review_store = MemoryReviewStore()
+        review_store.add_candidate(_review_candidate("memory-sync-value-error"))
+        service = SemanticMemoryReviewSyncService(
+            review_store=review_store,
+            syncer=_FailingReviewedMemorySyncer(
+                ValueError("semantic document schema mismatch")
+            ),
+        )
+        _install_memory_review_runtime(
+            monkeypatch,
+            "memory-sync-value-error-session",
+            _runtime_ctx(
+                {
+                    "memory_review_store": review_store,
+                    "semantic_memory_review_sync_service": service,
+                }
+            ),
+        )
+
+        response = await client.post(
+            "/sessions/memory-sync-value-error-session/memory/reviews/memory-sync-value-error",
+            json={"status": "accepted", "reason": "Useful"},
+        )
+
+        assert response.status_code == 500
+        assert response.json()["detail"] == (
+            "Semantic memory review sync failed: semantic document schema mismatch"
+        )
+        stored = review_store.load_memory("memory-sync-value-error")
+        assert stored is not None
+        assert stored.status == "accepted"
+        assert stored.review_reason == "Useful"
 
 
 class TestPromptStreaming:

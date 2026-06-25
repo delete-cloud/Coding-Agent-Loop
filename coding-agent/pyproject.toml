@@ -51,6 +51,12 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = [".", "src"]
 
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Security",
+]
+
 [dependency-groups]
 dev = [
     "httpx>=0.28.1",
