@@ -4,9 +4,12 @@ from datetime import UTC, datetime
 
 import pytest
 
+from agentkit.plugin.registry import PluginRegistry
+from agentkit.runtime.pipeline import PipelineContext
+from agentkit.runtime.hook_runtime import HookRuntime
+from agentkit.runtime.pipeline import Pipeline
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
-from agentkit.runtime.pipeline import PipelineContext
 from coding_agent.plugins.semantic_memory import SemanticMemoryPlugin
 from coding_agent.topics.memory import (
     MemoryReviewStore,
@@ -182,6 +185,88 @@ async def test_build_context_scopes_accepted_memory_to_pipeline_session() -> Non
     rendered = "\n".join(str(item["content"]) for item in result)
     assert "Current session retry convention" in rendered
     assert "Other session retry convention" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_build_context_does_not_use_tape_id_as_session_scope() -> None:
+    review_store = MemoryReviewStore()
+    scoped = review_store.add_candidate(
+        _candidate(
+            "memory-current",
+            session_id="session-current",
+            tape_id="tape-current",
+            title="Current auth retry",
+            summary="Current session retry convention",
+        )
+    )
+    scoped = review_store.accept_candidate_for_session(
+        "session-current",
+        "memory-current",
+        reason="verified",
+    )
+    index = SafeSemanticMemoryIndex(FakeSemanticMemoryBackend())
+    await index.upsert(
+        SemanticMemoryDocument(
+            memory_id=SemanticDocId.for_reviewed_memory(scoped),
+            text="Current auth retry\n\nCurrent session retry convention",
+            metadata={"kind": "accepted_reviewed_memory"},
+            source_refs=(SemanticSourceRef.for_reviewed_memory(scoped),),
+        )
+    )
+    plugin = SemanticMemoryPlugin(
+        semantic_index=index,
+        memory_review_store=review_store,
+        read_enabled=True,
+    )
+
+    result = await plugin.build_context(
+        tape=_tape("auth retry", tape_id="session-current")
+    )
+
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_pipeline_injects_session_context_into_semantic_memory_hook() -> None:
+    review_store = MemoryReviewStore()
+    current = review_store.add_candidate(
+        _candidate(
+            "memory-current",
+            session_id="session-current",
+            tape_id="tape-current",
+            title="Current auth retry",
+            summary="Current session retry convention",
+        )
+    )
+    current = review_store.accept_candidate_for_session(
+        "session-current",
+        "memory-current",
+        reason="verified",
+    )
+    index = SafeSemanticMemoryIndex(FakeSemanticMemoryBackend())
+    await index.upsert(
+        SemanticMemoryDocument(
+            memory_id=SemanticDocId.for_reviewed_memory(current),
+            text="Current auth retry\n\nCurrent session retry convention",
+            metadata={"kind": "accepted_reviewed_memory"},
+            source_refs=(SemanticSourceRef.for_reviewed_memory(current),),
+        )
+    )
+    plugin = SemanticMemoryPlugin(
+        semantic_index=index,
+        memory_review_store=review_store,
+        read_enabled=True,
+    )
+    registry = PluginRegistry()
+    registry.register(plugin)
+    pipeline = Pipeline(runtime=HookRuntime(registry), registry=registry)
+    tape = _tape("auth retry", tape_id="shared-tape")
+    ctx = PipelineContext(tape=tape, session_id="session-current")
+
+    await pipeline._stage_build_context(ctx)
+
+    rendered = "\n".join(str(item["content"]) for item in ctx.messages)
+    assert "Current session retry convention" in rendered
 
 
 def test_constructor_rejects_invalid_explicit_topic_dependencies() -> None:

@@ -74,11 +74,11 @@ class SemanticMemoryPlugin:
         if not _is_recall_safe_query(user_message):
             return []
 
-        session_id = _session_id_from_context_or_tape(kwargs.get("ctx"), tape)
+        session_id = _session_id_from_context(kwargs.get("ctx"))
         planner = SemanticRecallPlanner(
             topic_planner=TopicRecallPlanner(
                 topic_index=self._topic_index,
-                accepted_memories=_accepted_memories_for_session(
+                accepted_memories=_accepted_memories_for_context(
                     self._memory_review_store,
                     session_id=session_id,
                 ),
@@ -87,9 +87,12 @@ class SemanticMemoryPlugin:
             memory_review_store=self._memory_review_store,
             topic_store=self._topic_store,
         )
+        source_session_id = session_id or "semantic-memory-legacy-context"
         plan = await planner.plan(
             TopicRecallPlannerInput(
-                source_topic=_source_topic_from_tape(tape, session_id=session_id),
+                source_topic=_source_topic_from_tape(
+                    tape, session_id=source_session_id
+                ),
                 text=user_message,
                 limit=self._limit,
                 enabled=self._read_enabled,
@@ -139,16 +142,16 @@ def _validate_topic_index(topic_index: TopicRangeIndex | None) -> TopicRangeInde
     return topic_index
 
 
-def _session_id_from_context_or_tape(ctx: object, tape: Tape) -> str:
+def _session_id_from_context(ctx: object) -> str | None:
     if isinstance(ctx, PipelineContext) and ctx.session_id:
         return ctx.session_id
-    return tape.tape_id
+    return None
 
 
-def _accepted_memories_for_session(
+def _accepted_memories_for_context(
     review_store: MemoryReviewStore,
     *,
-    session_id: str,
+    session_id: str | None,
 ) -> tuple[ReviewedMemoryRecord, ...]:
     return tuple(
         record
