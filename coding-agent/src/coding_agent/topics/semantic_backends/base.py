@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 import re
 from typing import Protocol, runtime_checkable
 
@@ -43,6 +45,19 @@ class SemanticIndexSchema:
         _require_non_empty_token(
             "semantic score normalization", self.score_normalization
         )
+
+
+type SemanticEmbeddingFn = Callable[[list[str]], list[list[float]]]
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticBackendFactoryConfig:
+    schema: SemanticIndexSchema
+    data_dir: Path
+    db_path: str | Path | None = None
+    table_name: str = "semantic_memory"
+    embedding_base_url: str | None = None
+    embedding_fn: SemanticEmbeddingFn | None = None
 
 
 class SemanticSchemaMismatch(ValueError):

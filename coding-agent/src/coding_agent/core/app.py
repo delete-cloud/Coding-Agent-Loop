@@ -43,6 +43,7 @@ from coding_agent.topics.memory import MemoryReviewStore
 from coding_agent.topics.range_index import TopicRangeIndex
 from coding_agent.topics.semantic_backends import (
     FAKE_SEMANTIC_INDEX_SCHEMA,
+    LANCEDB_SEMANTIC_INDEX_SCHEMA,
     SemanticIndexSchema,
 )
 from coding_agent.topics.semantic_backends import registry as semantic_backend_registry
@@ -62,12 +63,22 @@ class SemanticMemoryConfig:
     enabled: bool = False
     backend: str = "fake"
     schema: SemanticIndexSchema = FAKE_SEMANTIC_INDEX_SCHEMA
+    db_path: str | None = None
+    table_name: str = "semantic_memory"
+    embedding_base_url: str | None = None
 
     def to_config_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "enabled": self.enabled,
             "backend": self.backend,
         }
+        if self.db_path is not None:
+            payload["db_path"] = self.db_path
+        if self.table_name != "semantic_memory":
+            payload["table_name"] = self.table_name
+        if self.embedding_base_url is not None:
+            payload["embedding_base_url"] = self.embedding_base_url
+        return payload
 
 
 @dataclass(frozen=True)
@@ -211,10 +222,35 @@ def _parse_semantic_memory_config(
         not in semantic_backend_registry.available_semantic_memory_backends()
     ):
         raise ValueError(f"unknown semantic memory backend: {backend}")
+    db_path = raw_semantic_cfg.get("db_path")
+    if db_path is not None and not isinstance(db_path, str):
+        raise ValueError("[memory.semantic].db_path must be a string")
+    table_name = raw_semantic_cfg.get("table_name", "semantic_memory")
+    if not isinstance(table_name, str):
+        raise ValueError("[memory.semantic].table_name must be a string")
+    embedding_base_url = raw_semantic_cfg.get("embedding_base_url")
+    if embedding_base_url is not None and not isinstance(embedding_base_url, str):
+        raise ValueError("[memory.semantic].embedding_base_url must be a string")
     return SemanticMemoryConfig(
         enabled=enabled,
         backend=backend,
+        schema=(
+            _default_semantic_schema(backend)
+            if backend in semantic_backend_registry.available_semantic_memory_backends()
+            else FAKE_SEMANTIC_INDEX_SCHEMA
+        ),
+        db_path=db_path,
+        table_name=table_name,
+        embedding_base_url=embedding_base_url,
     )
+
+
+def _default_semantic_schema(backend: str) -> SemanticIndexSchema:
+    if backend == "fake":
+        return FAKE_SEMANTIC_INDEX_SCHEMA
+    if backend == "lancedb":
+        return LANCEDB_SEMANTIC_INDEX_SCHEMA
+    raise ValueError(f"unknown semantic memory backend: {backend}")
 
 
 def _child_system_prompt_suffix(tool_filter: ToolFilter) -> str:
@@ -425,7 +461,12 @@ def create_child_pipeline(
     if memory_cfg.semantic.enabled:
         semantic_memory_backend = (
             semantic_backend_registry.create_semantic_memory_backend(
-                memory_cfg.semantic.backend, schema=memory_cfg.semantic.schema
+                memory_cfg.semantic.backend,
+                schema=memory_cfg.semantic.schema,
+                data_dir=data_dir / kb_db_path,
+                db_path=memory_cfg.semantic.db_path,
+                table_name=memory_cfg.semantic.table_name,
+                embedding_base_url=memory_cfg.semantic.embedding_base_url,
             )
         )
         semantic_memory_index = SafeSemanticMemoryIndex(semantic_memory_backend)
