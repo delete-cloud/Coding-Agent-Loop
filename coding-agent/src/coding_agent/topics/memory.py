@@ -266,6 +266,30 @@ class MemoryReviewStore:
         return self.list_memories(status="accepted")
 
 
+def memory_candidate_session_id(candidate: TopicDerivedMemoryCandidate) -> str | None:
+    return _optional_str(candidate.provenance, "session_id")
+
+
+def memory_candidate_tape_id(candidate: TopicDerivedMemoryCandidate) -> str | None:
+    return _optional_str(candidate.provenance, "tape_id")
+
+
+def memory_candidate_profile(candidate: TopicDerivedMemoryCandidate) -> str | None:
+    return (
+        _optional_str(candidate.provenance, "profile")
+        or _optional_str(candidate.provenance, "profile_id")
+        or _optional_str(candidate.provenance, "domain_profile")
+    )
+
+
+def memory_candidate_belongs_to_session(
+    candidate: TopicDerivedMemoryCandidate,
+    *,
+    session_id: str,
+) -> bool:
+    return memory_candidate_session_id(candidate) == session_id
+
+
 def accepted_memory_context_pack(
     records: tuple[ReviewedMemoryRecord, ...],
 ) -> ContextPack:
@@ -469,6 +493,8 @@ def _provenance(
 ) -> JSONObject:
     payload: JSONObject = {
         "topic_id": topic.topic_id,
+        "session_id": topic.session_id,
+        "tape_id": topic.tape_id,
         "topic_status": topic.status,
         "topic_kind": topic.kind,
         "source_entry_ranges": [
@@ -476,6 +502,9 @@ def _provenance(
             for entry_range in (source_ranges or (topic_entry_range(topic),))
         ],
     }
+    profile = _topic_profile(topic)
+    if profile is not None:
+        payload["profile"] = profile
     if task_id is not None:
         _require_safe_scope(task_id)
         payload["task_id"] = task_id
@@ -570,11 +599,33 @@ def _provenance_topic_id(provenance: JSONObject) -> str:
     return topic_id
 
 
+def _topic_profile(topic: TopicRecord) -> str | None:
+    profile = topic.metadata.get("profile", topic.metadata.get("profile_id"))
+    if not isinstance(profile, str) or not profile:
+        return None
+    _require_safe_scope(profile)
+    return profile
+
+
 def _require_provenance(provenance: JSONObject) -> None:
     topic_id = provenance.get("topic_id")
     if not isinstance(topic_id, str) or not topic_id:
         raise ValueError("memory candidate provenance requires topic_id")
     _require_safe_scope(topic_id)
+    for key in (
+        "session_id",
+        "tape_id",
+        "profile",
+        "profile_id",
+        "domain_profile",
+    ):
+        value = provenance.get(key)
+        if value is not None:
+            if not isinstance(value, str) or not value:
+                raise ValueError(
+                    f"memory candidate provenance {key} must be a non-empty string"
+                )
+            _require_safe_scope(value)
     ranges = provenance.get("source_entry_ranges")
     if not isinstance(ranges, list) or not ranges:
         raise ValueError("memory candidate provenance requires source_entry_ranges")

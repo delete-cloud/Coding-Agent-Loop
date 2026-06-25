@@ -9,7 +9,12 @@ import re
 from typing import Any
 
 from agentkit.storage.protocols import MemoryHit, MemoryIndex
-from coding_agent.topics.memory import ReviewedMemoryRecord
+from coding_agent.topics.memory import (
+    ReviewedMemoryRecord,
+    memory_candidate_profile,
+    memory_candidate_session_id,
+    memory_candidate_tape_id,
+)
 from coding_agent.topics.provenance import topic_entry_range
 from coding_agent.topics.range_index import (
     TopicRangeSearchResult,
@@ -223,17 +228,27 @@ def semantic_document_from_reviewed_memory(
     candidate_id = candidate.candidate_id
     if candidate_id is None:
         raise ValueError("reviewed memory candidate is missing candidate_id")
+    metadata: dict[str, object] = {
+        "kind": "accepted_reviewed_memory",
+        "memory_kind": candidate.kind,
+        "candidate_id": candidate_id,
+        "memory_status": record.status,
+        "scope": candidate.scope,
+        "tags": list(candidate.tags),
+    }
+    session_id = memory_candidate_session_id(candidate)
+    if session_id is not None:
+        metadata["session_id"] = session_id
+    tape_id = memory_candidate_tape_id(candidate)
+    if tape_id is not None:
+        metadata["tape_id"] = tape_id
+    profile = memory_candidate_profile(candidate)
+    if profile is not None:
+        metadata["profile"] = profile
     return SemanticMemoryDocument(
         memory_id=SemanticDocId.for_reviewed_memory(record),
         text=_summary_document_text(candidate.title, candidate.summary),
-        metadata={
-            "kind": "accepted_reviewed_memory",
-            "memory_kind": candidate.kind,
-            "candidate_id": candidate_id,
-            "memory_status": record.status,
-            "scope": candidate.scope,
-            "tags": list(candidate.tags),
-        },
+        metadata=metadata,
         source_refs=(SemanticSourceRef.for_reviewed_memory(record),),
     )
 

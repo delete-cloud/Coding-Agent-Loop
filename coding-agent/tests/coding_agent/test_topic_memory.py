@@ -36,8 +36,11 @@ def test_topic_finalization_creates_memory_candidate_with_provenance() -> None:
     assert payload["summary"] == "JWT validation moved to shared middleware"
     assert payload["provenance"] == {
         "topic_id": "topic-auth",
+        "session_id": "session-1",
+        "tape_id": "tape-1",
         "topic_status": "finalized",
         "topic_kind": "coding",
+        "profile": "local",
         "source_entry_ranges": [
             {"topic_id": "topic-auth", "start_seq": 2, "end_seq": 9}
         ],
@@ -70,8 +73,11 @@ def test_bee_task_report_creates_memory_candidate_with_evidence_refs() -> None:
     assert report_candidate["status"] == "candidate"
     assert report_candidate["provenance"] == {
         "topic_id": "topic-bee",
+        "session_id": "session-1",
+        "tape_id": "tape-1",
         "topic_status": "finalized",
         "topic_kind": "coding",
+        "profile": "local",
         "source_entry_ranges": [
             {"topic_id": "topic-bee", "start_seq": 2, "end_seq": 9}
         ],

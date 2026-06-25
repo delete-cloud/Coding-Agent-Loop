@@ -98,9 +98,12 @@ async def test_sync_indexes_only_accepted_reviewed_memories() -> None:
                 "memory_kind": "fact",
                 "candidate_id": "memory-auth",
                 "memory_status": "accepted",
+                "session_id": "session-1",
+                "tape_id": "tape-1",
                 "scope": "topic:topic-auth",
                 "tags": ["auth", "jwt"],
                 "source_refs": ["memory:memory-auth"],
+                "profile": "local",
             },
         )
     ]
@@ -247,6 +250,79 @@ async def test_event_sync_deletes_unaccepted_reviewed_memory_scope() -> None:
     assert report.deleted_count == 1
     assert report.skipped_count == 1
     assert await backend.list_ids() == []
+
+
+@pytest.mark.asyncio
+async def test_reviewed_memory_delete_scope_does_not_cross_session() -> None:
+    backend, syncer = _syncer()
+    await backend.ensure_schema(FAKE_SEMANTIC_INDEX_SCHEMA)
+    await backend.upsert(
+        "accepted-memory:memory-auth:accepted",
+        "Other session auth memory",
+        {
+            "source_refs": ("memory:memory-auth",),
+            "session_id": "other-session",
+            "tape_id": "other-tape",
+            "profile": "local",
+        },
+    )
+
+    report = await syncer.sync_reviewed_memory(
+        ReviewedMemoryRecord(candidate=_candidate("memory-auth"), status="rejected")
+    )
+
+    assert report.deleted_ids == ()
+    assert report.deleted_count == 0
+    assert report.skipped_count == 1
+    assert await backend.list_ids() == ["accepted-memory:memory-auth:accepted"]
+
+
+@pytest.mark.asyncio
+async def test_reviewed_memory_without_session_scope_has_no_index_side_effects() -> (
+    None
+):
+    backend, syncer = _syncer()
+    await backend.ensure_schema(FAKE_SEMANTIC_INDEX_SCHEMA)
+    await backend.upsert(
+        "accepted-memory:memory-auth:accepted",
+        "Existing scoped memory",
+        {
+            "source_refs": ("memory:memory-auth",),
+            "session_id": "session-1",
+            "tape_id": "tape-1",
+            "profile": "local",
+        },
+    )
+    legacy_candidate = TopicDerivedMemoryCandidate(
+        kind="fact",
+        title="Legacy memory",
+        summary="Legacy memory summary",
+        scope="topic:topic-auth",
+        tags=("auth",),
+        confidence=0.8,
+        provenance={
+            "topic_id": "topic-auth",
+            "topic_status": "finalized",
+            "topic_kind": "coding",
+            "source_entry_ranges": [
+                {"topic_id": "topic-auth", "start_seq": 2, "end_seq": 9}
+            ],
+        },
+        candidate_id="memory-auth",
+    )
+
+    accepted = await syncer.sync_reviewed_memory(
+        ReviewedMemoryRecord(candidate=legacy_candidate, status="accepted")
+    )
+    rejected = await syncer.sync_reviewed_memory(
+        ReviewedMemoryRecord(candidate=legacy_candidate, status="rejected")
+    )
+
+    assert accepted.indexed_ids == ()
+    assert accepted.skipped_count == 1
+    assert rejected.deleted_ids == ()
+    assert rejected.skipped_count == 1
+    assert await backend.list_ids() == ["accepted-memory:memory-auth:accepted"]
 
 
 @pytest.mark.asyncio
@@ -493,8 +569,11 @@ def _candidate(
         confidence=0.8,
         provenance={
             "topic_id": "topic-auth",
+            "session_id": "session-1",
+            "tape_id": "tape-1",
             "topic_status": "finalized",
             "topic_kind": "coding",
+            "profile": "local",
             "source_entry_ranges": [
                 {"topic_id": "topic-auth", "start_seq": 2, "end_seq": 9}
             ],

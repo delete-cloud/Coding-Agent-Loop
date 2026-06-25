@@ -108,7 +108,11 @@ from coding_agent.topics.store import (
     TopicRecallLinkRecord,
     TopicRecord,
 )
-from coding_agent.topics.memory import MemoryReviewStore, ReviewedMemoryRecord
+from coding_agent.topics.memory import (
+    MemoryReviewStore,
+    ReviewedMemoryRecord,
+    memory_candidate_belongs_to_session,
+)
 from coding_agent.topics.range_index import require_recall_safe_text
 from coding_agent.topics.semantic_sync import SemanticMemoryReviewSyncService
 from coding_agent.server.auth import (
@@ -2679,6 +2683,7 @@ def _semantic_review_sync_service_from_runtime_config(
 def _validate_memory_review_transition(
     review_store: MemoryReviewStore,
     *,
+    session_id: str,
     candidate_id: str,
     status: Literal["accepted", "rejected", "archived"],
     reason: str | None,
@@ -2687,6 +2692,8 @@ def _validate_memory_review_transition(
         require_recall_safe_text("review_reason", reason)
     record = review_store.load_memory(candidate_id)
     if record is None:
+        raise KeyError(f"memory candidate not found: {candidate_id}")
+    if not memory_candidate_belongs_to_session(record.candidate, session_id=session_id):
         raise KeyError(f"memory candidate not found: {candidate_id}")
     if record.status != "candidate" and record.status != status:
         raise ValueError(f"memory candidate {candidate_id} is already {record.status}")
@@ -2774,6 +2781,7 @@ async def transition_memory_review(
     try:
         current_record = _validate_memory_review_transition(
             review_store,
+            session_id=session_id,
             candidate_id=candidate_id,
             status=body.status,
             reason=body.reason,

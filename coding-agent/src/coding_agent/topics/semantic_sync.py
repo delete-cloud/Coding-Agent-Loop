@@ -7,7 +7,12 @@ from dataclasses import dataclass
 import re
 from typing import Protocol
 
-from coding_agent.topics.memory import MemoryReviewStore, ReviewedMemoryRecord
+from coding_agent.topics.memory import (
+    MemoryReviewStore,
+    ReviewedMemoryRecord,
+    memory_candidate_profile,
+    memory_candidate_session_id,
+)
 from coding_agent.topics.semantic_backends import (
     SemanticBackendScope,
     SemanticIndexSchema,
@@ -168,7 +173,8 @@ class SemanticMemorySyncer:
         await self.ensure_schema()
         document = self._document_from_reviewed_memory(record)
         if document is None:
-            deleted_ids = await self._delete_scope(self._reviewed_memory_scope(record))
+            scope = self._reviewed_memory_scope(record)
+            deleted_ids = await self._delete_scope(scope) if scope is not None else ()
             return SemanticSyncReport(
                 reviewed_memory_count=1,
                 skipped_count=1,
@@ -239,6 +245,8 @@ class SemanticMemorySyncer:
     ) -> SemanticMemoryDocument | None:
         if record.status != "accepted":
             return None
+        if memory_candidate_session_id(record.candidate) is None:
+            return None
         return semantic_document_from_reviewed_memory(record)
 
     async def _upsert_documents(
@@ -281,11 +289,19 @@ class SemanticMemorySyncer:
     def _reviewed_memory_scope(
         self,
         record: ReviewedMemoryRecord,
-    ) -> SemanticBackendScope:
+    ) -> SemanticBackendScope | None:
         candidate_id = record.candidate.candidate_id
         if candidate_id is None:
             raise ValueError("reviewed memory candidate is missing candidate_id")
-        return SemanticBackendScope(source_kind="memory", source_id=candidate_id)
+        session_id = memory_candidate_session_id(record.candidate)
+        if session_id is None:
+            return None
+        return SemanticBackendScope(
+            source_kind="memory",
+            source_id=candidate_id,
+            session_id=session_id,
+            profile=memory_candidate_profile(record.candidate),
+        )
 
 
 def _profile_from_topic(topic: TopicRecord) -> str | None:
