@@ -8,6 +8,8 @@ from coding_agent.topics.semantic_backends import (
     SemanticBackendScope,
     SemanticIndexSchema,
     SemanticSchemaMismatch,
+    available_semantic_memory_backends,
+    create_semantic_memory_backend,
 )
 
 
@@ -24,6 +26,24 @@ def _schema(**overrides: object) -> SemanticIndexSchema:
     }
     values.update(overrides)
     return SemanticIndexSchema(**values)
+
+
+def test_available_semantic_memory_backends_lists_registered_backends() -> None:
+    assert available_semantic_memory_backends() == ("fake",)
+
+
+def test_create_semantic_memory_backend_builds_fake_backend_with_schema() -> None:
+    schema = _schema(embedding_model="custom-fake-model")
+
+    backend = create_semantic_memory_backend("fake", schema=schema)
+
+    assert isinstance(backend, FakeSemanticMemoryBackend)
+    assert backend.schema == schema
+
+
+def test_create_semantic_memory_backend_rejects_unknown_backend() -> None:
+    with pytest.raises(ValueError, match="unknown semantic memory backend: unknown"):
+        create_semantic_memory_backend("unknown", schema=_schema())
 
 
 @pytest.mark.asyncio
@@ -102,7 +122,9 @@ async def test_schema_identity_mismatch_fails_clearly() -> None:
 
 
 @pytest.mark.asyncio
-async def test_schema_identity_mismatch_requires_explicit_rebuild_and_clears_stale_docs() -> None:
+async def test_schema_identity_mismatch_requires_explicit_rebuild_and_clears_stale_docs() -> (
+    None
+):
     backend = FakeSemanticMemoryBackend()
     await backend.ensure_schema(_schema())
     await backend.upsert(
@@ -189,7 +211,9 @@ async def test_scoped_delete_cannot_delete_across_scopes() -> None:
 
 
 @pytest.mark.asyncio
-async def test_memory_hit_score_is_normalized_high_is_better_by_result_ordering() -> None:
+async def test_memory_hit_score_is_normalized_high_is_better_by_result_ordering() -> (
+    None
+):
     backend = FakeSemanticMemoryBackend()
     await backend.ensure_schema(_schema())
     await backend.upsert(

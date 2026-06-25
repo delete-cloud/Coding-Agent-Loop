@@ -43,9 +43,9 @@ from coding_agent.topics.memory import MemoryReviewStore
 from coding_agent.topics.range_index import TopicRangeIndex
 from coding_agent.topics.semantic_backends import (
     FAKE_SEMANTIC_INDEX_SCHEMA,
-    FakeSemanticMemoryBackend,
     SemanticIndexSchema,
 )
+from coding_agent.topics.semantic_backends import registry as semantic_backend_registry
 from coding_agent.topics.semantic_index import SafeSemanticMemoryIndex
 from coding_agent.topics.semantic_recall import SemanticTopicStore
 from coding_agent.topics.semantic_sync import (
@@ -205,7 +205,11 @@ def _parse_semantic_memory_config(
     backend = raw_semantic_cfg.get("backend", "fake")
     if not isinstance(backend, str):
         raise ValueError("[memory.semantic].backend must be a string")
-    if enabled and backend != "fake":
+    if (
+        enabled
+        and backend
+        not in semantic_backend_registry.available_semantic_memory_backends()
+    ):
         raise ValueError(f"unknown semantic memory backend: {backend}")
     return SemanticMemoryConfig(
         enabled=enabled,
@@ -419,8 +423,10 @@ def create_child_pipeline(
     semantic_memory_syncer = None
     semantic_memory_review_sync_service = None
     if memory_cfg.semantic.enabled:
-        semantic_memory_backend = FakeSemanticMemoryBackend(
-            schema=memory_cfg.semantic.schema
+        semantic_memory_backend = (
+            semantic_backend_registry.create_semantic_memory_backend(
+                memory_cfg.semantic.backend, schema=memory_cfg.semantic.schema
+            )
         )
         semantic_memory_index = SafeSemanticMemoryIndex(semantic_memory_backend)
         semantic_memory_syncer = SemanticMemorySyncer(
