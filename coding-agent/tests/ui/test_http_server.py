@@ -2775,7 +2775,7 @@ class TestMemoryReviewTransitions:
         assert stored.status == "accepted"
         assert await backend.list_ids() == ["accepted-memory:memory-accepted:accepted"]
 
-    async def test_same_status_terminal_transition_returns_400_without_sync(
+    async def test_same_status_terminal_transition_resyncs_existing_record(
         self,
         client: AsyncClient,
         monkeypatch: pytest.MonkeyPatch,
@@ -2804,11 +2804,10 @@ class TestMemoryReviewTransitions:
             json={"status": "accepted", "reason": "Still useful"},
         )
 
-        assert response.status_code == 400
-        assert response.json()["detail"] == (
-            "memory candidate memory-idempotent is already accepted"
-        )
-        assert sync_calls == []
+        assert response.status_code == 200
+        assert response.json()["status"] == "accepted"
+        assert response.json()["review_reason"] == "Useful"
+        assert sync_calls == ["accepted"]
         stored = review_store.load_memory("memory-idempotent")
         assert stored is not None
         assert stored.status == "accepted"

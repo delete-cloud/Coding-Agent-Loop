@@ -157,9 +157,11 @@ exists, the same session-scoped API may transition the local store directly.
 The review store transition is authoritative; semantic sync is a derived
 follow-up. Invalid or raced store transitions return 400, while failures during
 semantic sync return 500 because the authoritative review state may already
-have changed and the derived index is now stale. Terminal records are not
-treated as idempotent mutation targets. There is no global review-store
-mutation endpoint.
+have changed and the derived index is now stale. Same-status terminal replays
+are idempotent repair requests: they must not mutate the review store or
+overwrite the original review reason, but may rerun semantic sync to repair a
+stale derived index. Terminal records with a different target status still
+return 400. There is no global review-store mutation endpoint.
 
 PR2 must create a reusable backend contract test suite against a fake or
 in-memory semantic backend. LanceDB, Chroma, Milvus, pgvector, or any later
@@ -227,7 +229,7 @@ repo gate:
 - [ ] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_reject_candidate_deletes_stale_semantic_index`
 - [ ] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_missing_candidate_returns_404_without_index_side_effects`
 - [ ] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_terminal_transition_returns_400_without_index_side_effects`
-- [ ] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_same_status_terminal_transition_returns_400_without_sync`
+- [ ] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_same_status_terminal_transition_resyncs_existing_record`
 - [ ] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_unsafe_reason_returns_400_without_store_or_index_side_effects`
 - [ ] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_semantic_disabled_updates_review_store_directly`
 - [ ] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_semantic_sync_failure_returns_500`

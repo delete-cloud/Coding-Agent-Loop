@@ -2682,14 +2682,15 @@ def _validate_memory_review_transition(
     candidate_id: str,
     status: Literal["accepted", "rejected", "archived"],
     reason: str | None,
-) -> None:
+) -> ReviewedMemoryRecord:
     if reason is not None:
         require_recall_safe_text("review_reason", reason)
     record = review_store.load_memory(candidate_id)
     if record is None:
         raise KeyError(f"memory candidate not found: {candidate_id}")
-    if record.status != "candidate":
+    if record.status != "candidate" and record.status != status:
         raise ValueError(f"memory candidate {candidate_id} is already {record.status}")
+    return record
 
 
 def _transition_memory_review_store(
@@ -2771,7 +2772,7 @@ async def transition_memory_review(
     service = _semantic_review_sync_service_from_runtime_config(config)
 
     try:
-        _validate_memory_review_transition(
+        current_record = _validate_memory_review_transition(
             review_store,
             candidate_id=candidate_id,
             status=body.status,
@@ -2782,20 +2783,23 @@ async def transition_memory_review(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    try:
-        record = _transition_memory_review_store(
-            review_store,
-            candidate_id=candidate_id,
-            status=body.status,
-            reason=body.reason,
-        )
-    except KeyError as exc:
-        raise HTTPException(
-            status_code=404,
-            detail=_key_error_detail(exc),
-        ) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if current_record.status == body.status:
+        record = current_record
+    else:
+        try:
+            record = _transition_memory_review_store(
+                review_store,
+                candidate_id=candidate_id,
+                status=body.status,
+                reason=body.reason,
+            )
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail=_key_error_detail(exc),
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     if service is not None:
         try:
