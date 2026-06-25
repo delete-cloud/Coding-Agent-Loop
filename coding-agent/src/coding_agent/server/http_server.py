@@ -108,6 +108,9 @@ from coding_agent.topics.store import (
     TopicRecallLinkRecord,
     TopicRecord,
 )
+from coding_agent.topics.memory import MemoryReviewStore, ReviewedMemoryRecord
+from coding_agent.topics.range_index import require_recall_safe_text
+from coding_agent.topics.semantic_sync import SemanticMemoryReviewSyncService
 from coding_agent.server.auth import (
     AuthContext,
     auth_context_from_headers,
@@ -206,6 +209,8 @@ from coding_agent.server.schemas import (
     DisplayEventResponse,
     DisplayEventsResponse,
     HealthResponse,
+    MemoryReviewTransitionRequest,
+    MemoryReviewTransitionResponse,
     PromptRequest,
     PublishSessionRequest,
     PublishSessionResponse,
@@ -2643,6 +2648,172 @@ async def update_runtime_config(
         model_name=getattr(updated_session, "model_name", None),
         base_url=getattr(updated_session, "base_url", None),
     )
+
+
+def _memory_review_store_from_runtime_config(
+    config: Mapping[str, object],
+) -> MemoryReviewStore:
+    review_store = config.get("memory_review_store")
+    if not isinstance(review_store, MemoryReviewStore):
+        raise HTTPException(
+            status_code=500,
+            detail="Memory review store is not configured",
+        )
+    return review_store
+
+
+def _semantic_review_sync_service_from_runtime_config(
+    config: Mapping[str, object],
+) -> SemanticMemoryReviewSyncService | None:
+    service = config.get("semantic_memory_review_sync_service")
+    if service is None:
+        return None
+    if not isinstance(service, SemanticMemoryReviewSyncService):
+        raise HTTPException(
+            status_code=500,
+            detail="Semantic memory review sync service is not configured correctly",
+        )
+    return service
+
+
+def _validate_memory_review_transition(
+    review_store: MemoryReviewStore,
+    *,
+    candidate_id: str,
+    status: Literal["accepted", "rejected", "archived"],
+    reason: str | None,
+) -> None:
+    if reason is not None:
+        require_recall_safe_text("review_reason", reason)
+    record = review_store.load_memory(candidate_id)
+    if record is None:
+        raise KeyError(f"memory candidate not found: {candidate_id}")
+    if record.status != "candidate":
+        raise ValueError(f"memory candidate {candidate_id} is already {record.status}")
+
+
+def _transition_memory_review_store(
+    review_store: MemoryReviewStore,
+    *,
+    candidate_id: str,
+    status: Literal["accepted", "rejected", "archived"],
+    reason: str | None,
+) -> ReviewedMemoryRecord:
+    if status == "accepted":
+        return review_store.accept_candidate(candidate_id, reason=reason)
+    if status == "rejected":
+        return review_store.reject_candidate(candidate_id, reason=reason)
+    return review_store.archive_candidate(candidate_id, reason=reason)
+
+
+async def _sync_memory_review_service(
+    service: SemanticMemoryReviewSyncService,
+    *,
+    record: ReviewedMemoryRecord,
+) -> None:
+    await service.sync_reviewed_memory(record)
+
+
+def _memory_review_transition_response(
+    record: ReviewedMemoryRecord,
+) -> MemoryReviewTransitionResponse:
+    candidate = record.candidate
+    candidate_id = candidate.candidate_id
+    if candidate_id is None:
+        raise RuntimeError("reviewed memory candidate is missing candidate_id")
+    if record.status not in {"accepted", "rejected", "archived"}:
+        raise RuntimeError(f"unexpected reviewed memory status: {record.status}")
+    return MemoryReviewTransitionResponse(
+        candidate_id=candidate_id,
+        status=cast(Literal["accepted", "rejected", "archived"], record.status),
+        review_reason=record.review_reason,
+        kind=candidate.kind,
+        title=candidate.title,
+        scope=candidate.scope,
+        tags=list(candidate.tags),
+        confidence=candidate.confidence,
+    )
+
+
+@app.post(
+    "/sessions/{session_id}/memory/reviews/{candidate_id}",
+    response_model=MemoryReviewTransitionResponse,
+)
+@limiter.limit(RateLimits.APPROVE)
+async def transition_memory_review(
+    request: Request,
+    session_id: str,
+    candidate_id: str,
+    body: MemoryReviewTransitionRequest,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> MemoryReviewTransitionResponse:
+    del request
+    _ = await _get_visible_session(session_id, auth_context)
+    try:
+        runtime_ctx = await session_manager.ensure_session_runtime(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
+    except SessionOwnershipConflictError as exc:
+        raise _owner_conflict_http_exception(exc, session_id=session_id) from exc
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=_http_exception_detail(exc),
+        ) from exc
+
+    config = getattr(runtime_ctx, "config", None)
+    if not isinstance(config, Mapping):
+        raise HTTPException(
+            status_code=500,
+            detail="Session runtime context is missing config",
+        )
+    review_store = _memory_review_store_from_runtime_config(config)
+    service = _semantic_review_sync_service_from_runtime_config(config)
+
+    try:
+        _validate_memory_review_transition(
+            review_store,
+            candidate_id=candidate_id,
+            status=body.status,
+            reason=body.reason,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        record = _transition_memory_review_store(
+            review_store,
+            candidate_id=candidate_id,
+            status=body.status,
+            reason=body.reason,
+        )
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=_key_error_detail(exc),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if service is not None:
+        try:
+            await _sync_memory_review_service(service, record=record)
+        except Exception as exc:
+            logger.exception(
+                "Semantic memory review sync failed for session %s candidate %s",
+                session_id,
+                candidate_id,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"Semantic memory review sync failed: {_http_exception_detail(exc)}"
+                ),
+            ) from exc
+
+    return _memory_review_transition_response(record)
 
 
 @app.post("/sessions/{session_id}/prompt")

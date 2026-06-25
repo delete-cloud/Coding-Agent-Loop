@@ -15,6 +15,10 @@ from coding_agent.plugins.semantic_memory import SemanticMemoryPlugin
 from coding_agent.topics.lifecycle import TOPIC_FINALIZED, TOPIC_INITIAL, TopicLifecycle
 from coding_agent.topics.memory import MemoryReviewStore
 from coding_agent.topics.range_index import TopicRangeIndex
+from coding_agent.topics.semantic_sync import (
+    SemanticMemoryReviewSyncService,
+    SemanticMemorySyncer,
+)
 from coding_agent.topics.store import JSONObject, TopicAnchorRecord, TopicRecord
 
 
@@ -632,6 +636,8 @@ backend = "fake"
     assert ctx.config["topic_recall"]["enabled"] is True
     assert "semantic_memory_backend" not in ctx.config
     assert "semantic_memory_index" not in ctx.config
+    assert "semantic_memory_syncer" not in ctx.config
+    assert "semantic_memory_review_sync_service" not in ctx.config
 
 
 def test_disabled_semantic_config_does_not_initialize_provider_or_backend(
@@ -660,6 +666,8 @@ backend = "unknown"
     }
     assert "semantic_memory_backend" not in ctx.config
     assert "semantic_memory_index" not in ctx.config
+    assert "semantic_memory_syncer" not in ctx.config
+    assert "semantic_memory_review_sync_service" not in ctx.config
 
 
 def test_default_semantic_disabled_does_not_register_semantic_memory_plugin(
@@ -680,6 +688,8 @@ def test_default_semantic_disabled_does_not_register_semantic_memory_plugin(
     assert "semantic_memory" not in pipeline._registry.plugin_ids()
     assert "semantic_memory_backend" not in ctx.config
     assert "semantic_memory_index" not in ctx.config
+    assert "semantic_memory_syncer" not in ctx.config
+    assert "semantic_memory_review_sync_service" not in ctx.config
 
 
 def test_semantic_enabled_unknown_backend_fails_clearly(tmp_path: Path) -> None:
@@ -744,6 +754,14 @@ backend = "fake"
     assert ctx.config["semantic_memory_index"].__class__.__name__ == (
         "SafeSemanticMemoryIndex"
     )
+    syncer = ctx.config["semantic_memory_syncer"]
+    assert isinstance(syncer, SemanticMemorySyncer)
+    assert syncer._backend is ctx.config["semantic_memory_backend"]
+    assert syncer._index is ctx.config["semantic_memory_index"]
+    service = ctx.config["semantic_memory_review_sync_service"]
+    assert isinstance(service, SemanticMemoryReviewSyncService)
+    assert service.review_store is ctx.config["memory_review_store"]
+    assert service.syncer is syncer
     assert "semantic_memory" in pipeline._registry.plugin_ids()
 
 
@@ -895,6 +913,14 @@ backend = "fake"
     assert ctx.config["semantic_memory_index"].__class__.__name__ == (
         "SafeSemanticMemoryIndex"
     )
+    syncer = ctx.config["semantic_memory_syncer"]
+    assert isinstance(syncer, SemanticMemorySyncer)
+    assert syncer._backend is ctx.config["semantic_memory_backend"]
+    assert syncer._index is ctx.config["semantic_memory_index"]
+    service = ctx.config["semantic_memory_review_sync_service"]
+    assert isinstance(service, SemanticMemoryReviewSyncService)
+    assert service.review_store is ctx.config["memory_review_store"]
+    assert service.syncer is syncer
     assert "semantic_memory" not in pipeline._registry.plugin_ids()
 
 
@@ -924,6 +950,8 @@ backend = "fake"
 
     assert ctx.config["memory"]["effective_read_enabled"] is True
     assert "semantic_memory_index" in ctx.config
+    assert "semantic_memory_syncer" in ctx.config
+    assert "semantic_memory_review_sync_service" in ctx.config
     assert pipeline._registry.plugin_ids() == ["memory"]
 
 

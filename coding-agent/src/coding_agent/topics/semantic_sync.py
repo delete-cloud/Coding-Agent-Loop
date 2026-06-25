@@ -80,6 +80,12 @@ class SemanticMemoryReviewSyncService:
         await self.syncer.sync_reviewed_memory(record)
         return record
 
+    async def sync_reviewed_memory(
+        self,
+        record: ReviewedMemoryRecord,
+    ) -> None:
+        await self.syncer.sync_reviewed_memory(record)
+
 
 class SemanticMemorySyncer:
     """Sync derived semantic documents from authoritative topic/memory records."""

@@ -146,6 +146,21 @@ accelerate sync, but is never the authority. Full rebuild must be idempotent.
 Sync entrypoints and triggers include manual rebuild, startup reconciliation,
 and post-finalize/post-review-change sync.
 
+Reviewed-memory transition APIs are session-scoped product APIs. The HTTP
+surface is `POST /sessions/{session_id}/memory/reviews/{candidate_id}` with a
+target status of `accepted`, `rejected`, or `archived` and an optional safe
+reason. It must authorize through the visible session, ensure that session's
+runtime, and read the review store/service from that runtime context. When the
+semantic review sync service exists, the API uses it so transitions update the
+semantic index. When semantic memory is disabled and only the review store
+exists, the same session-scoped API may transition the local store directly.
+The review store transition is authoritative; semantic sync is a derived
+follow-up. Invalid or raced store transitions return 400, while failures during
+semantic sync return 500 because the authoritative review state may already
+have changed and the derived index is now stale. Terminal records are not
+treated as idempotent mutation targets. There is no global review-store
+mutation endpoint.
+
 PR2 must create a reusable backend contract test suite against a fake or
 in-memory semantic backend. LanceDB, Chroma, Milvus, pgvector, or any later
 adapter must run the same suite when added.
@@ -206,6 +221,18 @@ repo gate:
 - [ ] `tests/coding_agent/test_semantic_sync.py::test_manifest_cache_is_not_sync_authority`
 - [ ] `tests/coding_agent/test_semantic_sync.py::test_full_rebuild_is_idempotent`
 - [ ] `tests/coding_agent/test_semantic_sync.py::test_manual_rebuild_startup_and_event_triggers_share_sync_contract`
+- [ ] `tests/coding_agent/test_memory_switch.py::test_semantic_enabled_fake_backend_registers_plugin_and_exposes_index_by_default`
+- [ ] `tests/coding_agent/test_memory_switch.py::test_semantic_enabled_with_read_disabled_exposes_index_without_registering_plugin`
+- [ ] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_accept_candidate_updates_semantic_index`
+- [ ] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_reject_candidate_deletes_stale_semantic_index`
+- [ ] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_missing_candidate_returns_404_without_index_side_effects`
+- [ ] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_terminal_transition_returns_400_without_index_side_effects`
+- [ ] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_same_status_terminal_transition_returns_400_without_sync`
+- [ ] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_unsafe_reason_returns_400_without_store_or_index_side_effects`
+- [ ] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_semantic_disabled_updates_review_store_directly`
+- [ ] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_semantic_sync_failure_returns_500`
+- [ ] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_semantic_transition_race_value_error_returns_400`
+- [ ] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_semantic_sync_value_error_after_transition_returns_500`
 - [ ] `tests/coding_agent/test_memory_index_backend_contract.py::test_fake_backend_satisfies_memory_index_contract`
 - [ ] `uv run pytest -q`
 
