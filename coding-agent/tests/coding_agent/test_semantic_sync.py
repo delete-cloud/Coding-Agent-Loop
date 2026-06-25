@@ -15,7 +15,7 @@ from coding_agent.topics.semantic_backends import (
     SemanticIndexSchema,
     SemanticSchemaMismatch,
 )
-from coding_agent.topics.semantic_index import SafeSemanticMemoryIndex
+from coding_agent.topics.semantic_index import SafeSemanticMemoryIndex, SemanticDocId
 from coding_agent.topics.semantic_sync import (
     SemanticMemoryReviewSyncService,
     SemanticMemorySyncer,
@@ -82,28 +82,88 @@ async def test_sync_indexes_only_accepted_reviewed_memories() -> None:
         status="accepted",
         review_reason="Useful",
     )
+    expected_id = _reviewed_memory_doc_id(accepted)
 
     report = await syncer.sync_reviewed_memory(accepted)
 
-    assert report.indexed_ids == ("accepted-memory:memory-auth:accepted",)
+    assert report.indexed_ids == (expected_id,)
     assert report.indexed_count == 1
-    assert await backend.list_ids() == ["accepted-memory:memory-auth:accepted"]
+    assert await backend.list_ids() == [expected_id]
     hits = await backend.search("JWT", limit=5)
     assert [(hit.memory_id, hit.text, hit.metadata) for hit in hits] == [
         (
-            "accepted-memory:memory-auth:accepted",
+            expected_id,
             "Auth memory\n\nUse JWT",
             {
                 "kind": "accepted_reviewed_memory",
                 "memory_kind": "fact",
                 "candidate_id": "memory-auth",
                 "memory_status": "accepted",
+                "session_id": "session-1",
+                "tape_id": "tape-1",
                 "scope": "topic:topic-auth",
                 "tags": ["auth", "jwt"],
                 "source_refs": ["memory:memory-auth"],
+                "profile": "local",
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_sync_indexes_same_candidate_id_per_session_as_distinct_documents() -> (
+    None
+):
+    backend, syncer = _syncer()
+    first = ReviewedMemoryRecord(
+        candidate=_candidate("memory-auth", session_id="session-1", tape_id="tape-1"),
+        status="accepted",
+    )
+    second = ReviewedMemoryRecord(
+        candidate=_candidate("memory-auth", session_id="session-2", tape_id="tape-2"),
+        status="accepted",
+    )
+    first_id = _reviewed_memory_doc_id(first)
+    second_id = _reviewed_memory_doc_id(second)
+
+    first_report = await syncer.sync_reviewed_memory(first)
+    second_report = await syncer.sync_reviewed_memory(second)
+
+    assert first_id != second_id
+    assert first_report.indexed_ids == (first_id,)
+    assert second_report.indexed_ids == (second_id,)
+    assert await backend.list_ids() == sorted([first_id, second_id])
+
+
+@pytest.mark.asyncio
+async def test_sync_indexes_dotted_session_and_profile_as_distinct_documents() -> None:
+    backend, syncer = _syncer()
+    left = ReviewedMemoryRecord(
+        candidate=_candidate(
+            "memory-auth",
+            session_id="session.one",
+            profile="local",
+        ),
+        status="accepted",
+    )
+    right = ReviewedMemoryRecord(
+        candidate=_candidate(
+            "memory-auth",
+            session_id="session",
+            profile="one.local",
+        ),
+        status="accepted",
+    )
+    left_id = _reviewed_memory_doc_id(left)
+    right_id = _reviewed_memory_doc_id(right)
+
+    left_report = await syncer.sync_reviewed_memory(left)
+    right_report = await syncer.sync_reviewed_memory(right)
+
+    assert left_id != right_id
+    assert left_report.indexed_ids == (left_id,)
+    assert right_report.indexed_ids == (right_id,)
+    assert await backend.list_ids() == sorted([left_id, right_id])
 
 
 @pytest.mark.asyncio
@@ -133,13 +193,14 @@ async def test_full_rebuild_is_idempotent() -> None:
         candidate=_candidate("memory-auth", title="Accepted auth", summary="JWT rule"),
         status="accepted",
     )
+    memory_id = _reviewed_memory_doc_id(memory)
     await syncer.sync_topic(stale)
 
     first = await syncer.rebuild([topic], [memory])
     second = await syncer.rebuild([topic], [memory])
 
     expected_ids = (
-        "accepted-memory:memory-auth:accepted",
+        memory_id,
         "topic-summary:topic-auth:2-9",
     )
     assert first.indexed_ids == expected_ids
@@ -184,6 +245,7 @@ async def test_manual_rebuild_startup_and_event_triggers_share_sync_contract() -
         candidate=_candidate("memory-auth", title="Accepted auth", summary="JWT rule"),
         status="accepted",
     )
+    memory_id = _reviewed_memory_doc_id(memory)
 
     rebuild_report = await rebuild_syncer.rebuild([topic], [memory])
     startup_report = await startup_syncer.reconcile_startup([topic], [memory])
@@ -191,13 +253,13 @@ async def test_manual_rebuild_startup_and_event_triggers_share_sync_contract() -
     memory_report = await event_syncer.sync_reviewed_memory(memory)
 
     expected_ids = (
-        "accepted-memory:memory-auth:accepted",
+        memory_id,
         "topic-summary:topic-auth:2-9",
     )
     assert rebuild_report.indexed_ids == expected_ids
     assert startup_report.indexed_ids == expected_ids
     assert topic_report.indexed_ids == ("topic-summary:topic-auth:2-9",)
-    assert memory_report.indexed_ids == ("accepted-memory:memory-auth:accepted",)
+    assert memory_report.indexed_ids == (memory_id,)
     assert await _snapshot(rebuild_backend) == await _snapshot(startup_backend)
     assert await _snapshot(event_backend) == await _snapshot(rebuild_backend)
 
@@ -237,16 +299,104 @@ async def test_event_sync_deletes_unaccepted_reviewed_memory_scope() -> None:
     accepted = ReviewedMemoryRecord(
         candidate=_candidate("memory-auth"), status="accepted"
     )
+    accepted_id = _reviewed_memory_doc_id(accepted)
     await syncer.sync_reviewed_memory(accepted)
 
     report = await syncer.sync_reviewed_memory(
         ReviewedMemoryRecord(candidate=_candidate("memory-auth"), status="rejected")
     )
 
-    assert report.deleted_ids == ("accepted-memory:memory-auth:accepted",)
+    assert report.deleted_ids == (accepted_id,)
     assert report.deleted_count == 1
     assert report.skipped_count == 1
     assert await backend.list_ids() == []
+
+
+@pytest.mark.asyncio
+async def test_reviewed_memory_delete_scope_does_not_cross_session() -> None:
+    backend, syncer = _syncer()
+    await backend.ensure_schema(FAKE_SEMANTIC_INDEX_SCHEMA)
+    other_record = ReviewedMemoryRecord(
+        candidate=_candidate(
+            "memory-auth",
+            session_id="other-session",
+            tape_id="other-tape",
+        ),
+        status="accepted",
+    )
+    other_id = _reviewed_memory_doc_id(other_record)
+    await backend.upsert(
+        other_id,
+        "Other session auth memory",
+        {
+            "source_refs": ("memory:memory-auth",),
+            "session_id": "other-session",
+            "tape_id": "other-tape",
+            "profile": "local",
+        },
+    )
+
+    report = await syncer.sync_reviewed_memory(
+        ReviewedMemoryRecord(candidate=_candidate("memory-auth"), status="rejected")
+    )
+
+    assert report.deleted_ids == ()
+    assert report.deleted_count == 0
+    assert report.skipped_count == 1
+    assert await backend.list_ids() == [other_id]
+
+
+@pytest.mark.asyncio
+async def test_reviewed_memory_without_session_scope_has_no_index_side_effects() -> (
+    None
+):
+    backend, syncer = _syncer()
+    await backend.ensure_schema(FAKE_SEMANTIC_INDEX_SCHEMA)
+    scoped_record = ReviewedMemoryRecord(
+        candidate=_candidate("memory-auth"),
+        status="accepted",
+    )
+    scoped_id = _reviewed_memory_doc_id(scoped_record)
+    await backend.upsert(
+        scoped_id,
+        "Existing scoped memory",
+        {
+            "source_refs": ("memory:memory-auth",),
+            "session_id": "session-1",
+            "tape_id": "tape-1",
+            "profile": "local",
+        },
+    )
+    legacy_candidate = TopicDerivedMemoryCandidate(
+        kind="fact",
+        title="Legacy memory",
+        summary="Legacy memory summary",
+        scope="topic:topic-auth",
+        tags=("auth",),
+        confidence=0.8,
+        provenance={
+            "topic_id": "topic-auth",
+            "topic_status": "finalized",
+            "topic_kind": "coding",
+            "source_entry_ranges": [
+                {"topic_id": "topic-auth", "start_seq": 2, "end_seq": 9}
+            ],
+        },
+        candidate_id="memory-auth",
+    )
+
+    accepted = await syncer.sync_reviewed_memory(
+        ReviewedMemoryRecord(candidate=legacy_candidate, status="accepted")
+    )
+    rejected = await syncer.sync_reviewed_memory(
+        ReviewedMemoryRecord(candidate=legacy_candidate, status="rejected")
+    )
+
+    assert accepted.indexed_ids == ()
+    assert accepted.skipped_count == 1
+    assert rejected.deleted_ids == ()
+    assert rejected.skipped_count == 1
+    assert await backend.list_ids() == [scoped_id]
 
 
 @pytest.mark.asyncio
@@ -258,17 +408,18 @@ async def test_review_sync_service_accept_indexes_accepted_memory() -> None:
     service = SemanticMemoryReviewSyncService(review_store=store, syncer=syncer)
 
     record = await service.accept_candidate("memory-auth", reason="Useful")
+    expected_id = _reviewed_memory_doc_id(record)
 
     assert record.status == "accepted"
     assert record.review_reason == "Useful"
     assert store.load_memory("memory-auth") == record
-    assert await backend.list_ids() == ["accepted-memory:memory-auth:accepted"]
+    assert await backend.list_ids() == [expected_id]
     hits = await backend.search("JWT", limit=5)
     assert [
         (hit.memory_id, hit.text, hit.metadata["memory_status"]) for hit in hits
     ] == [
         (
-            "accepted-memory:memory-auth:accepted",
+            expected_id,
             "Auth memory\n\nUse JWT",
             "accepted",
         )
@@ -483,6 +634,9 @@ def _candidate(
     *,
     title: str = "Auth convention",
     summary: str = "JWT middleware convention",
+    session_id: str = "session-1",
+    tape_id: str = "tape-1",
+    profile: str = "local",
 ) -> TopicDerivedMemoryCandidate:
     return TopicDerivedMemoryCandidate(
         kind="fact",
@@ -493,14 +647,21 @@ def _candidate(
         confidence=0.8,
         provenance={
             "topic_id": "topic-auth",
+            "session_id": session_id,
+            "tape_id": tape_id,
             "topic_status": "finalized",
             "topic_kind": "coding",
+            "profile": profile,
             "source_entry_ranges": [
                 {"topic_id": "topic-auth", "start_seq": 2, "end_seq": 9}
             ],
         },
         candidate_id=candidate_id,
     )
+
+
+def _reviewed_memory_doc_id(record: ReviewedMemoryRecord) -> str:
+    return str(SemanticDocId.for_reviewed_memory(record))
 
 
 async def _snapshot(

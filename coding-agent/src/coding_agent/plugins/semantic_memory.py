@@ -7,7 +7,12 @@ import inspect
 from typing import Any, Callable
 
 from agentkit.tape.tape import Tape
-from coding_agent.topics.memory import MemoryReviewStore
+from agentkit.runtime.pipeline import PipelineContext
+from coding_agent.topics.memory import (
+    MemoryReviewStore,
+    ReviewedMemoryRecord,
+    memory_candidate_session_id,
+)
 from coding_agent.topics.range_index import TopicRangeIndex, require_recall_safe_text
 from coding_agent.topics.recall_context import (
     TopicRecallPlanner,
@@ -58,7 +63,6 @@ class SemanticMemoryPlugin:
     async def build_context(
         self, tape: Tape | None = None, **kwargs: Any
     ) -> list[dict[str, object]]:
-        del kwargs
         if not self._read_enabled:
             return []
         if tape is None:
@@ -70,18 +74,25 @@ class SemanticMemoryPlugin:
         if not _is_recall_safe_query(user_message):
             return []
 
+        session_id = _session_id_from_context(kwargs.get("ctx"))
         planner = SemanticRecallPlanner(
             topic_planner=TopicRecallPlanner(
                 topic_index=self._topic_index,
-                accepted_memories=self._memory_review_store.accepted_memories(),
+                accepted_memories=_accepted_memories_for_context(
+                    self._memory_review_store,
+                    session_id=session_id,
+                ),
             ),
             semantic_index=self._semantic_index,
             memory_review_store=self._memory_review_store,
             topic_store=self._topic_store,
         )
+        source_session_id = session_id or "semantic-memory-legacy-context"
         plan = await planner.plan(
             TopicRecallPlannerInput(
-                source_topic=_source_topic_from_tape(tape),
+                source_topic=_source_topic_from_tape(
+                    tape, session_id=source_session_id
+                ),
                 text=user_message,
                 limit=self._limit,
                 enabled=self._read_enabled,
@@ -131,11 +142,29 @@ def _validate_topic_index(topic_index: TopicRangeIndex | None) -> TopicRangeInde
     return topic_index
 
 
-def _source_topic_from_tape(tape: Tape) -> TopicRecord:
+def _session_id_from_context(ctx: object) -> str | None:
+    if isinstance(ctx, PipelineContext) and ctx.session_id:
+        return ctx.session_id
+    return None
+
+
+def _accepted_memories_for_context(
+    review_store: MemoryReviewStore,
+    *,
+    session_id: str | None,
+) -> tuple[ReviewedMemoryRecord, ...]:
+    return tuple(
+        record
+        for record in review_store.accepted_memories()
+        if memory_candidate_session_id(record.candidate) == session_id
+    )
+
+
+def _source_topic_from_tape(tape: Tape, *, session_id: str) -> TopicRecord:
     return TopicRecord(
         topic_id="semantic-memory-current-turn",
         tape_id=tape.tape_id,
-        session_id="semantic-memory-build-context",
+        session_id=session_id,
         kind="coding",
         status="open",
         title="Current turn",

@@ -62,6 +62,58 @@ def test_memory_review_store_persists_records_as_jsonl(tmp_path) -> None:
     assert loaded.accepted_memories() == (accepted,)
 
 
+def test_memory_review_store_keys_scoped_candidates_by_session() -> None:
+    store = MemoryReviewStore()
+    session_one = _candidate(
+        "Session one memory",
+        session_id="session-one",
+        candidate_id="memory-shared",
+    )
+    session_two = _candidate(
+        "Session two memory",
+        session_id="session-two",
+        candidate_id="memory-shared",
+    )
+
+    first = store.add_candidate(session_one)
+    second = store.add_candidate(session_two)
+    accepted = store.accept_candidate_for_session(
+        "session-one",
+        "memory-shared",
+        reason="Useful in session one",
+    )
+
+    assert first != second
+    assert accepted.status == "accepted"
+    assert store.load_memory_for_session("session-one", "memory-shared") == accepted
+    assert store.load_memory_for_session("session-two", "memory-shared") == second
+    assert store.load_memory("memory-shared") is None
+
+
+def test_memory_review_store_scoped_key_does_not_collide_on_dotted_values() -> None:
+    store = MemoryReviewStore()
+    left = _candidate(
+        "Left memory",
+        session_id="session.one",
+        candidate_id="memory",
+    )
+    right = _candidate(
+        "Right memory",
+        session_id="session",
+        candidate_id="one.memory",
+    )
+
+    left_record = store.add_candidate(left)
+    right_record = store.add_candidate(right)
+
+    assert store.load_memory_for_session("session.one", "memory") == left_record
+    assert store.load_memory_for_session("session", "one.memory") == right_record
+    records = store.list_memories(status="candidate")
+    assert len(records) == 2
+    assert left_record in records
+    assert right_record in records
+
+
 def test_memory_review_reject_and_archive_are_idempotent() -> None:
     store = MemoryReviewStore()
     rejected_candidate = _candidate("memory-rejected")
@@ -139,7 +191,27 @@ def test_memory_review_rejects_raw_review_reason() -> None:
         store.accept_candidate(candidate.candidate_id or "", reason="secret: value")
 
 
-def _candidate(title: str) -> TopicDerivedMemoryCandidate:
+def _candidate(
+    title: str,
+    *,
+    session_id: str | None = None,
+    candidate_id: str | None = None,
+) -> TopicDerivedMemoryCandidate:
+    provenance = {
+        "topic_id": "topic-one",
+        "topic_status": "finalized",
+        "topic_kind": "coding",
+        "source_entry_ranges": [
+            {"topic_id": "topic-one", "start_seq": 2, "end_seq": 9}
+        ],
+        "task_id": "bee-task-one",
+        "run_id": "run-one",
+        "report_refs": ["report.md"],
+        "evidence_refs": ["evidence/executor.md"],
+        "created_at": datetime(2026, 5, 23, 9, 0, tzinfo=UTC).isoformat(),
+    }
+    if session_id is not None:
+        provenance["session_id"] = session_id
     return TopicDerivedMemoryCandidate(
         kind="fact",
         title=title,
@@ -147,17 +219,6 @@ def _candidate(title: str) -> TopicDerivedMemoryCandidate:
         scope="topic:topic-one",
         tags=("auth",),
         confidence=0.7,
-        provenance={
-            "topic_id": "topic-one",
-            "topic_status": "finalized",
-            "topic_kind": "coding",
-            "source_entry_ranges": [
-                {"topic_id": "topic-one", "start_seq": 2, "end_seq": 9}
-            ],
-            "task_id": "bee-task-one",
-            "run_id": "run-one",
-            "report_refs": ["report.md"],
-            "evidence_refs": ["evidence/executor.md"],
-            "created_at": datetime(2026, 5, 23, 9, 0, tzinfo=UTC).isoformat(),
-        },
+        provenance=provenance,
+        candidate_id=candidate_id,
     )

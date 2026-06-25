@@ -24,6 +24,7 @@ from coding_agent.topics.store import JSONObject, JSONValue, TopicRecord
 MEMORY_CANDIDATE_STATUS = "candidate"
 MEMORY_REFERENCE_MODE = "reference_only"
 MEMORY_REVIEW_STATUSES = frozenset({"candidate", "accepted", "rejected", "archived"})
+type ReviewRecordKey = str | tuple[str, str]
 
 _ALLOWED_KINDS = frozenset(
     {
@@ -116,7 +117,7 @@ class MemoryReviewStore:
     ) -> None:
         self._path = Path(path) if path is not None else None
         self._candidate_writes_enabled = candidate_writes_enabled
-        self._records: dict[str, ReviewedMemoryRecord] = {}
+        self._records: dict[ReviewRecordKey, ReviewedMemoryRecord] = {}
         self.load()
 
     @property
@@ -132,7 +133,7 @@ class MemoryReviewStore:
             return
         if not self._path.exists():
             return
-        records: dict[str, ReviewedMemoryRecord] = {}
+        records: dict[ReviewRecordKey, ReviewedMemoryRecord] = {}
         with self._path.open("r", encoding="utf-8") as file:
             for line_number, line in enumerate(file, start=1):
                 stripped = line.strip()
@@ -150,7 +151,7 @@ class MemoryReviewStore:
                         f"memory review record at line {line_number} must be an object"
                     )
                 record = _reviewed_memory_record_from_dict(payload)
-                records[_candidate_id_value(record.candidate)] = record
+                records[_review_record_key(record.candidate)] = record
         self._records = records
 
     def save(self) -> None:
@@ -184,12 +185,12 @@ class MemoryReviewStore:
     ) -> ReviewedMemoryRecord:
         if not self._candidate_writes_enabled:
             return ReviewedMemoryRecord(candidate=candidate, status="candidate")
-        candidate_id = _candidate_id_value(candidate)
-        existing = self._records.get(candidate_id)
+        record_key = _review_record_key(candidate)
+        existing = self._records.get(record_key)
         if existing is not None:
             return existing
         record = ReviewedMemoryRecord(candidate=candidate, status="candidate")
-        self._records[candidate_id] = record
+        self._records[record_key] = record
         self.save()
         return record
 
@@ -204,13 +205,30 @@ class MemoryReviewStore:
         return tuple(
             sorted(
                 records,
-                key=lambda record: _candidate_id_value(record.candidate),
+                key=lambda record: _review_record_sort_key(record.candidate),
             )
         )
 
     def load_memory(self, candidate_id: str) -> ReviewedMemoryRecord | None:
         _require_safe_scope(candidate_id)
-        return self._records.get(candidate_id)
+        record = self._records.get(candidate_id)
+        if record is not None:
+            return record
+        matches = [
+            record
+            for record in self._records.values()
+            if record.candidate.candidate_id == candidate_id
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        return None
+
+    def load_memory_for_session(
+        self,
+        session_id: str,
+        candidate_id: str,
+    ) -> ReviewedMemoryRecord | None:
+        return self._records.get(_review_key_for_session(session_id, candidate_id))
 
     def accept_candidate(
         self,
@@ -220,6 +238,20 @@ class MemoryReviewStore:
     ) -> ReviewedMemoryRecord:
         return self._transition(candidate_id, "accepted", reason=reason)
 
+    def accept_candidate_for_session(
+        self,
+        session_id: str,
+        candidate_id: str,
+        *,
+        reason: str | None = None,
+    ) -> ReviewedMemoryRecord:
+        return self._transition(
+            candidate_id,
+            "accepted",
+            reason=reason,
+            session_id=session_id,
+        )
+
     def reject_candidate(
         self,
         candidate_id: str,
@@ -227,6 +259,20 @@ class MemoryReviewStore:
         reason: str | None = None,
     ) -> ReviewedMemoryRecord:
         return self._transition(candidate_id, "rejected", reason=reason)
+
+    def reject_candidate_for_session(
+        self,
+        session_id: str,
+        candidate_id: str,
+        *,
+        reason: str | None = None,
+    ) -> ReviewedMemoryRecord:
+        return self._transition(
+            candidate_id,
+            "rejected",
+            reason=reason,
+            session_id=session_id,
+        )
 
     def archive_candidate(
         self,
@@ -236,15 +282,37 @@ class MemoryReviewStore:
     ) -> ReviewedMemoryRecord:
         return self._transition(candidate_id, "archived", reason=reason)
 
+    def archive_candidate_for_session(
+        self,
+        session_id: str,
+        candidate_id: str,
+        *,
+        reason: str | None = None,
+    ) -> ReviewedMemoryRecord:
+        return self._transition(
+            candidate_id,
+            "archived",
+            reason=reason,
+            session_id=session_id,
+        )
+
     def _transition(
         self,
         candidate_id: str,
         status: str,
         *,
         reason: str | None,
+        session_id: str | None = None,
     ) -> ReviewedMemoryRecord:
         _require_safe_scope(candidate_id)
-        record = self._records.get(candidate_id)
+        if session_id is None:
+            record_key = candidate_id
+            record = self.load_memory(candidate_id)
+            if record is not None:
+                record_key = _review_record_key(record.candidate)
+        else:
+            record_key = _review_key_for_session(session_id, candidate_id)
+            record = self._records.get(record_key)
         if record is None:
             raise KeyError(f"memory candidate not found: {candidate_id}")
         if record.status == status:
@@ -258,12 +326,57 @@ class MemoryReviewStore:
             status=status,
             review_reason=reason,
         )
-        self._records[candidate_id] = updated
+        self._records[record_key] = updated
         self.save()
         return updated
 
     def accepted_memories(self) -> tuple[ReviewedMemoryRecord, ...]:
         return self.list_memories(status="accepted")
+
+
+def memory_candidate_session_id(candidate: TopicDerivedMemoryCandidate) -> str | None:
+    return _optional_str(candidate.provenance, "session_id")
+
+
+def memory_candidate_tape_id(candidate: TopicDerivedMemoryCandidate) -> str | None:
+    return _optional_str(candidate.provenance, "tape_id")
+
+
+def memory_candidate_profile(candidate: TopicDerivedMemoryCandidate) -> str | None:
+    return (
+        _optional_str(candidate.provenance, "profile")
+        or _optional_str(candidate.provenance, "profile_id")
+        or _optional_str(candidate.provenance, "domain_profile")
+    )
+
+
+def memory_candidate_belongs_to_session(
+    candidate: TopicDerivedMemoryCandidate,
+    *,
+    session_id: str,
+) -> bool:
+    return memory_candidate_session_id(candidate) == session_id
+
+
+def _review_record_key(candidate: TopicDerivedMemoryCandidate) -> ReviewRecordKey:
+    candidate_id = _candidate_id_value(candidate)
+    session_id = memory_candidate_session_id(candidate)
+    if session_id is None:
+        return candidate_id
+    return _review_key_for_session(session_id, candidate_id)
+
+
+def _review_key_for_session(session_id: str, candidate_id: str) -> tuple[str, str]:
+    _require_safe_scope(session_id)
+    _require_safe_scope(candidate_id)
+    return (session_id, candidate_id)
+
+
+def _review_record_sort_key(candidate: TopicDerivedMemoryCandidate) -> tuple[str, ...]:
+    record_key = _review_record_key(candidate)
+    if isinstance(record_key, tuple):
+        return ("session", *record_key)
+    return ("legacy", record_key)
 
 
 def accepted_memory_context_pack(
@@ -469,6 +582,8 @@ def _provenance(
 ) -> JSONObject:
     payload: JSONObject = {
         "topic_id": topic.topic_id,
+        "session_id": topic.session_id,
+        "tape_id": topic.tape_id,
         "topic_status": topic.status,
         "topic_kind": topic.kind,
         "source_entry_ranges": [
@@ -476,6 +591,9 @@ def _provenance(
             for entry_range in (source_ranges or (topic_entry_range(topic),))
         ],
     }
+    profile = _topic_profile(topic)
+    if profile is not None:
+        payload["profile"] = profile
     if task_id is not None:
         _require_safe_scope(task_id)
         payload["task_id"] = task_id
@@ -570,11 +688,33 @@ def _provenance_topic_id(provenance: JSONObject) -> str:
     return topic_id
 
 
+def _topic_profile(topic: TopicRecord) -> str | None:
+    profile = topic.metadata.get("profile", topic.metadata.get("profile_id"))
+    if not isinstance(profile, str) or not profile:
+        return None
+    _require_safe_scope(profile)
+    return profile
+
+
 def _require_provenance(provenance: JSONObject) -> None:
     topic_id = provenance.get("topic_id")
     if not isinstance(topic_id, str) or not topic_id:
         raise ValueError("memory candidate provenance requires topic_id")
     _require_safe_scope(topic_id)
+    for key in (
+        "session_id",
+        "tape_id",
+        "profile",
+        "profile_id",
+        "domain_profile",
+    ):
+        value = provenance.get(key)
+        if value is not None:
+            if not isinstance(value, str) or not value:
+                raise ValueError(
+                    f"memory candidate provenance {key} must be a non-empty string"
+                )
+            _require_safe_scope(value)
     ranges = provenance.get("source_entry_ranges")
     if not isinstance(ranges, list) or not ranges:
         raise ValueError("memory candidate provenance requires source_entry_ranges")

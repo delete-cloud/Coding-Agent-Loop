@@ -174,6 +174,34 @@ async def test_accepted_memory_hit_is_rehydrated_and_other_statuses_are_dropped(
 
 
 @pytest.mark.asyncio
+async def test_scoped_memory_hit_does_not_fallback_to_other_session_record() -> None:
+    other_session_memory = _record(
+        "memory-other-session",
+        status="accepted",
+        provenance={
+            "session_id": "other-session",
+            "tape_id": "other-tape",
+            "profile": "local",
+        },
+    )
+    planner = _planner(
+        semantic_hits=(
+            _hit(
+                str(SemanticDocId.for_reviewed_memory(other_session_memory)),
+                source_refs=("memory:memory-other-session",),
+            ),
+        ),
+        memories=(other_session_memory,),
+    )
+
+    plan = await planner.plan(
+        TopicRecallPlannerInput(source_topic=_source_topic(), text="jwt middleware")
+    )
+
+    assert plan.accepted_memories == ()
+
+
+@pytest.mark.asyncio
 async def test_semantic_recall_applies_topic_and_memory_filters() -> None:
     matching_topic = _topic(
         "topic-match",
@@ -312,9 +340,7 @@ async def test_semantic_refill_does_not_expand_beyond_configured_limit() -> None
         )
     )
 
-    assert [result.topic_id for result in plan.topic_results] == [
-        "topic-deterministic"
-    ]
+    assert [result.topic_id for result in plan.topic_results] == ["topic-deterministic"]
 
 
 def _planner(
