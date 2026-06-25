@@ -230,10 +230,24 @@ def _review_candidate(
     *,
     title: str = "Auth convention",
     summary: str = "JWT middleware convention",
-    session_id: str = "memory-review-session",
-    tape_id: str = "memory-review-tape",
-    profile: str = "local",
+    session_id: str | None = "memory-review-session",
+    tape_id: str | None = "memory-review-tape",
+    profile: str | None = "local",
 ) -> TopicDerivedMemoryCandidate:
+    provenance: dict[str, object] = {
+        "topic_id": "topic-auth",
+        "topic_status": "finalized",
+        "topic_kind": "coding",
+        "source_entry_ranges": [
+            {"topic_id": "topic-auth", "start_seq": 2, "end_seq": 9}
+        ],
+    }
+    if session_id is not None:
+        provenance["session_id"] = session_id
+    if tape_id is not None:
+        provenance["tape_id"] = tape_id
+    if profile is not None:
+        provenance["profile"] = profile
     return TopicDerivedMemoryCandidate(
         kind="fact",
         title=title,
@@ -241,17 +255,7 @@ def _review_candidate(
         scope="topic:topic-auth",
         tags=("auth", "jwt"),
         confidence=0.8,
-        provenance={
-            "topic_id": "topic-auth",
-            "session_id": session_id,
-            "tape_id": tape_id,
-            "topic_status": "finalized",
-            "topic_kind": "coding",
-            "profile": profile,
-            "source_entry_ranges": [
-                {"topic_id": "topic-auth", "start_seq": 2, "end_seq": 9}
-            ],
-        },
+        provenance=provenance,
         candidate_id=candidate_id,
     )
 
@@ -2701,6 +2705,55 @@ class TestMemoryReviewTransitions:
                 expected_id,
                 "Auth memory\n\nUse JWT middleware",
                 "memory-auth",
+            )
+        ]
+
+    async def test_accept_legacy_candidate_without_session_scope(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config, review_store, backend, _syncer = _semantic_review_runtime_config()
+        candidate = _review_candidate(
+            "memory-legacy",
+            title="Legacy auth memory",
+            summary="Legacy JWT middleware convention",
+            session_id=None,
+            tape_id=None,
+            profile=None,
+        )
+        review_store.add_candidate(candidate)
+        _install_memory_review_runtime(
+            monkeypatch,
+            "memory-review-session",
+            _runtime_ctx(config),
+        )
+
+        response = await client.post(
+            "/sessions/memory-review-session/memory/reviews/memory-legacy",
+            json={"status": "accepted", "reason": "Migrated legacy review"},
+        )
+
+        assert response.status_code == 200
+        stored = review_store.load_memory("memory-legacy")
+        assert stored is not None
+        assert stored.status == "accepted"
+        assert stored.review_reason == "Migrated legacy review"
+        expected_id = _reviewed_memory_doc_id(stored)
+        assert await backend.list_ids() == [expected_id]
+        hits = await backend.search("JWT", limit=5)
+        assert [(hit.memory_id, hit.metadata) for hit in hits] == [
+            (
+                expected_id,
+                {
+                    "kind": "accepted_reviewed_memory",
+                    "memory_kind": "fact",
+                    "candidate_id": "memory-legacy",
+                    "memory_status": "accepted",
+                    "scope": "topic:topic-auth",
+                    "tags": ["auth", "jwt"],
+                    "source_refs": ["memory:memory-legacy"],
+                },
             )
         ]
 

@@ -347,9 +347,7 @@ async def test_reviewed_memory_delete_scope_does_not_cross_session() -> None:
 
 
 @pytest.mark.asyncio
-async def test_reviewed_memory_without_session_scope_has_no_index_side_effects() -> (
-    None
-):
+async def test_reviewed_memory_without_session_scope_indexes_legacy_document() -> None:
     backend, syncer = _syncer()
     await backend.ensure_schema(FAKE_SEMANTIC_INDEX_SCHEMA)
     scoped_record = ReviewedMemoryRecord(
@@ -384,17 +382,18 @@ async def test_reviewed_memory_without_session_scope_has_no_index_side_effects()
         },
         candidate_id="memory-auth",
     )
+    legacy_record = ReviewedMemoryRecord(candidate=legacy_candidate, status="accepted")
+    legacy_id = _reviewed_memory_doc_id(legacy_record)
 
-    accepted = await syncer.sync_reviewed_memory(
-        ReviewedMemoryRecord(candidate=legacy_candidate, status="accepted")
-    )
+    accepted = await syncer.sync_reviewed_memory(legacy_record)
     rejected = await syncer.sync_reviewed_memory(
         ReviewedMemoryRecord(candidate=legacy_candidate, status="rejected")
     )
 
-    assert accepted.indexed_ids == ()
-    assert accepted.skipped_count == 1
-    assert rejected.deleted_ids == ()
+    assert accepted.indexed_ids == (legacy_id,)
+    assert accepted.indexed_count == 1
+    assert rejected.deleted_ids == (legacy_id,)
+    assert rejected.deleted_count == 1
     assert rejected.skipped_count == 1
     assert await backend.list_ids() == [scoped_id]
 

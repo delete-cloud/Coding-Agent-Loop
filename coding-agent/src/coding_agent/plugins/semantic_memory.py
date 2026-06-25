@@ -153,11 +153,12 @@ def _accepted_memories_for_context(
     *,
     session_id: str | None,
 ) -> tuple[ReviewedMemoryRecord, ...]:
-    return tuple(
-        record
-        for record in review_store.accepted_memories()
-        if memory_candidate_session_id(record.candidate) == session_id
-    )
+    records: list[ReviewedMemoryRecord] = []
+    for record in review_store.accepted_memories():
+        record_session_id = memory_candidate_session_id(record.candidate)
+        if record_session_id is None or record_session_id == session_id:
+            records.append(record)
+    return tuple(records)
 
 
 def _source_topic_from_tape(tape: Tape, *, session_id: str) -> TopicRecord:

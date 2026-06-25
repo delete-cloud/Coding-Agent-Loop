@@ -228,7 +228,15 @@ class MemoryReviewStore:
         session_id: str,
         candidate_id: str,
     ) -> ReviewedMemoryRecord | None:
-        return self._records.get(_review_key_for_session(session_id, candidate_id))
+        record = self._records.get(_review_key_for_session(session_id, candidate_id))
+        if record is not None:
+            return record
+        legacy_record = self._records.get(candidate_id)
+        if legacy_record is None:
+            return None
+        if memory_candidate_session_id(legacy_record.candidate) is not None:
+            return None
+        return legacy_record
 
     def accept_candidate(
         self,
@@ -313,6 +321,14 @@ class MemoryReviewStore:
         else:
             record_key = _review_key_for_session(session_id, candidate_id)
             record = self._records.get(record_key)
+            if record is None:
+                legacy_record = self._records.get(candidate_id)
+                if (
+                    legacy_record is not None
+                    and memory_candidate_session_id(legacy_record.candidate) is None
+                ):
+                    record_key = candidate_id
+                    record = legacy_record
         if record is None:
             raise KeyError(f"memory candidate not found: {candidate_id}")
         if record.status == status:

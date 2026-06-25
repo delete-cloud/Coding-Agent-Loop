@@ -90,6 +90,25 @@ def test_memory_review_store_keys_scoped_candidates_by_session() -> None:
     assert store.load_memory("memory-shared") is None
 
 
+def test_memory_review_store_session_lookup_falls_back_to_legacy_record() -> None:
+    store = MemoryReviewStore()
+    legacy = _candidate("Legacy memory", candidate_id="memory-legacy")
+
+    record = store.add_candidate(legacy)
+    assert store.load_memory_for_session("session-current", "memory-legacy") == record
+
+    accepted = store.accept_candidate_for_session(
+        "session-current",
+        "memory-legacy",
+        reason="Migrated legacy review",
+    )
+
+    assert store.load_memory_for_session("session-current", "memory-legacy") == accepted
+    assert accepted.status == "accepted"
+    assert accepted.review_reason == "Migrated legacy review"
+    assert store.load_memory("memory-legacy") == accepted
+
+
 def test_memory_review_store_scoped_key_does_not_collide_on_dotted_values() -> None:
     store = MemoryReviewStore()
     left = _candidate(

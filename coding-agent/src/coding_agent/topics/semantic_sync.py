@@ -20,6 +20,8 @@ from coding_agent.topics.semantic_backends import (
 )
 from coding_agent.topics.semantic_index import (
     SafeSemanticMemoryIndex,
+    SemanticDocId,
+    SemanticDocKind,
     SemanticMemoryDocument,
     SemanticSourceRef,
     semantic_document_from_reviewed_memory,
@@ -173,8 +175,7 @@ class SemanticMemorySyncer:
         await self.ensure_schema()
         document = self._document_from_reviewed_memory(record)
         if document is None:
-            scope = self._reviewed_memory_scope(record)
-            deleted_ids = await self._delete_scope(scope) if scope is not None else ()
+            deleted_ids = await self._delete_reviewed_memory_record(record)
             return SemanticSyncReport(
                 reviewed_memory_count=1,
                 skipped_count=1,
@@ -245,8 +246,6 @@ class SemanticMemorySyncer:
     ) -> SemanticMemoryDocument | None:
         if record.status != "accepted":
             return None
-        if memory_candidate_session_id(record.candidate) is None:
-            return None
         return semantic_document_from_reviewed_memory(record)
 
     async def _upsert_documents(
@@ -279,6 +278,20 @@ class SemanticMemorySyncer:
         await self._backend.delete_scope(scope)
         return tuple(sorted(existing_ids))
 
+    async def _delete_reviewed_memory_record(
+        self,
+        record: ReviewedMemoryRecord,
+    ) -> tuple[str, ...]:
+        scope = self._reviewed_memory_scope(record)
+        if scope is not None:
+            return await self._delete_scope(scope)
+        legacy_id = str(_legacy_reviewed_memory_document_id(record))
+        existing_ids = set(await self._backend.list_ids())
+        if legacy_id not in existing_ids:
+            return ()
+        await self._index.delete(legacy_id)
+        return (legacy_id,)
+
     def _topic_scope(self, topic: TopicRecord) -> SemanticBackendScope:
         return SemanticBackendScope.for_source_ref(
             SemanticSourceRef.for_topic(topic),
@@ -302,6 +315,17 @@ class SemanticMemorySyncer:
             session_id=session_id,
             profile=memory_candidate_profile(record.candidate),
         )
+
+
+def _legacy_reviewed_memory_document_id(record: ReviewedMemoryRecord) -> SemanticDocId:
+    candidate_id = record.candidate.candidate_id
+    if candidate_id is None:
+        raise ValueError("reviewed memory candidate is missing candidate_id")
+    return SemanticDocId(
+        kind=SemanticDocKind.ACCEPTED_REVIEWED_MEMORY,
+        source_id=candidate_id,
+        source_version="accepted",
+    )
 
 
 def _profile_from_topic(topic: TopicRecord) -> str | None:
