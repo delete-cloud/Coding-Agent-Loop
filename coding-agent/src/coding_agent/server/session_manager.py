@@ -1845,7 +1845,7 @@ class SessionManager:
         return create_session_store(
             backend=backend,
             dsn=dsn if isinstance(dsn, str) else None,
-            pg_pool=self._get_pg_pool() if backend == "pg" else None,
+            pg_pool=None,
             file_path=session_path if isinstance(session_path, str) else None,
         )
 

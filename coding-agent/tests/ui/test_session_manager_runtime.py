@@ -151,17 +151,22 @@ def test_selected_topic_store_uses_normalized_local_bundle_path(
 
 
 def test_selected_topic_store_returns_pg_topic_store_for_pg_durable_mode() -> None:
-    manager = SessionManager(
-        storage_config={
-            "http_session_backend": "pg",
-            "tape_backend": "pg",
-            "checkpoint_backend": "pg",
-            "runtime_backend": "pg",
-        },
-        pg_pool=object(),
-    )
+    with patch(
+        "coding_agent.server.session_manager.create_session_store"
+    ) as create_store:
+        create_store.return_value = InMemorySessionStore()
+        manager = SessionManager(
+            storage_config={
+                "http_session_backend": "pg",
+                "tape_backend": "pg",
+                "checkpoint_backend": "pg",
+                "runtime_backend": "pg",
+                "dsn": "postgresql://example",
+            },
+            pg_pool=object(),
+        )
 
-    assert isinstance(manager.selected_topic_store(), PGTopicStore)
+        assert isinstance(manager.selected_topic_store(), PGTopicStore)
 
 
 def test_selected_topic_store_is_none_for_custom_or_mixed_storage(
