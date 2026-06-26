@@ -1016,7 +1016,7 @@ async def test_sqlite_local_durable_store_restores_checkpoint_state_atomically(
             owner=None,
             topic_initial_seq=0,
             topic_finalized_seq=None,
-            created_at=created_at,
+            created_at=created_at - timedelta(milliseconds=3),
             metadata={},
         ),
     )
@@ -1041,7 +1041,7 @@ async def test_sqlite_local_durable_store_restores_checkpoint_state_atomically(
             owner=None,
             topic_initial_seq=0,
             topic_finalized_seq=None,
-            created_at=created_at + timedelta(milliseconds=1),
+            created_at=created_at - timedelta(milliseconds=2),
             metadata={},
         ),
     )
@@ -1052,6 +1052,31 @@ async def test_sqlite_local_durable_store_restores_checkpoint_state_atomically(
         topic_finalized_seq=0,
         finalized_at=created_at,
         metadata={},
+    )
+    await store.create_topic(
+        owner,
+        TopicRecord(
+            topic_id="topic-reopen",
+            tape_id="tape-a",
+            session_id="session-a",
+            kind="conversation",
+            status="open",
+            title="reopen",
+            summary=None,
+            owner=None,
+            topic_initial_seq=0,
+            topic_finalized_seq=None,
+            created_at=created_at - timedelta(milliseconds=1),
+            metadata={},
+        ),
+    )
+    await store.finalize_topic(
+        owner,
+        "topic-reopen",
+        summary="closed after checkpoint",
+        topic_finalized_seq=1,
+        finalized_at=created_at + timedelta(seconds=1),
+        metadata={"after": True},
     )
     await store.create_topic(
         owner,
@@ -1201,10 +1226,13 @@ async def test_sqlite_local_durable_store_restores_checkpoint_state_atomically(
     assert await store.load_checkpoint("checkpoint-drop") is None
     topic_reader = SQLiteTopicStore(tmp_path / "local.sqlite3")
     restored_topics = await topic_reader.list_topics(tape_id="tape-a")
-    assert [topic.topic_id for topic in restored_topics] == [
-        "topic-keep",
-        "topic-peer",
-    ]
+    topics_by_id = {topic.topic_id: topic for topic in restored_topics}
+    assert set(topics_by_id) == {"topic-keep", "topic-peer", "topic-reopen"}
+    assert topics_by_id["topic-reopen"].status == "open"
+    assert topics_by_id["topic-reopen"].summary is None
+    assert topics_by_id["topic-reopen"].topic_finalized_seq is None
+    assert topics_by_id["topic-reopen"].finalized_at is None
+    assert topics_by_id["topic-reopen"].metadata == {}
     assert [
         (anchor.seq, anchor.anchor_type)
         for anchor in await topic_reader.list_topic_anchors("topic-keep")

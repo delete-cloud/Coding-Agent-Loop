@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -149,7 +150,7 @@ async def test_sqlite_topic_store_enforces_open_topic_and_parent_constraints(
 
     with pytest.raises(sqlite3.IntegrityError):
         await sqlite_store.create_topic(duplicate_open)
-    with pytest.raises(sqlite3.IntegrityError):
+    with pytest.raises(KeyError, match="topic not found for anchor: missing"):
         await sqlite_store.record_topic_anchor(
             TopicAnchorRecord(
                 topic_id="missing",
@@ -217,6 +218,34 @@ async def test_sqlite_topic_store_records_children_and_costs(
     assert first_cost.total_tokens == 10
     assert second_cost.total_tokens == 17
     assert second_cost.run_count == 2
+
+
+@pytest.mark.asyncio
+async def test_sqlite_topic_store_read_methods_open_connections_off_event_loop(
+    sqlite_store: SQLiteTopicStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await sqlite_store.create_topic(_open_topic("topic-1"))
+
+    event_loop_thread = threading.get_ident()
+    connect_threads: list[int] = []
+    original_connect = sqlite_store._connect
+
+    def tracked_connect() -> sqlite3.Connection:
+        connect_threads.append(threading.get_ident())
+        return original_connect()
+
+    monkeypatch.setattr(sqlite_store, "_connect", tracked_connect)
+
+    await sqlite_store.load_topic("topic-1")
+    await sqlite_store.list_topics(session_id="session-1")
+    await sqlite_store.find_open_topic(session_id="session-1", tape_id="tape-1")
+    await sqlite_store.list_topic_anchors("topic-1")
+    await sqlite_store.list_recall_links("topic-1")
+    await sqlite_store.load_topic_cost("topic-1")
+
+    assert connect_threads
+    assert all(thread_id != event_loop_thread for thread_id in connect_threads)
 
 
 @pytest.mark.asyncio

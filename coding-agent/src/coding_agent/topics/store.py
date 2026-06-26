@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 import threading
@@ -297,6 +298,9 @@ class PGTopicStore:
     RETURNING *
     """
     _SELECT_TOPIC_SQL: Final[str] = "SELECT * FROM topics WHERE topic_id = $1"
+    _SELECT_TOPIC_TAPE_SQL: Final[str] = (
+        "SELECT tape_id FROM topics WHERE topic_id = $1"
+    )
     _LIST_TOPICS_SQL: Final[str] = """
     SELECT * FROM topics
     WHERE ($1::text IS NULL OR session_id = $1)
@@ -560,6 +564,11 @@ class PGTopicStore:
         record: TopicAnchorRecord,
     ) -> TopicAnchorRecord:
         pool = await self._ensure_schema()
+        topic_row = await pool.fetchrow(self._SELECT_TOPIC_TAPE_SQL, record.topic_id)
+        if topic_row is None:
+            raise KeyError(f"topic not found for anchor: {record.topic_id}")
+        if topic_row["tape_id"] != record.tape_id:
+            raise ValueError("topic anchor tape_id must match parent topic")
         row = await pool.fetchrow(
             self._INSERT_ANCHOR_SQL,
             record.topic_id,
@@ -884,14 +893,18 @@ class SQLiteTopicStore:
 
     async def load_topic(self, topic_id: str) -> TopicRecord | None:
         _require_non_empty("topic_id", topic_id)
-        with self._lock, self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM topics WHERE topic_id = ?",
-                (topic_id,),
-            ).fetchone()
-        if row is None:
-            return None
-        return _topic_from_sqlite_row(row)
+
+        def read() -> TopicRecord | None:
+            with self._lock, self._connect() as connection:
+                row = connection.execute(
+                    "SELECT * FROM topics WHERE topic_id = ?",
+                    (topic_id,),
+                ).fetchone()
+            if row is None:
+                return None
+            return _topic_from_sqlite_row(row)
+
+        return await asyncio.to_thread(read)
 
     async def list_topics(
         self,
@@ -922,38 +935,42 @@ class SQLiteTopicStore:
             _require_non_empty("after_topic_id", after_topic_id)
         _require_positive_int("limit", limit)
         _require_non_negative_int("offset", offset)
-        with self._lock, self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT * FROM topics
-                WHERE (? IS NULL OR session_id = ?)
-                  AND (? IS NULL OR tape_id = ?)
-                  AND (? IS NULL OR status = ?)
-                  AND (
-                    ? IS NULL
-                    OR created_at > ?
-                    OR (created_at = ? AND topic_id > ?)
-                  )
-                ORDER BY created_at, topic_id
-                LIMIT ?
-                OFFSET ?
-                """,
-                (
-                    session_id,
-                    session_id,
-                    tape_id,
-                    tape_id,
-                    status,
-                    status,
-                    after_created_at_text,
-                    after_created_at_text,
-                    after_created_at_text,
-                    after_topic_id,
-                    limit,
-                    offset,
-                ),
-            ).fetchall()
-        return [_topic_from_sqlite_row(row) for row in rows]
+
+        def read() -> list[TopicRecord]:
+            with self._lock, self._connect() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM topics
+                    WHERE (? IS NULL OR session_id = ?)
+                      AND (? IS NULL OR tape_id = ?)
+                      AND (? IS NULL OR status = ?)
+                      AND (
+                        ? IS NULL
+                        OR created_at > ?
+                        OR (created_at = ? AND topic_id > ?)
+                      )
+                    ORDER BY created_at, topic_id
+                    LIMIT ?
+                    OFFSET ?
+                    """,
+                    (
+                        session_id,
+                        session_id,
+                        tape_id,
+                        tape_id,
+                        status,
+                        status,
+                        after_created_at_text,
+                        after_created_at_text,
+                        after_created_at_text,
+                        after_topic_id,
+                        limit,
+                        offset,
+                    ),
+                ).fetchall()
+            return [_topic_from_sqlite_row(row) for row in rows]
+
+        return await asyncio.to_thread(read)
 
     async def find_open_topic(
         self,
@@ -963,25 +980,37 @@ class SQLiteTopicStore:
     ) -> TopicRecord | None:
         _require_non_empty("session_id", session_id)
         _require_non_empty("tape_id", tape_id)
-        with self._lock, self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT * FROM topics
-                WHERE session_id = ? AND tape_id = ? AND status = 'open'
-                ORDER BY created_at DESC, topic_id DESC
-                LIMIT 1
-                """,
-                (session_id, tape_id),
-            ).fetchone()
-        if row is None:
-            return None
-        return _topic_from_sqlite_row(row)
+
+        def read() -> TopicRecord | None:
+            with self._lock, self._connect() as connection:
+                row = connection.execute(
+                    """
+                    SELECT * FROM topics
+                    WHERE session_id = ? AND tape_id = ? AND status = 'open'
+                    ORDER BY created_at DESC, topic_id DESC
+                    LIMIT 1
+                    """,
+                    (session_id, tape_id),
+                ).fetchone()
+            if row is None:
+                return None
+            return _topic_from_sqlite_row(row)
+
+        return await asyncio.to_thread(read)
 
     async def record_topic_anchor(
         self,
         record: TopicAnchorRecord,
     ) -> TopicAnchorRecord:
         with self._lock, self._connect() as connection:
+            topic_row = connection.execute(
+                "SELECT tape_id FROM topics WHERE topic_id = ?",
+                (record.topic_id,),
+            ).fetchone()
+            if topic_row is None:
+                raise KeyError(f"topic not found for anchor: {record.topic_id}")
+            if topic_row["tape_id"] != record.tape_id:
+                raise ValueError("topic anchor tape_id must match parent topic")
             row = connection.execute(
                 """
                 INSERT INTO topic_anchors (
@@ -1017,16 +1046,20 @@ class SQLiteTopicStore:
 
     async def list_topic_anchors(self, topic_id: str) -> list[TopicAnchorRecord]:
         _require_non_empty("topic_id", topic_id)
-        with self._lock, self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT * FROM topic_anchors
-                WHERE topic_id = ?
-                ORDER BY seq, anchor_type
-                """,
-                (topic_id,),
-            ).fetchall()
-        return [_topic_anchor_from_sqlite_row(row) for row in rows]
+
+        def read() -> list[TopicAnchorRecord]:
+            with self._lock, self._connect() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM topic_anchors
+                    WHERE topic_id = ?
+                    ORDER BY seq, anchor_type
+                    """,
+                    (topic_id,),
+                ).fetchall()
+            return [_topic_anchor_from_sqlite_row(row) for row in rows]
+
+        return await asyncio.to_thread(read)
 
     async def record_recall_link(
         self,
@@ -1074,16 +1107,20 @@ class SQLiteTopicStore:
         source_topic_id: str,
     ) -> list[TopicRecallLinkRecord]:
         _require_non_empty("source_topic_id", source_topic_id)
-        with self._lock, self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT * FROM topic_recall_links
-                WHERE source_topic_id = ?
-                ORDER BY created_at, recalled_topic_id, relation
-                """,
-                (source_topic_id,),
-            ).fetchall()
-        return [_topic_recall_link_from_sqlite_row(row) for row in rows]
+
+        def read() -> list[TopicRecallLinkRecord]:
+            with self._lock, self._connect() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM topic_recall_links
+                    WHERE source_topic_id = ?
+                    ORDER BY created_at, recalled_topic_id, relation
+                    """,
+                    (source_topic_id,),
+                ).fetchall()
+            return [_topic_recall_link_from_sqlite_row(row) for row in rows]
+
+        return await asyncio.to_thread(read)
 
     async def update_topic_cost(
         self,
@@ -1142,14 +1179,18 @@ class SQLiteTopicStore:
 
     async def load_topic_cost(self, topic_id: str) -> TopicCostRecord | None:
         _require_non_empty("topic_id", topic_id)
-        with self._lock, self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM topic_costs WHERE topic_id = ?",
-                (topic_id,),
-            ).fetchone()
-        if row is None:
-            return None
-        return _topic_cost_from_sqlite_row(row)
+
+        def read() -> TopicCostRecord | None:
+            with self._lock, self._connect() as connection:
+                row = connection.execute(
+                    "SELECT * FROM topic_costs WHERE topic_id = ?",
+                    (topic_id,),
+                ).fetchone()
+            if row is None:
+                return None
+            return _topic_cost_from_sqlite_row(row)
+
+        return await asyncio.to_thread(read)
 
 
 def _required_row(

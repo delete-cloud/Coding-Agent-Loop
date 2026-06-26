@@ -52,6 +52,11 @@ class FakeTopicPool:
             return self._close_topic("aborted", args)
         if "SELECT * FROM topics WHERE topic_id = $1" in query:
             return self.topics.get(cast(str, args[0]))
+        if "SELECT tape_id FROM topics WHERE topic_id = $1" in query:
+            topic = self.topics.get(cast(str, args[0]))
+            if topic is None:
+                return None
+            return {"tape_id": topic["tape_id"]}
         if "SELECT * FROM topics" in query and "status = 'open'" in query:
             session_id, tape_id = args
             rows = [
@@ -481,7 +486,7 @@ async def test_pg_topic_store_fake_enforces_open_topic_uniqueness(
 async def test_pg_topic_store_fake_rejects_orphan_child_rows(
     store: PGTopicStore,
 ) -> None:
-    with pytest.raises(RuntimeError, match="parent topic not found"):
+    with pytest.raises(KeyError, match="topic not found for anchor: missing"):
         await store.record_topic_anchor(
             TopicAnchorRecord(
                 topic_id="missing",

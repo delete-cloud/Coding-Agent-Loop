@@ -1265,6 +1265,7 @@ class SQLiteLocalDurableStore:
                 connection,
                 tape_id=meta.tape_id,
                 entry_count=meta.entry_count,
+                checkpoint_created_at=meta.created_at,
             )
             connection.execute(
                 """
@@ -1282,22 +1283,32 @@ class SQLiteLocalDurableStore:
         *,
         tape_id: str,
         entry_count: int,
+        checkpoint_created_at: datetime,
     ) -> None:
         _topic_require_non_empty("tape_id", tape_id)
         _topic_require_non_negative_int("entry_count", entry_count)
-        topic_ids_for_tape = "SELECT topic_id FROM topics WHERE tape_id = ?"
+        _topic_require_datetime("checkpoint_created_at", checkpoint_created_at)
+        checkpoint_created_at_text = _topic_datetime_to_sqlite_text(
+            checkpoint_created_at
+        )
         connection.execute(
-            f"""
+            """
             DELETE FROM topic_recall_links
-            WHERE source_topic_id IN ({topic_ids_for_tape})
-               OR recalled_topic_id IN ({topic_ids_for_tape})
+            WHERE source_topic_id IN (
+                SELECT topic_id FROM topics WHERE tape_id = ?
+            )
+               OR recalled_topic_id IN (
+                SELECT topic_id FROM topics WHERE tape_id = ?
+            )
             """,
             (tape_id, tape_id),
         )
         connection.execute(
-            f"""
+            """
             DELETE FROM topic_costs
-            WHERE topic_id IN ({topic_ids_for_tape})
+            WHERE topic_id IN (
+                SELECT topic_id FROM topics WHERE tape_id = ?
+            )
             """,
             (tape_id,),
         )
@@ -1315,13 +1326,33 @@ class SQLiteLocalDurableStore:
             WHERE tape_id = ?
               AND (
                 topic_initial_seq >= ?
-                OR (
-                    topic_finalized_seq IS NOT NULL
-                    AND topic_finalized_seq >= ?
-                )
+                OR created_at > ?
               )
             """,
-            (tape_id, entry_count, entry_count),
+            (tape_id, entry_count, checkpoint_created_at_text),
+        )
+        connection.execute(
+            """
+            UPDATE topics
+            SET status = 'open',
+                summary = NULL,
+                topic_finalized_seq = NULL,
+                finalized_at = NULL,
+                metadata = '{}',
+                updated_at = ?
+            WHERE tape_id = ?
+              AND status IN ('finalized', 'aborted')
+              AND (
+                topic_finalized_seq >= ?
+                OR finalized_at > ?
+              )
+            """,
+            (
+                _topic_datetime_to_sqlite_text(datetime.now(UTC)),
+                tape_id,
+                entry_count,
+                checkpoint_created_at_text,
+            ),
         )
 
     def session_id_for_checkpoint(self, checkpoint_id: str) -> str | None:

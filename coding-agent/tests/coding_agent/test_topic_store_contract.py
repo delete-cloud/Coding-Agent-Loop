@@ -80,6 +80,24 @@ async def test_topic_store_contract_rejects_orphan_anchor_recall_and_cost_record
 
 
 @pytest.mark.asyncio
+async def test_topic_store_contract_rejects_anchor_tape_mismatch(
+    topic_store: Any,
+) -> None:
+    await topic_store.create_topic(_topic("topic-1", tape_id="tape-1"))
+
+    with pytest.raises(ValueError):
+        await topic_store.record_topic_anchor(
+            TopicAnchorRecord(
+                topic_id="topic-1",
+                tape_id="other-tape",
+                seq=1,
+                anchor_type="topic_initial",
+                entry_id=None,
+            )
+        )
+
+
+@pytest.mark.asyncio
 async def test_topic_store_contract_cursor_requires_created_at_and_topic_id_together(
     topic_store: Any,
 ) -> None:
