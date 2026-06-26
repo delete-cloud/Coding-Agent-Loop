@@ -28,6 +28,12 @@ from coding_agent.server.stores.session_owner_store import (
 )
 from coding_agent.server.stores.session_store import InMemorySessionStore
 from coding_agent.server.stores.session_store import PGSessionMetadataStore
+from coding_agent.topics.store import (
+    TopicAnchorRecord,
+    TopicCostRecord,
+    TopicRecallLinkRecord,
+    TopicRecord,
+)
 
 
 class FakePGConnection:
@@ -44,6 +50,13 @@ class FakePGConnection:
         self.checkpoint_row: dict[str, object] | None = {
             "checkpoint_id": "checkpoint-a"
         }
+        self.checkpoint_meta_row: dict[str, object] | None = {
+            "meta": {"session_id": "session-a"}
+        }
+        self.topics: dict[str, dict[str, object]] = {}
+        self.topic_anchors: list[dict[str, object]] = []
+        self.topic_recall_links: list[dict[str, object]] = []
+        self.topic_costs: dict[str, dict[str, object]] = {}
         self.owned_sql_returns_none = False
         self.session_tape_race_binding: tuple[str, str] | None = None
 
@@ -79,6 +92,77 @@ class FakePGConnection:
                 self.session_tape_by_session[session_id] = tape_id
                 self.session_by_tape[tape_id] = session_id
             return "INSERT 0 1"
+        if "DELETE FROM topic_recall_links" in query:
+            tape_id = cast(str, args[0])
+            topic_ids = self._topic_ids_for_tape(tape_id)
+            self.topic_recall_links = [
+                link
+                for link in self.topic_recall_links
+                if link["source_topic_id"] not in topic_ids
+                and link["recalled_topic_id"] not in topic_ids
+            ]
+            return "DELETE"
+        if "DELETE FROM topic_costs" in query:
+            tape_id = cast(str, args[0])
+            topic_ids = self._topic_ids_for_tape(tape_id)
+            self.topic_costs = {
+                topic_id: cost
+                for topic_id, cost in self.topic_costs.items()
+                if topic_id not in topic_ids
+            }
+            return "DELETE"
+        if "DELETE FROM topic_anchors" in query:
+            tape_id = cast(str, args[0])
+            entry_count = cast(int, args[1])
+            self.topic_anchors = [
+                anchor
+                for anchor in self.topic_anchors
+                if not (
+                    anchor["tape_id"] == tape_id
+                    and cast(int, anchor["seq"]) >= entry_count
+                )
+            ]
+            return "DELETE"
+        if "DELETE FROM topics" in query:
+            tape_id = cast(str, args[0])
+            entry_count = cast(int, args[1])
+            checkpoint_created_at = cast(datetime, args[2])
+            self.topics = {
+                topic_id: topic
+                for topic_id, topic in self.topics.items()
+                if not (
+                    topic["tape_id"] == tape_id
+                    and (
+                        cast(int, topic["topic_initial_seq"]) >= entry_count
+                        or cast(datetime, topic["created_at"]) > checkpoint_created_at
+                    )
+                )
+            }
+            return "DELETE"
+        if "UPDATE topics" in query and "SET status = 'open'" in query:
+            tape_id = cast(str, args[0])
+            entry_count = cast(int, args[1])
+            checkpoint_created_at = cast(datetime, args[2])
+            for topic in self.topics.values():
+                finalized_seq = cast(int | None, topic["topic_finalized_seq"])
+                finalized_at = cast(datetime | None, topic["finalized_at"])
+                if (
+                    topic["tape_id"] == tape_id
+                    and topic["status"] in {"finalized", "aborted"}
+                    and (
+                        (finalized_seq is not None and finalized_seq >= entry_count)
+                        or (
+                            finalized_at is not None
+                            and finalized_at > checkpoint_created_at
+                        )
+                    )
+                ):
+                    topic["status"] = "open"
+                    topic["summary"] = None
+                    topic["topic_finalized_seq"] = None
+                    topic["finalized_at"] = None
+                    topic["metadata"] = {}
+            return "UPDATE"
         return "OK"
 
     async def fetchrow(self, query: str, *args: object) -> dict[str, object] | None:
@@ -93,6 +177,81 @@ class FakePGConnection:
             return None if session_id is None else {"session_id": session_id}
         if "FROM agent_runs" in query:
             return {"session_id": self.run_session_id}
+        if "FROM agent_checkpoints" in query:
+            return self.checkpoint_meta_row
+        if "session_id, tape_id" in query and "FROM topics" in query:
+            topic = self.topics.get(cast(str, args[0]))
+            if topic is None:
+                return None
+            return {
+                "session_id": topic["session_id"],
+                "tape_id": topic["tape_id"],
+            }
+        if "INSERT INTO topics" in query:
+            existing = self.topics.get(cast(str, args[0]))
+            if existing is not None:
+                return existing
+            row = {
+                "topic_id": args[0],
+                "tape_id": args[1],
+                "session_id": args[2],
+                "kind": args[3],
+                "status": args[4],
+                "title": args[5],
+                "summary": args[6],
+                "owner": args[7],
+                "topic_initial_seq": args[8],
+                "topic_finalized_seq": args[9],
+                "created_at": args[10],
+                "finalized_at": args[11],
+                "metadata": args[12],
+            }
+            self.topics[cast(str, row["topic_id"])] = row
+            return row
+        if "UPDATE topics" in query and "status = 'finalized'" in query:
+            return self._close_topic("finalized", args)
+        if "UPDATE topics" in query and "status = 'aborted'" in query:
+            return self._close_topic("aborted", args)
+        if "INSERT INTO topic_anchors" in query:
+            row = {
+                "topic_id": args[0],
+                "tape_id": args[1],
+                "seq": args[2],
+                "anchor_type": args[3],
+                "entry_id": args[4],
+                "metadata": args[5],
+                "created_at": datetime.now(UTC),
+            }
+            self.topic_anchors.append(row)
+            return row
+        if "INSERT INTO topic_recall_links" in query:
+            row = {
+                "source_topic_id": args[0],
+                "recalled_topic_id": args[1],
+                "relation": args[2],
+                "anchor_seq": args[3],
+                "source_entry_start_seq": args[4],
+                "source_entry_end_seq": args[5],
+                "metadata": args[6],
+                "created_at": datetime.now(UTC),
+            }
+            self.topic_recall_links.append(row)
+            return row
+        if "INSERT INTO topic_costs" in query:
+            row = {
+                "topic_id": args[0],
+                "prompt_tokens": args[1],
+                "completion_tokens": args[2],
+                "total_tokens": args[3],
+                "run_count": args[4],
+                "action_count": args[5],
+                "validation_count": args[6],
+                "tool_call_count": args[7],
+                "metadata": args[8],
+                "updated_at": datetime.now(UTC),
+            }
+            self.topic_costs[cast(str, row["topic_id"])] = row
+            return row
         if (
             "INSERT INTO agent_runs" in query
             or "INSERT INTO runtime_events" in query
@@ -121,6 +280,35 @@ class FakePGConnection:
     async def fetch(self, query: str, *args: object) -> list[dict[str, object]]:
         self.calls.append(("fetch", _sql_label(query), args))
         return []
+
+    def _topic_ids_for_tape(self, tape_id: str) -> set[str]:
+        return {
+            topic_id
+            for topic_id, topic in self.topics.items()
+            if topic["tape_id"] == tape_id
+        }
+
+    def _close_topic(
+        self,
+        status: str,
+        args: tuple[object, ...],
+    ) -> dict[str, object] | None:
+        topic_id = cast(str, args[0])
+        topic = self.topics.get(topic_id)
+        if topic is None or topic["status"] != "open":
+            return None
+        topic_finalized_seq = cast(int | None, args[2])
+        if topic_finalized_seq is not None and topic_finalized_seq < cast(
+            int,
+            topic["topic_initial_seq"],
+        ):
+            return None
+        topic["status"] = status
+        topic["summary"] = args[1]
+        topic["topic_finalized_seq"] = topic_finalized_seq
+        topic["finalized_at"] = args[3]
+        topic["metadata"] = args[4]
+        return topic
 
 
 class FakePGPool:
@@ -470,6 +658,286 @@ async def test_pg_durable_owned_conflict_paths_reject_cross_session_targets() ->
 
 
 @pytest.mark.asyncio
+async def test_pg_durable_restore_reconciles_topic_projection_with_checkpoint() -> None:
+    pool = FakePGPool()
+    checkpoint_created_at = datetime(2026, 6, 26, 9, 0, 0, tzinfo=UTC)
+    pool.connection.owner_row = {
+        "owner_id": "owner-a",
+        "lease_expires_at": datetime.now(UTC) + timedelta(seconds=30),
+        "fencing_token": 7,
+    }
+    pool.connection.session_tape_by_session["session-a"] = "tape-a"
+    pool.connection.session_by_tape["tape-a"] = "session-a"
+    pool.connection.checkpoint_meta_row = {"meta": {"session_id": "session-a"}}
+    pool.connection.topics = {
+        "topic-keep": {
+            "topic_id": "topic-keep",
+            "tape_id": "tape-a",
+            "status": "finalized",
+            "summary": "closed before checkpoint",
+            "topic_initial_seq": 0,
+            "topic_finalized_seq": 0,
+            "created_at": checkpoint_created_at - timedelta(seconds=5),
+            "finalized_at": checkpoint_created_at - timedelta(seconds=2),
+            "metadata": {},
+        },
+        "topic-reopen": {
+            "topic_id": "topic-reopen",
+            "tape_id": "tape-a",
+            "status": "finalized",
+            "summary": "closed after checkpoint",
+            "topic_initial_seq": 0,
+            "topic_finalized_seq": 1,
+            "created_at": checkpoint_created_at - timedelta(seconds=4),
+            "finalized_at": checkpoint_created_at + timedelta(seconds=1),
+            "metadata": {"after": True},
+        },
+        "topic-delete": {
+            "topic_id": "topic-delete",
+            "tape_id": "tape-a",
+            "status": "open",
+            "summary": None,
+            "topic_initial_seq": 1,
+            "topic_finalized_seq": None,
+            "created_at": checkpoint_created_at + timedelta(seconds=1),
+            "finalized_at": None,
+            "metadata": {},
+        },
+        "topic-other": {
+            "topic_id": "topic-other",
+            "tape_id": "tape-other",
+            "status": "open",
+            "summary": None,
+            "topic_initial_seq": 9,
+            "topic_finalized_seq": None,
+            "created_at": checkpoint_created_at + timedelta(seconds=1),
+            "finalized_at": None,
+            "metadata": {},
+        },
+    }
+    pool.connection.topic_anchors = [
+        {
+            "topic_id": "topic-keep",
+            "tape_id": "tape-a",
+            "seq": 0,
+            "anchor_type": "start",
+        },
+        {
+            "topic_id": "topic-reopen",
+            "tape_id": "tape-a",
+            "seq": 1,
+            "anchor_type": "finalize",
+        },
+        {
+            "topic_id": "topic-other",
+            "tape_id": "tape-other",
+            "seq": 9,
+            "anchor_type": "start",
+        },
+    ]
+    pool.connection.topic_recall_links = [
+        {
+            "source_topic_id": "topic-keep",
+            "recalled_topic_id": "topic-reopen",
+        },
+        {
+            "source_topic_id": "topic-other",
+            "recalled_topic_id": "topic-keep",
+        },
+        {
+            "source_topic_id": "topic-other",
+            "recalled_topic_id": "topic-other",
+        },
+    ]
+    pool.connection.topic_costs = {
+        "topic-keep": {"topic_id": "topic-keep", "total_tokens": 10},
+        "topic-reopen": {"topic_id": "topic-reopen", "total_tokens": 20},
+        "topic-other": {"topic_id": "topic-other", "total_tokens": 30},
+    }
+    store = PGDurableStore(pool=cast(Any, pool))
+
+    await store.restore_checkpoint_state(
+        OwnerAuthority("session-a", "owner-a", 7),
+        CheckpointSnapshot(
+            meta=CheckpointMeta(
+                checkpoint_id="checkpoint-keep",
+                tape_id="tape-a",
+                session_id="session-a",
+                entry_count=1,
+                window_start=0,
+                created_at=checkpoint_created_at,
+                label="keep",
+            ),
+            tape_entries=({"kind": "message", "payload": {"text": "keep"}},),
+            plugin_states={},
+        ),
+        {
+            "id": "session-a",
+            "session_id": "session-a",
+            "tape_id": "tape-a",
+            "provider_name": "restored-provider",
+        },
+    )
+
+    assert set(pool.connection.topics) == {
+        "topic-keep",
+        "topic-reopen",
+        "topic-other",
+    }
+    assert pool.connection.topics["topic-reopen"]["status"] == "open"
+    assert pool.connection.topics["topic-reopen"]["summary"] is None
+    assert pool.connection.topics["topic-reopen"]["topic_finalized_seq"] is None
+    assert pool.connection.topics["topic-reopen"]["finalized_at"] is None
+    assert pool.connection.topics["topic-reopen"]["metadata"] == {}
+    assert pool.connection.topic_anchors == [
+        {
+            "topic_id": "topic-keep",
+            "tape_id": "tape-a",
+            "seq": 0,
+            "anchor_type": "start",
+        },
+        {
+            "topic_id": "topic-other",
+            "tape_id": "tape-other",
+            "seq": 9,
+            "anchor_type": "start",
+        },
+    ]
+    assert pool.connection.topic_recall_links == [
+        {
+            "source_topic_id": "topic-other",
+            "recalled_topic_id": "topic-other",
+        }
+    ]
+    assert set(pool.connection.topic_costs) == {"topic-other"}
+
+
+@pytest.mark.asyncio
+async def test_pg_durable_create_topic_locks_owner_and_tape_before_insert() -> None:
+    pool = FakePGPool()
+    pool.connection.owner_row = {
+        "owner_id": "owner-a",
+        "lease_expires_at": datetime.now(UTC) + timedelta(seconds=30),
+        "fencing_token": 7,
+    }
+    pool.connection.session_tape_by_session["session-a"] = "tape-a"
+    pool.connection.session_by_tape["tape-a"] = "session-a"
+    store = PGDurableStore(pool=cast(Any, pool))
+
+    topic = await store.create_topic(
+        OwnerAuthority("session-a", "owner-a", 7),
+        TopicRecord(
+            topic_id="topic-a",
+            tape_id="tape-a",
+            session_id="session-a",
+            kind="interaction",
+            status="open",
+            title="Topic A",
+            summary=None,
+            owner=None,
+            topic_initial_seq=0,
+            topic_finalized_seq=None,
+            created_at=datetime.now(UTC),
+        ),
+    )
+
+    assert topic.topic_id == "topic-a"
+    labels = [call[1] for call in pool.connection.calls]
+    assert labels[:4] == [
+        "BEGIN",
+        "SELECT owner_id, lease_expires_at, fencing_token FROM session_owners WHERE session_id = $1 FOR UPDATE",
+        "SELECT session_id FROM session_tapes WHERE tape_id = $1 FOR UPDATE",
+        "WITH inserted AS ( INSERT INTO topics ( topic_id, tape_id, session_id, kind, status, title, summary, owner, topic_initial_seq, topic_finalized_seq, created_at, finalized_at, metadata ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb) ON CONFLICT (topic_id) DO NOTHING RETURNING * ) SELECT * FROM inserted UNION ALL SELECT * FROM topics WHERE topic_id = $1 AND NOT EXISTS (SELECT 1 FROM inserted)",
+    ]
+    assert labels[-1] == "COMMIT"
+
+
+@pytest.mark.asyncio
+async def test_pg_durable_topic_mutators_lock_owner_tape_and_topic_before_write() -> (
+    None
+):
+    pool = FakePGPool()
+    pool.connection.owner_row = {
+        "owner_id": "owner-a",
+        "lease_expires_at": datetime.now(UTC) + timedelta(seconds=30),
+        "fencing_token": 7,
+    }
+    pool.connection.session_tape_by_session["session-a"] = "tape-a"
+    pool.connection.session_by_tape["tape-a"] = "session-a"
+    pool.connection.topics["topic-a"] = {
+        "topic_id": "topic-a",
+        "tape_id": "tape-a",
+        "session_id": "session-a",
+        "kind": "interaction",
+        "status": "open",
+        "title": "Topic A",
+        "summary": None,
+        "owner": None,
+        "topic_initial_seq": 0,
+        "topic_finalized_seq": None,
+        "created_at": datetime.now(UTC),
+        "finalized_at": None,
+        "metadata": {},
+    }
+    store = PGDurableStore(pool=cast(Any, pool))
+    authority = OwnerAuthority("session-a", "owner-a", 7)
+
+    pool.connection.calls.clear()
+    await store.finalize_topic(
+        authority,
+        "topic-a",
+        summary="done",
+        topic_finalized_seq=0,
+        finalized_at=datetime.now(UTC),
+        metadata={},
+    )
+    _assert_topic_mutator_locks_before_write(
+        [call[1] for call in pool.connection.calls],
+        write_sql="UPDATE topics SET status = 'finalized'",
+    )
+
+    pool.connection.calls.clear()
+    await store.record_topic_anchor(
+        authority,
+        TopicAnchorRecord(
+            topic_id="topic-a",
+            tape_id="tape-a",
+            seq=0,
+            anchor_type="finalize",
+            entry_id=None,
+        ),
+    )
+    _assert_topic_mutator_locks_before_write(
+        [call[1] for call in pool.connection.calls],
+        write_sql="INSERT INTO topic_anchors",
+    )
+
+    pool.connection.calls.clear()
+    await store.record_recall_link(
+        authority,
+        TopicRecallLinkRecord(
+            source_topic_id="topic-a",
+            recalled_topic_id="topic-a",
+            relation="self",
+        ),
+    )
+    _assert_topic_mutator_locks_before_write(
+        [call[1] for call in pool.connection.calls],
+        write_sql="INSERT INTO topic_recall_links",
+    )
+
+    pool.connection.calls.clear()
+    await store.update_topic_cost(
+        authority,
+        TopicCostRecord(topic_id="topic-a", total_tokens=10, run_count=1),
+    )
+    _assert_topic_mutator_locks_before_write(
+        [call[1] for call in pool.connection.calls],
+        write_sql="INSERT INTO topic_costs",
+    )
+
+
+@pytest.mark.asyncio
 async def test_pg_durable_create_run_requires_stable_tape_binding() -> None:
     pool = FakePGPool()
     pool.connection.owner_row = {
@@ -534,6 +1002,7 @@ def test_session_manager_enables_fenced_pg_wrappers_after_owner_store_config(
     assert isinstance(manager._tape_store, FencedPGTapeStore)
     assert isinstance(manager._checkpoint_service._store, FencedPGCheckpointStore)
     assert isinstance(manager._runtime_store, FencedPGRuntimeStore)
+    assert type(manager.selected_topic_store()).__name__ == "FencedPGTopicStore"
     assert "durable fencing disabled" not in caplog.text
 
 
@@ -580,3 +1049,21 @@ def test_session_manager_warns_when_custom_store_disables_pg_fencing(
 
 def _sql_label(query: str) -> str:
     return " ".join(query.split())
+
+
+def _assert_topic_mutator_locks_before_write(
+    labels: list[str],
+    *,
+    write_sql: str,
+) -> None:
+    owner_idx = labels.index(
+        "SELECT owner_id, lease_expires_at, fencing_token FROM session_owners WHERE session_id = $1 FOR UPDATE"
+    )
+    tape_idx = labels.index(
+        "SELECT session_id FROM session_tapes WHERE tape_id = $1 FOR UPDATE"
+    )
+    topic_idx = labels.index(
+        "SELECT session_id, tape_id FROM topics WHERE topic_id = $1 FOR UPDATE"
+    )
+    write_idx = next(idx for idx, label in enumerate(labels) if write_sql in label)
+    assert owner_idx < tape_idx < topic_idx < write_idx

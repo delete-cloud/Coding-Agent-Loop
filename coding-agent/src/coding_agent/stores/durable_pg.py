@@ -14,6 +14,18 @@ from agentkit.storage.pg import (
 )
 from agentkit.storage.protocols import TapeInfo, TapeSearchResult
 
+from coding_agent.topics.store import (
+    PGTopicStore,
+    TopicAnchorRecord,
+    TopicCostRecord,
+    TopicRecallLinkRecord,
+    TopicRecord,
+    TopicStatus,
+    _topic_anchor_from_row,
+    _topic_cost_from_row,
+    _topic_from_row,
+    _topic_recall_link_from_row,
+)
 from coding_agent.stores.runtime_store import (
     AgentInteractionRecord,
     AgentRunRecord,
@@ -229,6 +241,60 @@ class PGDurableStore:
       AND meta->>'session_id' = $2
       AND (meta->>'entry_count')::int > $3
     """
+    _DELETE_TOPIC_RECALL_LINKS_FOR_TAPE_SQL = """
+    DELETE FROM topic_recall_links
+    WHERE source_topic_id IN (
+        SELECT topic_id FROM topics WHERE tape_id = $1
+    )
+       OR recalled_topic_id IN (
+        SELECT topic_id FROM topics WHERE tape_id = $1
+    )
+    """
+    _DELETE_TOPIC_COSTS_FOR_TAPE_SQL = """
+    DELETE FROM topic_costs
+    WHERE topic_id IN (
+        SELECT topic_id FROM topics WHERE tape_id = $1
+    )
+    """
+    _DELETE_TOPIC_ANCHORS_AFTER_CHECKPOINT_SQL = """
+    DELETE FROM topic_anchors
+    WHERE tape_id = $1
+      AND seq >= $2
+    """
+    _DELETE_TOPICS_AFTER_CHECKPOINT_SQL = """
+    DELETE FROM topics
+    WHERE tape_id = $1
+      AND (
+        topic_initial_seq >= $2
+        OR created_at > $3
+      )
+    """
+    _REOPEN_TOPICS_CLOSED_AFTER_CHECKPOINT_SQL = """
+    UPDATE topics
+    SET status = 'open',
+        summary = NULL,
+        topic_finalized_seq = NULL,
+        finalized_at = NULL,
+        metadata = '{}'::jsonb,
+        updated_at = NOW()
+    WHERE tape_id = $1
+      AND status IN ('finalized', 'aborted')
+      AND (
+        topic_finalized_seq >= $2
+        OR finalized_at > $3
+      )
+    """
+    _SELECT_TOPIC_SESSION_TAPE_SQL = """
+    SELECT session_id, tape_id
+    FROM topics
+    WHERE topic_id = $1
+    """
+    _SELECT_TOPIC_SESSION_TAPE_FOR_UPDATE_SQL = """
+    SELECT session_id, tape_id
+    FROM topics
+    WHERE topic_id = $1
+    FOR UPDATE
+    """
     _DELETE_SESSION_TAPE_SQL = "DELETE FROM session_tapes WHERE session_id = $1"
 
     def __init__(self, *, pool: PGPool) -> None:
@@ -245,6 +311,7 @@ class PGDurableStore:
         _ = await pool.execute(PGTapeStore._CREATE_TABLE_SQL)
         _ = await pool.execute(PGCheckpointStore._CREATE_TABLE_SQL)
         _ = await pool.execute(PGRuntimeStore._CREATE_SCHEMA_SQL)
+        _ = await pool.execute(PGTopicStore._CREATE_SCHEMA_SQL)
         self._schema_ready = True
 
     async def _with_transaction(self, body: Callable[[Any], Any]) -> Any:
@@ -268,6 +335,14 @@ class PGDurableStore:
         await self._ensure_schema()
         pool = await self._pool.get_pool()
         row = await pool.fetchrow(self._SELECT_SESSION_BY_TAPE_SQL, tape_id)
+        if row is None:
+            return None
+        return _required_str(dict(row), "session_id")
+
+    async def session_id_for_topic(self, topic_id: str) -> str | None:
+        await self._ensure_schema()
+        pool = await self._pool.get_pool()
+        row = await pool.fetchrow(self._SELECT_TOPIC_SESSION_TAPE_SQL, topic_id)
         if row is None:
             return None
         return _required_str(dict(row), "session_id")
@@ -640,6 +715,12 @@ class PGDurableStore:
                 authority.session_id,
                 session_payload,
             )
+            await self._reconcile_topics_after_checkpoint_restore(
+                connection,
+                tape_id=meta.tape_id,
+                entry_count=meta.entry_count,
+                checkpoint_created_at=meta.created_at,
+            )
             await connection.execute(
                 self._DELETE_NEWER_CHECKPOINTS_SQL,
                 meta.tape_id,
@@ -648,6 +729,276 @@ class PGDurableStore:
             )
 
         await self._with_transaction(body)
+
+    async def create_topic(
+        self,
+        authority: OwnerAuthority,
+        record: TopicRecord,
+    ) -> TopicRecord:
+        if record.session_id != authority.session_id:
+            raise SessionOwnershipConflictError("topic target belongs to another owner")
+
+        async def body(connection: Any) -> TopicRecord:
+            await self._require_owner(connection, authority)
+            await self._require_stable_tape(connection, authority, record.tape_id)
+            row = await connection.fetchrow(
+                PGTopicStore._INSERT_TOPIC_SQL,
+                record.topic_id,
+                record.tape_id,
+                record.session_id,
+                record.kind,
+                record.status,
+                record.title,
+                record.summary,
+                record.owner,
+                record.topic_initial_seq,
+                record.topic_finalized_seq,
+                record.created_at,
+                record.finalized_at,
+                record.metadata,
+            )
+            topic = _topic_from_row(_required_row(row, "topic insert"))
+            if (
+                topic.session_id != authority.session_id
+                or topic.tape_id != record.tape_id
+            ):
+                raise SessionOwnershipConflictError(
+                    "topic target belongs to another owner"
+                )
+            return topic
+
+        return cast(TopicRecord, await self._with_transaction(body))
+
+    async def finalize_topic(
+        self,
+        authority: OwnerAuthority,
+        topic_id: str,
+        *,
+        summary: str | None,
+        topic_finalized_seq: int,
+        finalized_at: datetime,
+        metadata: JSONObject,
+    ) -> TopicRecord:
+        return await self._close_topic(
+            authority,
+            PGTopicStore._FINALIZE_TOPIC_SQL,
+            "finalize",
+            topic_id,
+            summary=summary,
+            topic_finalized_seq=topic_finalized_seq,
+            finalized_at=finalized_at,
+            metadata=metadata,
+        )
+
+    async def abort_topic(
+        self,
+        authority: OwnerAuthority,
+        topic_id: str,
+        *,
+        summary: str | None,
+        topic_finalized_seq: int | None,
+        finalized_at: datetime,
+        metadata: JSONObject,
+    ) -> TopicRecord:
+        return await self._close_topic(
+            authority,
+            PGTopicStore._ABORT_TOPIC_SQL,
+            "abort",
+            topic_id,
+            summary=summary,
+            topic_finalized_seq=topic_finalized_seq,
+            finalized_at=finalized_at,
+            metadata=metadata,
+        )
+
+    async def _close_topic(
+        self,
+        authority: OwnerAuthority,
+        query: str,
+        operation: str,
+        topic_id: str,
+        *,
+        summary: str | None,
+        topic_finalized_seq: int | None,
+        finalized_at: datetime,
+        metadata: JSONObject,
+    ) -> TopicRecord:
+        async def body(connection: Any) -> TopicRecord:
+            await self._require_owner(connection, authority)
+            _ = await self._lock_topic_targets(connection, authority, [topic_id])
+            row = await connection.fetchrow(
+                query,
+                topic_id,
+                summary,
+                topic_finalized_seq,
+                finalized_at,
+                metadata,
+            )
+            if row is None:
+                raise KeyError(f"open topic not found for {operation}: {topic_id}")
+            return _topic_from_row(row)
+
+        return cast(TopicRecord, await self._with_transaction(body))
+
+    async def record_topic_anchor(
+        self,
+        authority: OwnerAuthority,
+        record: TopicAnchorRecord,
+    ) -> TopicAnchorRecord:
+        async def body(connection: Any) -> TopicAnchorRecord:
+            await self._require_owner(connection, authority)
+            topic_tapes = await self._lock_topic_targets(
+                connection,
+                authority,
+                [record.topic_id],
+            )
+            if record.tape_id != topic_tapes[record.topic_id]:
+                raise SessionOwnershipConflictError(
+                    "topic anchor target belongs to another tape"
+                )
+            row = await connection.fetchrow(
+                PGTopicStore._INSERT_ANCHOR_SQL,
+                record.topic_id,
+                record.tape_id,
+                record.seq,
+                record.anchor_type,
+                record.entry_id,
+                record.metadata,
+            )
+            return _topic_anchor_from_row(_required_row(row, "topic anchor upsert"))
+
+        return cast(TopicAnchorRecord, await self._with_transaction(body))
+
+    async def record_recall_link(
+        self,
+        authority: OwnerAuthority,
+        record: TopicRecallLinkRecord,
+    ) -> TopicRecallLinkRecord:
+        async def body(connection: Any) -> TopicRecallLinkRecord:
+            await self._require_owner(connection, authority)
+            _ = await self._lock_topic_targets(
+                connection,
+                authority,
+                [record.source_topic_id, record.recalled_topic_id],
+            )
+            row = await connection.fetchrow(
+                PGTopicStore._INSERT_RECALL_LINK_SQL,
+                record.source_topic_id,
+                record.recalled_topic_id,
+                record.relation,
+                record.anchor_seq,
+                record.source_entry_start_seq,
+                record.source_entry_end_seq,
+                record.metadata,
+            )
+            return _topic_recall_link_from_row(
+                _required_row(row, "topic recall link upsert")
+            )
+
+        return cast(TopicRecallLinkRecord, await self._with_transaction(body))
+
+    async def update_topic_cost(
+        self,
+        authority: OwnerAuthority,
+        delta: TopicCostRecord,
+    ) -> TopicCostRecord:
+        async def body(connection: Any) -> TopicCostRecord:
+            await self._require_owner(connection, authority)
+            _ = await self._lock_topic_targets(connection, authority, [delta.topic_id])
+            row = await connection.fetchrow(
+                PGTopicStore._UPSERT_COST_SQL,
+                delta.topic_id,
+                delta.prompt_tokens,
+                delta.completion_tokens,
+                delta.total_tokens,
+                delta.run_count,
+                delta.action_count,
+                delta.validation_count,
+                delta.tool_call_count,
+                delta.metadata,
+            )
+            return _topic_cost_from_row(_required_row(row, "topic cost upsert"))
+
+        return cast(TopicCostRecord, await self._with_transaction(body))
+
+    async def _reconcile_topics_after_checkpoint_restore(
+        self,
+        connection: Any,
+        *,
+        tape_id: str,
+        entry_count: int,
+        checkpoint_created_at: datetime,
+    ) -> None:
+        if not tape_id:
+            raise ValueError("tape_id must be non-empty")
+        if entry_count < 0:
+            raise ValueError("entry_count must be >= 0")
+        await connection.execute(
+            self._DELETE_TOPIC_RECALL_LINKS_FOR_TAPE_SQL,
+            tape_id,
+        )
+        await connection.execute(
+            self._DELETE_TOPIC_COSTS_FOR_TAPE_SQL,
+            tape_id,
+        )
+        await connection.execute(
+            self._DELETE_TOPIC_ANCHORS_AFTER_CHECKPOINT_SQL,
+            tape_id,
+            entry_count,
+        )
+        await connection.execute(
+            self._DELETE_TOPICS_AFTER_CHECKPOINT_SQL,
+            tape_id,
+            entry_count,
+            checkpoint_created_at,
+        )
+        await connection.execute(
+            self._REOPEN_TOPICS_CLOSED_AFTER_CHECKPOINT_SQL,
+            tape_id,
+            entry_count,
+            checkpoint_created_at,
+        )
+
+    async def _lock_topic_targets(
+        self,
+        connection: Any,
+        authority: OwnerAuthority,
+        topic_ids: list[str],
+    ) -> dict[str, str]:
+        targets: dict[str, str] = {}
+        for topic_id in sorted(set(topic_ids)):
+            row = await connection.fetchrow(
+                self._SELECT_TOPIC_SESSION_TAPE_SQL, topic_id
+            )
+            if row is None:
+                raise KeyError(f"topic not found: {topic_id}")
+            row_dict = dict(row)
+            session_id = _required_str(row_dict, "session_id")
+            tape_id = _required_str(row_dict, "tape_id")
+            if session_id != authority.session_id:
+                raise SessionOwnershipConflictError(
+                    "topic target belongs to another owner"
+                )
+            targets[topic_id] = tape_id
+
+        for tape_id in sorted(set(targets.values())):
+            await self._require_stable_tape(connection, authority, tape_id)
+
+        for topic_id in sorted(targets):
+            row = await connection.fetchrow(
+                self._SELECT_TOPIC_SESSION_TAPE_FOR_UPDATE_SQL,
+                topic_id,
+            )
+            if row is None:
+                raise KeyError(f"topic not found: {topic_id}")
+            row_dict = dict(row)
+            session_id = _required_str(row_dict, "session_id")
+            tape_id = _required_str(row_dict, "tape_id")
+            if session_id != authority.session_id or tape_id != targets[topic_id]:
+                raise SessionOwnershipConflictError(
+                    "topic target belongs to another owner"
+                )
+        return targets
 
     async def _require_owner(self, connection: Any, authority: OwnerAuthority) -> None:
         row = await connection.fetchrow(
@@ -832,6 +1183,146 @@ class FencedPGTapeStore:
         session_id = await self._durable_store.session_id_for_tape(tape_id)
         if session_id is None:
             raise SessionOwnershipConflictError("tape target is not bound to a session")
+        return session_id
+
+
+class FencedPGTopicStore(PGTopicStore):
+    def __init__(
+        self,
+        *,
+        durable_store: PGDurableStore,
+        pool: PGPool,
+        authority_for_session: Callable[[str], OwnerAuthority],
+    ) -> None:
+        self._durable_store = durable_store
+        self._delegate = PGTopicStore(pool=pool)
+        self._authority_for_session = authority_for_session
+
+    async def create_topic(self, record: TopicRecord) -> TopicRecord:
+        return await self._durable_store.create_topic(
+            self._authority_for_session(record.session_id),
+            record,
+        )
+
+    async def finalize_topic(
+        self,
+        topic_id: str,
+        *,
+        summary: str | None,
+        topic_finalized_seq: int,
+        finalized_at: datetime,
+        metadata: JSONObject,
+    ) -> TopicRecord:
+        session_id = await self._require_session_id_for_topic(topic_id)
+        return await self._durable_store.finalize_topic(
+            self._authority_for_session(session_id),
+            topic_id,
+            summary=summary,
+            topic_finalized_seq=topic_finalized_seq,
+            finalized_at=finalized_at,
+            metadata=metadata,
+        )
+
+    async def abort_topic(
+        self,
+        topic_id: str,
+        *,
+        summary: str | None,
+        topic_finalized_seq: int | None,
+        finalized_at: datetime,
+        metadata: JSONObject,
+    ) -> TopicRecord:
+        session_id = await self._require_session_id_for_topic(topic_id)
+        return await self._durable_store.abort_topic(
+            self._authority_for_session(session_id),
+            topic_id,
+            summary=summary,
+            topic_finalized_seq=topic_finalized_seq,
+            finalized_at=finalized_at,
+            metadata=metadata,
+        )
+
+    async def load_topic(self, topic_id: str) -> TopicRecord | None:
+        return await self._delegate.load_topic(topic_id)
+
+    async def list_topics(
+        self,
+        *,
+        session_id: str | None = None,
+        tape_id: str | None = None,
+        status: TopicStatus | None = None,
+        after_created_at: datetime | None = None,
+        after_topic_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[TopicRecord]:
+        return await self._delegate.list_topics(
+            session_id=session_id,
+            tape_id=tape_id,
+            status=status,
+            after_created_at=after_created_at,
+            after_topic_id=after_topic_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    async def find_open_topic(
+        self,
+        *,
+        session_id: str,
+        tape_id: str,
+    ) -> TopicRecord | None:
+        return await self._delegate.find_open_topic(
+            session_id=session_id,
+            tape_id=tape_id,
+        )
+
+    async def record_topic_anchor(
+        self,
+        record: TopicAnchorRecord,
+    ) -> TopicAnchorRecord:
+        session_id = await self._require_session_id_for_topic(record.topic_id)
+        return await self._durable_store.record_topic_anchor(
+            self._authority_for_session(session_id),
+            record,
+        )
+
+    async def list_topic_anchors(self, topic_id: str) -> list[TopicAnchorRecord]:
+        return await self._delegate.list_topic_anchors(topic_id)
+
+    async def record_recall_link(
+        self,
+        record: TopicRecallLinkRecord,
+    ) -> TopicRecallLinkRecord:
+        session_id = await self._require_session_id_for_topic(record.source_topic_id)
+        return await self._durable_store.record_recall_link(
+            self._authority_for_session(session_id),
+            record,
+        )
+
+    async def list_recall_links(
+        self,
+        source_topic_id: str,
+    ) -> list[TopicRecallLinkRecord]:
+        return await self._delegate.list_recall_links(source_topic_id)
+
+    async def update_topic_cost(
+        self,
+        delta: TopicCostRecord,
+    ) -> TopicCostRecord:
+        session_id = await self._require_session_id_for_topic(delta.topic_id)
+        return await self._durable_store.update_topic_cost(
+            self._authority_for_session(session_id),
+            delta,
+        )
+
+    async def load_topic_cost(self, topic_id: str) -> TopicCostRecord | None:
+        return await self._delegate.load_topic_cost(topic_id)
+
+    async def _require_session_id_for_topic(self, topic_id: str) -> str:
+        session_id = await self._durable_store.session_id_for_topic(topic_id)
+        if session_id is None:
+            raise KeyError(f"topic not found: {topic_id}")
         return session_id
 
 
