@@ -146,6 +146,16 @@ accelerate sync, but is never the authority. Full rebuild must be idempotent.
 Sync entrypoints and triggers include manual rebuild, startup reconciliation,
 and post-finalize/post-review-change sync.
 
+Destructive full rebuilds must be backed by the complete authoritative source
+set before they clear or replace the derived semantic backend. The required
+authorities are finalized topics from a durable `TopicStore` and accepted
+reviewed memories from the review store. A deployment path that does not expose
+a durable topic authority, including the current local SQLite durable bundle
+before a `SQLiteTopicStore` exists, must fail the rebuild loudly before
+clearing semantic documents. Read-only maintenance status may still report
+`topic_store_available = false`, but that status is not permission to rebuild
+from a partial source set.
+
 Reviewed-memory transition APIs are session-scoped product APIs. The HTTP
 surface is `POST /sessions/{session_id}/memory/reviews/{candidate_id}` with a
 target status of `accepted`, `rejected`, or `archived` and an optional safe
@@ -189,8 +199,12 @@ blob abstraction does not provide.
 
 ## Acceptance Criteria
 
-Implementation is pending. The later PRs must add these tests and pass the
-repo gate:
+Implementation is staged. The read/write switch, semantic backend contract,
+LanceDB backend, sync/review transition wiring, and maintenance rebuild guard
+have started landing across PRs. The checklist records the required proof for
+accepting this ADR; checked items are landed and were re-run during this ADR
+update, while unchecked items remain required by the ADR even if later
+verification finds that some have already landed.
 
 - [ ] `tests/coding_agent/test_memory_switch.py::test_read_off_suppresses_grounding_injection`
 - [ ] `tests/coding_agent/test_memory_switch.py::test_recall_planner_enabled_is_derived_from_effective_read`
@@ -223,6 +237,10 @@ repo gate:
 - [ ] `tests/coding_agent/test_semantic_sync.py::test_manifest_cache_is_not_sync_authority`
 - [ ] `tests/coding_agent/test_semantic_sync.py::test_full_rebuild_is_idempotent`
 - [ ] `tests/coding_agent/test_semantic_sync.py::test_manual_rebuild_startup_and_event_triggers_share_sync_contract`
+- [x] `tests/coding_agent/test_semantic_maintenance.py::test_semantic_maintenance_rebuild_scans_topic_store_in_pages`
+- [x] `tests/coding_agent/test_semantic_maintenance.py::test_semantic_maintenance_rebuild_requires_topic_store_before_clearing`
+- [x] `tests/coding_agent/test_semantic_maintenance.py::test_semantic_maintenance_rebuild_rejects_duplicate_topic_scan`
+- [x] `tests/coding_agent/test_semantic_maintenance.py::test_semantic_maintenance_status_counts_documents_and_review_states`
 - [ ] `tests/coding_agent/test_memory_switch.py::test_semantic_enabled_fake_backend_registers_plugin_and_exposes_index_by_default`
 - [ ] `tests/coding_agent/test_memory_switch.py::test_semantic_enabled_with_read_disabled_exposes_index_without_registering_plugin`
 - [ ] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_accept_candidate_updates_semantic_index`
