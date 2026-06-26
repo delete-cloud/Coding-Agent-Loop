@@ -70,6 +70,7 @@ from coding_agent.stores.durable_pg import (
     FencedPGCheckpointStore,
     FencedPGRuntimeStore,
     FencedPGTapeStore,
+    FencedPGTopicStore,
     PGDurableStore,
 )
 from coding_agent.plugins.storage import JSONLTapeStore
@@ -1208,7 +1209,13 @@ class SessionManager:
         if all(value == "pg" for value in backend_values.values()):
             if self._custom_store_names:
                 return None
-            return PGTopicStore(pool=self._get_pg_pool())
+            if self._pg_durable_store is None:
+                return PGTopicStore(pool=self._get_pg_pool())
+            return FencedPGTopicStore(
+                durable_store=self._pg_durable_store,
+                pool=self._get_pg_pool(),
+                authority_for_session=self._owner_authority_for_session,
+            )
         return None
 
     def _sqlite_storage_path(self, path_key: str, default: Path) -> Path:
