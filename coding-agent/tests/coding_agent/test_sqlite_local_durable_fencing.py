@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -19,6 +20,13 @@ from coding_agent.server.stores.session_owner_store import (
 )
 from coding_agent.server.stores.session_store import InMemorySessionStore
 from coding_agent.server.stores.session_store import SQLiteSessionStore
+from coding_agent.topics.store import (
+    SQLiteTopicStore,
+    TopicAnchorRecord,
+    TopicCostRecord,
+    TopicRecallLinkRecord,
+    TopicRecord,
+)
 
 
 class FakeCheckpointStore:
@@ -170,6 +178,183 @@ def test_session_manager_custom_tape_store_warns_and_disables_local_fencing(
 
     assert manager._local_durable_store is None
     assert "durable fencing disabled: custom tape_store supplied" in caplog.text
+
+
+def test_session_manager_selects_sqlite_topic_store_for_local_durable_bundle(
+    tmp_path: Path,
+) -> None:
+    owner_store = SQLiteSessionOwnerStore(local_sqlite_path(tmp_path))
+    manager = SessionManager(
+        storage_config=local_sqlite_storage_config(tmp_path),
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=999,
+    )
+
+    selected = manager.selected_topic_store()
+
+    assert isinstance(selected, SQLiteTopicStore)
+
+
+def test_sqlite_local_durable_upgrade_preserves_existing_data_and_adds_topic_schema(
+    tmp_path: Path,
+) -> None:
+    path = local_sqlite_path(tmp_path)
+    SQLiteSessionStore(path).save(
+        "session-existing",
+        {"id": "session-existing", "tape_id": "tape-existing"},
+    )
+
+    SQLiteLocalDurableStore(path)
+
+    assert SQLiteSessionStore(path).load("session-existing") == {
+        "id": "session-existing",
+        "tape_id": "tape-existing",
+    }
+    with sqlite3.connect(path) as connection:
+        table_names = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        index_names = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            )
+        }
+    assert {"topics", "topic_anchors", "topic_recall_links", "topic_costs"} <= (
+        table_names
+    )
+    assert "topics_one_open_per_session_tape_idx" in index_names
+
+
+@pytest.mark.asyncio
+async def test_fenced_sqlite_topic_mutations_reject_stale_owner_for_all_mutators(
+    tmp_path: Path,
+) -> None:
+    owner_store = SQLiteSessionOwnerStore(local_sqlite_path(tmp_path))
+    manager = SessionManager(
+        storage_config=local_sqlite_storage_config(tmp_path),
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=999,
+    )
+    session_a = await manager.get_session_async(await manager.create_session())
+    session_b = await manager.get_session_async(await manager.create_session())
+    session_a.tape_id = "tape-a"
+    session_b.tape_id = "tape-b"
+    await manager._persist_session_async(session_a)
+    await manager._persist_session_async(session_b)
+    stale_store = manager.selected_topic_store()
+    assert stale_store is not None
+    await stale_store.create_topic(_topic("topic-1", session_a.id, session_a.tape_id))
+    await stale_store.create_topic(
+        _topic("topic-old", session_b.id, session_b.tape_id, seq=1)
+    )
+    await stale_store.finalize_topic(
+        "topic-old",
+        summary="old",
+        topic_finalized_seq=3,
+        finalized_at=datetime.now(UTC),
+        metadata={},
+    )
+    await stale_store.create_topic(
+        _topic("topic-2", session_b.id, session_b.tape_id, seq=4)
+    )
+    assert await owner_store.release(session_a.id, "owner-a", 1) is True
+    assert await owner_store.release(session_b.id, "owner-a", 1) is True
+    await owner_store.acquire_authority(session_a.id, "owner-b", lease_seconds=30.0)
+    await owner_store.acquire_authority(session_b.id, "owner-b", lease_seconds=30.0)
+
+    with pytest.raises(SessionOwnershipConflictError):
+        await stale_store.finalize_topic(
+            "topic-1",
+            summary="done",
+            topic_finalized_seq=5,
+            finalized_at=datetime.now(UTC),
+            metadata={},
+        )
+    with pytest.raises(SessionOwnershipConflictError):
+        await stale_store.record_topic_anchor(
+            TopicAnchorRecord(
+                topic_id="topic-1",
+                tape_id=session_a.tape_id,
+                seq=1,
+                anchor_type="topic_initial",
+                entry_id=None,
+            )
+        )
+    with pytest.raises(SessionOwnershipConflictError):
+        await stale_store.abort_topic(
+            "topic-2",
+            summary="aborted",
+            topic_finalized_seq=6,
+            finalized_at=datetime.now(UTC),
+            metadata={},
+        )
+    with pytest.raises(SessionOwnershipConflictError):
+        await stale_store.record_recall_link(
+            TopicRecallLinkRecord(
+                source_topic_id="topic-2",
+                recalled_topic_id="topic-old",
+                relation="summary_recall",
+            )
+        )
+    with pytest.raises(SessionOwnershipConflictError):
+        await stale_store.update_topic_cost(TopicCostRecord(topic_id="topic-1"))
+
+
+@pytest.mark.asyncio
+async def test_fenced_sqlite_topic_mutations_reject_cross_session_targets(
+    tmp_path: Path,
+) -> None:
+    owner_store = SQLiteSessionOwnerStore(local_sqlite_path(tmp_path))
+    manager = SessionManager(
+        storage_config=local_sqlite_storage_config(tmp_path),
+        owner_store=owner_store,
+        owner_id="owner-a",
+        fencing_token=999,
+    )
+    session_a = await manager.get_session_async(await manager.create_session())
+    session_b = await manager.get_session_async(await manager.create_session())
+    session_a.tape_id = "tape-a"
+    session_b.tape_id = "tape-b"
+    await manager._persist_session_async(session_a)
+    await manager._persist_session_async(session_b)
+    topic_store = manager.selected_topic_store()
+    assert topic_store is not None
+    await topic_store.create_topic(_topic("topic-1", session_a.id, session_a.tape_id))
+
+    with pytest.raises(SessionOwnershipConflictError):
+        await topic_store.create_topic(
+            _topic("topic-2", session_b.id, session_a.tape_id)
+        )
+
+
+def _topic(
+    topic_id: str,
+    session_id: str,
+    tape_id: str,
+    *,
+    seq: int = 1,
+) -> TopicRecord:
+    return TopicRecord(
+        topic_id=topic_id,
+        tape_id=tape_id,
+        session_id=session_id,
+        kind="coding",
+        status="open",
+        title="Topic",
+        summary=None,
+        owner="local",
+        topic_initial_seq=seq,
+        topic_finalized_seq=None,
+        created_at=datetime.now(UTC),
+        finalized_at=None,
+        metadata={},
+    )
 
 
 def test_session_manager_custom_tape_store_does_not_warn_for_non_sqlite_config(
@@ -818,6 +1003,183 @@ async def test_sqlite_local_durable_store_restores_checkpoint_state_atomically(
             plugin_states={},
         ),
     )
+    await store.create_topic(
+        owner,
+        TopicRecord(
+            topic_id="topic-keep",
+            tape_id="tape-a",
+            session_id="session-a",
+            kind="conversation",
+            status="open",
+            title="keep",
+            summary=None,
+            owner=None,
+            topic_initial_seq=0,
+            topic_finalized_seq=None,
+            created_at=created_at - timedelta(milliseconds=3),
+            metadata={},
+        ),
+    )
+    await store.finalize_topic(
+        owner,
+        "topic-keep",
+        summary="valid before checkpoint",
+        topic_finalized_seq=0,
+        finalized_at=created_at,
+        metadata={},
+    )
+    await store.create_topic(
+        owner,
+        TopicRecord(
+            topic_id="topic-peer",
+            tape_id="tape-a",
+            session_id="session-a",
+            kind="conversation",
+            status="open",
+            title="peer",
+            summary=None,
+            owner=None,
+            topic_initial_seq=0,
+            topic_finalized_seq=None,
+            created_at=created_at - timedelta(milliseconds=2),
+            metadata={},
+        ),
+    )
+    await store.finalize_topic(
+        owner,
+        "topic-peer",
+        summary="valid peer",
+        topic_finalized_seq=0,
+        finalized_at=created_at,
+        metadata={},
+    )
+    await store.create_topic(
+        owner,
+        TopicRecord(
+            topic_id="topic-reopen",
+            tape_id="tape-a",
+            session_id="session-a",
+            kind="conversation",
+            status="open",
+            title="reopen",
+            summary=None,
+            owner=None,
+            topic_initial_seq=0,
+            topic_finalized_seq=None,
+            created_at=created_at - timedelta(milliseconds=1),
+            metadata={},
+        ),
+    )
+    await store.finalize_topic(
+        owner,
+        "topic-reopen",
+        summary="closed after checkpoint",
+        topic_finalized_seq=1,
+        finalized_at=created_at + timedelta(seconds=1),
+        metadata={"after": True},
+    )
+    await store.create_topic(
+        owner,
+        TopicRecord(
+            topic_id="topic-stale-finalized",
+            tape_id="tape-a",
+            session_id="session-a",
+            kind="conversation",
+            status="open",
+            title="stale finalized",
+            summary=None,
+            owner=None,
+            topic_initial_seq=0,
+            topic_finalized_seq=None,
+            created_at=created_at + timedelta(milliseconds=2),
+            metadata={},
+        ),
+    )
+    await store.finalize_topic(
+        owner,
+        "topic-stale-finalized",
+        summary="finalized after checkpoint",
+        topic_finalized_seq=1,
+        finalized_at=created_at,
+        metadata={},
+    )
+    await store.record_topic_anchor(
+        owner,
+        TopicAnchorRecord(
+            topic_id="topic-keep",
+            tape_id="tape-a",
+            seq=0,
+            anchor_type="start",
+            entry_id="keep-anchor",
+        ),
+    )
+    await store.record_topic_anchor(
+        owner,
+        TopicAnchorRecord(
+            topic_id="topic-keep",
+            tape_id="tape-a",
+            seq=1,
+            anchor_type="future",
+            entry_id="future-anchor",
+        ),
+    )
+    await store.record_recall_link(
+        owner,
+        TopicRecallLinkRecord(
+            source_topic_id="topic-keep",
+            recalled_topic_id="topic-peer",
+            relation="mentions",
+            anchor_seq=1,
+            source_entry_start_seq=0,
+            source_entry_end_seq=1,
+        ),
+    )
+    await store.update_topic_cost(
+        owner,
+        TopicCostRecord(topic_id="topic-keep", total_tokens=10, run_count=1),
+    )
+    await store.create_topic(
+        owner,
+        TopicRecord(
+            topic_id="topic-future",
+            tape_id="tape-a",
+            session_id="session-a",
+            kind="conversation",
+            status="open",
+            title="future",
+            summary=None,
+            owner=None,
+            topic_initial_seq=1,
+            topic_finalized_seq=None,
+            created_at=created_at + timedelta(milliseconds=3),
+            metadata={},
+        ),
+    )
+    await store.record_topic_anchor(
+        owner,
+        TopicAnchorRecord(
+            topic_id="topic-future",
+            tape_id="tape-a",
+            seq=1,
+            anchor_type="start",
+            entry_id="future-topic-anchor",
+        ),
+    )
+    await store.record_recall_link(
+        owner,
+        TopicRecallLinkRecord(
+            source_topic_id="topic-future",
+            recalled_topic_id="topic-keep",
+            relation="mentions",
+            anchor_seq=1,
+            source_entry_start_seq=1,
+            source_entry_end_seq=1,
+        ),
+    )
+    await store.update_topic_cost(
+        owner,
+        TopicCostRecord(topic_id="topic-future", total_tokens=20, run_count=1),
+    )
     await store.truncate_tape(owner, "tape-a", 0)
     await store.append_tape_entries(
         owner,
@@ -862,3 +1224,22 @@ async def test_sqlite_local_durable_store_restores_checkpoint_state_atomically(
     }
     assert await store.load_checkpoint("checkpoint-keep") is not None
     assert await store.load_checkpoint("checkpoint-drop") is None
+    topic_reader = SQLiteTopicStore(tmp_path / "local.sqlite3")
+    restored_topics = await topic_reader.list_topics(tape_id="tape-a")
+    topics_by_id = {topic.topic_id: topic for topic in restored_topics}
+    assert set(topics_by_id) == {"topic-keep", "topic-peer", "topic-reopen"}
+    assert topics_by_id["topic-reopen"].status == "open"
+    assert topics_by_id["topic-reopen"].summary is None
+    assert topics_by_id["topic-reopen"].topic_finalized_seq is None
+    assert topics_by_id["topic-reopen"].finalized_at is None
+    assert topics_by_id["topic-reopen"].metadata == {}
+    assert [
+        (anchor.seq, anchor.anchor_type)
+        for anchor in await topic_reader.list_topic_anchors("topic-keep")
+    ] == [(0, "start")]
+    assert await topic_reader.list_topic_anchors("topic-future") == []
+    assert await topic_reader.list_recall_links("topic-keep") == []
+    assert await topic_reader.list_recall_links("topic-future") == []
+    assert await topic_reader.load_topic_cost("topic-keep") is None
+    assert await topic_reader.load_topic_cost("topic-future") is None
+    assert await topic_reader.list_topic_anchors("topic-stale-finalized") == []

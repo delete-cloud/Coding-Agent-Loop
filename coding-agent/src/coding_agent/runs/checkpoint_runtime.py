@@ -39,6 +39,7 @@ SubagentMessagePublisherBinder = Callable[[object], None]
 RestoreConsumerFactory = Callable[[object], object]
 CheckpointRuntimeAdapterFactory = Callable[[object, object, object], object]
 RuntimePreparationRequestFactory = Callable[..., RunRequest]
+SemanticTopicStoreFactory = Callable[[], object | None]
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,7 @@ class CheckpointRuntimeBuilder:
     restore_consumer_factory: RestoreConsumerFactory
     adapter_factory: CheckpointRuntimeAdapterFactory
     runtime_preparation_request: RuntimePreparationRequestFactory
+    semantic_topic_store_factory: SemanticTopicStoreFactory = lambda: None
 
     async def prepare_runtime(
         self,
@@ -131,6 +133,7 @@ class CheckpointRuntimeBuilder:
             approval_mode_override=self._approval_mode(restored_config.approval_policy),
             session_id_override=session.id,
             api_key=None,
+            semantic_topic_store=self.semantic_topic_store_factory(),
             tape=restored_tape,
         )
         ctx.config["wire_consumer"] = None

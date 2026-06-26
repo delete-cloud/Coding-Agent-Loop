@@ -32,16 +32,20 @@ Then inspect:
 - `/console/observability?run_id={run_id}` for safe trace correlation including
   topic correlation when available.
 
-When PG-backed HTTP storage is configured, the console prefers `PGTopicStore`
-for topics, anchors, recall links, and cost aggregates. Without PG-backed topic
-storage, it falls back to sanitized run metadata.
+The console prefers the product-selected durable `TopicStore` for topics,
+anchors, recall links, and cost aggregates:
 
-Current durable `TopicStore` authority is PG-only. The local SQLite durable
-bundle persists tape, checkpoint, runtime, and session state, but does not yet
-provide `SQLiteTopicStore`. Without PG-backed topic storage, the topic console
-fallback is for inspection only: topic-backed semantic full rebuild is
-unavailable and must fail before clearing any derived semantic backend rather
-than rebuilding from partial run metadata.
+- local SQLite durable bundles use `SQLiteTopicStore` on the same
+  `local.sqlite3` file as session, tape, checkpoint, runtime, and owner state;
+- PostgreSQL durable deployments use `PGTopicStore`;
+- custom, mixed, or non-durable storage modes have no selected durable
+  `TopicStore` and fall back to sanitized run metadata for read-only
+  inspection.
+
+The metadata fallback is not an authoritative semantic rebuild source.
+Topic-backed semantic full rebuild requires a selected durable `TopicStore` and
+must fail before clearing any derived semantic backend if no complete durable
+topic authority is available.
 
 ## Verification
 

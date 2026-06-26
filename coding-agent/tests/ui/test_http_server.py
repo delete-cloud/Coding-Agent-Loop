@@ -204,6 +204,20 @@ def _test_runtime_profile_config(image: str = "python:3.11-slim") -> dict[str, o
     }
 
 
+def test_console_topic_store_uses_session_manager_selected_topic_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected_store = object()
+
+    class FakeSessionManager:
+        def selected_topic_store(self) -> object:
+            return selected_store
+
+    monkeypatch.setattr(http_server, "session_manager", FakeSessionManager())
+
+    assert http_server._console_topic_store() is selected_store
+
+
 @pytest.fixture(autouse=True)
 async def clear_sessions(isolated_http_session_manager: SessionManager):
     """Provide each test with an isolated unfenced session manager."""
@@ -2288,6 +2302,39 @@ max_turns = 17
             assert type(manager._owner_store).__name__ == "SQLiteSessionOwnerStore"
             assert manager._owner_id is not None
             assert manager._local_durable_store is not None
+        finally:
+            asyncio.run(manager.close())
+
+    def test_build_session_manager_normalizes_paths_local_for_sqlite_owner_store(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        home = tmp_path / "home"
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setattr(
+            "coding_agent.server.http_server._load_storage_config",
+            lambda: {
+                "paths": {"local": "~/bundle/local.sqlite3"},
+                "http_session_backend": "sqlite",
+                "tape_backend": "sqlite",
+                "checkpoint_backend": "sqlite",
+                "runtime_backend": "sqlite",
+                "owner_id": "server-a",
+                "owner_lease_seconds": 40.0,
+            },
+        )
+
+        manager = _build_session_manager()
+        try:
+            expected_path = home / "bundle" / "local.sqlite3"
+            assert manager._owner_store is not None
+            assert manager._local_durable_store is not None
+            assert manager._owner_store._path.resolve() == expected_path.resolve()
+            assert (
+                manager._local_durable_store._path.resolve() == expected_path.resolve()
+            )
+            assert not Path("./~").exists()
         finally:
             asyncio.run(manager.close())
 

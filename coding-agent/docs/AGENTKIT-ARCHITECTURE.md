@@ -18,6 +18,10 @@ AgentKit separates **mechanism** from **policy**. The framework provides the exe
 
 That separation also applies to checkpoint restore semantics. AgentKit exposes tape and checkpoint primitives, but product layers decide whether restore means rollback, branching, or another policy on top of those primitives. In `coding_agent`, the accepted current policy is controlled rollback on one active stable timeline per session; the framework-level append-only description applies to normal forward execution, not to every product-layer restore policy.
 
+The same boundary applies to topics and semantic memory maintenance. AgentKit
+does not own `TopicStore` selection or topic-backed rebuild authority. Those are
+Coding Agent product policies layered over AgentKit tape/checkpoint mechanisms.
+
 ```
 ┌─────────────────────────────────────────┐
 │            Application Code             │
