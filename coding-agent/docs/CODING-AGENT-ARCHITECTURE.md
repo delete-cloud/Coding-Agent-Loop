@@ -940,7 +940,14 @@ Fallback when no topic boundaries exist. Keeps the last `keep_recent` entries ve
 
 ### Topic Lifecycle
 
-Coding Agent product topics are explicit durable tape ranges managed by `TopicLifecycle` and `PGTopicStore`. The legacy file-overlap `TopicPlugin` is no longer part of the default application plugin set. Product topic lifecycle writes safe product anchors and durable records instead of inferring topic switches from raw tool-call file overlap.
+Coding Agent product topics are explicit durable tape ranges managed by
+`TopicLifecycle` and the product-selected durable TopicStore. Local SQLite
+durable bundles use `SQLiteTopicStore` on `local.sqlite3`; PostgreSQL durable
+deployments use `PGTopicStore`; custom, mixed, or non-durable storage modes have
+no selected durable TopicStore and keep console metadata fallback read-only. The
+legacy file-overlap `TopicPlugin` is no longer part of the default application
+plugin set. Product topic lifecycle writes safe product anchors and durable
+records instead of inferring topic switches from raw tool-call file overlap.
 
 ### Memory Grounding
 

@@ -56,12 +56,14 @@ from coding_agent.stores.local import (
     local_sqlite_storage_config,
     local_sqlite_path_from_storage_config,
     normalize_storage_path,
+    storage_uses_local_sqlite_bundle,
     with_local_sqlite_bundle_paths,
 )
 from coding_agent.stores.durable_local import (
     FencedSQLiteCheckpointStore,
     FencedSQLiteRuntimeStore,
     FencedSQLiteTapeStore,
+    FencedSQLiteTopicStore,
     SQLiteLocalDurableStore,
 )
 from coding_agent.stores.durable_pg import (
@@ -83,6 +85,8 @@ from coding_agent.stores.runtime_store import (
     SQLiteRuntimeStore,
 )
 from coding_agent.stores import RuntimeStore
+from coding_agent.topics.store import PGTopicStore, SQLiteTopicStore
+from coding_agent.topics.semantic_maintenance import SemanticMemoryMaintainer
 from coding_agent.executors import (
     LocalDaemonExecutor,
 )
@@ -857,6 +861,9 @@ class SessionManager:
             if storage_config
             else local_sqlite_storage_config(data_dir)
         )
+        self._local_sqlite_bundle_path = normalize_storage_path(
+            str(local_sqlite_path_from_storage_config(self._storage_config, data_dir))
+        )
         self._pg_pool = pg_pool
         self._owns_pg_pool = False
         self._custom_store_names = _custom_store_names(
@@ -867,7 +874,6 @@ class SessionManager:
             runtime_store=runtime_store,
         )
         self._local_durable_store = self._create_local_durable_store(
-            data_dir=data_dir,
             owner_store=owner_store,
         )
         self._pg_durable_store: PGDurableStore | None = None
@@ -882,10 +888,7 @@ class SessionManager:
         if self._local_durable_store is not None and tape_store is None:
             self._tape_store = FencedSQLiteTapeStore(
                 durable_store=self._local_durable_store,
-                path=local_sqlite_path_from_storage_config(
-                    self._storage_config,
-                    data_dir,
-                ),
+                path=self._local_sqlite_bundle_path,
                 authority_for_session=self._owner_authority_for_session,
             )
         self._agent_observation_store = observation_store or JsonlAgentObservationStore(
@@ -905,10 +908,7 @@ class SessionManager:
         ):
             resolved_checkpoint_store = FencedSQLiteCheckpointStore(
                 durable_store=self._local_durable_store,
-                path=local_sqlite_path_from_storage_config(
-                    self._storage_config,
-                    data_dir,
-                ),
+                path=self._local_sqlite_bundle_path,
                 authority_for_session=self._owner_authority_for_session,
             )
         self._checkpoint_service = checkpoint_service or CheckpointService(
@@ -933,10 +933,7 @@ class SessionManager:
         if self._local_durable_store is not None and runtime_store is None:
             self._runtime_store = FencedSQLiteRuntimeStore(
                 durable_store=self._local_durable_store,
-                path=local_sqlite_path_from_storage_config(
-                    self._storage_config,
-                    data_dir,
-                ),
+                path=self._local_sqlite_bundle_path,
                 authority_for_session=self._owner_authority_for_session,
                 authorities=lambda: dict(self._owner_authorities),
             )
@@ -1033,6 +1030,7 @@ class SessionManager:
             runtime_preparation_request=(
                 self._runtime_preparation_request_service.request_for_session
             ),
+            semantic_topic_store_factory=self.selected_topic_store,
             adapter_factory=lambda pipeline, ctx, consumer: PipelineAdapter(
                 pipeline=pipeline,
                 ctx=ctx,
@@ -1066,6 +1064,7 @@ class SessionManager:
             ),
             close_runtime=self._runtime_closer.close,
             persist_session=self._persist_session_async,
+            semantic_topic_store_factory=self.selected_topic_store,
             restore_durable_state=self._restore_checkpoint_durable_state,
         )
         self._runtime_checkpoint_restore_orchestration = (
@@ -1196,6 +1195,48 @@ class SessionManager:
     def pg_pool(self) -> PGPool:
         return self._get_pg_pool()
 
+    def selected_topic_store(self) -> SQLiteTopicStore | PGTopicStore | None:
+        if self._local_durable_store is not None:
+            if not storage_uses_local_sqlite_bundle(self._storage_config):
+                return None
+            return FencedSQLiteTopicStore(
+                durable_store=self._local_durable_store,
+                path=self._local_sqlite_bundle_path,
+                authority_for_session=self._owner_authority_for_session,
+            )
+        backend_values = durable_storage_backend_values(self._storage_config)
+        if all(value == "pg" for value in backend_values.values()):
+            if self._custom_store_names:
+                return None
+            return PGTopicStore(pool=self._get_pg_pool())
+        return None
+
+    def _sqlite_storage_path(self, path_key: str, default: Path) -> Path:
+        path_obj = self._storage_config.get(path_key)
+        if isinstance(path_obj, str) and path_obj.strip():
+            return normalize_storage_path(path_obj)
+        return default
+
+    async def semantic_memory_maintainer(
+        self,
+        session_id: str,
+    ) -> SemanticMemoryMaintainer:
+        runtime_ctx = await self.ensure_session_runtime(session_id)
+        config = getattr(runtime_ctx, "config", None)
+        if not isinstance(config, dict):
+            raise RuntimeError("semantic memory is disabled")
+        backend = config.get("semantic_memory_backend")
+        syncer = config.get("semantic_memory_syncer")
+        review_store = config.get("memory_review_store")
+        if backend is None or syncer is None or review_store is None:
+            raise RuntimeError("semantic memory is disabled")
+        return SemanticMemoryMaintainer(
+            syncer=syncer,
+            backend=backend,
+            review_store=review_store,
+            topic_store=self.selected_topic_store(),
+        )
+
     def configure_owner_leases(
         self,
         *,
@@ -1224,7 +1265,6 @@ class SessionManager:
     def _create_local_durable_store(
         self,
         *,
-        data_dir: Path,
         owner_store: SessionOwnerStoreProtocol | None,
     ) -> SQLiteLocalDurableStore | None:
         if owner_store is None or not callable(
@@ -1260,9 +1300,7 @@ class SessionManager:
                 ", ".join(self._custom_store_names),
             )
             return None
-        local_path = normalize_storage_path(
-            str(local_sqlite_path_from_storage_config(config, data_dir))
-        )
+        local_path = self._local_sqlite_bundle_path
         configured_paths = {
             key: normalize_storage_path(str(config.get(key, "")))
             for key in DURABLE_STORAGE_PATH_KEYS
@@ -1797,10 +1835,17 @@ class SessionManager:
         )
         dsn = self._storage_config.get("dsn")
         session_path = self._storage_config.get("http_session_path")
+        if backend == "sqlite":
+            session_path = str(
+                self._sqlite_storage_path(
+                    "http_session_path",
+                    self._local_sqlite_bundle_path,
+                )
+            )
         return create_session_store(
             backend=backend,
             dsn=dsn if isinstance(dsn, str) else None,
-            pg_pool=None,
+            pg_pool=self._get_pg_pool() if backend == "pg" else None,
             file_path=session_path if isinstance(session_path, str) else None,
         )
 
@@ -1810,11 +1855,8 @@ class SessionManager:
             _, PGTapeStore, _ = _load_pg_storage_types()
             return cast(TapeStore, PGTapeStore(pool=self._get_pg_pool()))
         if backend == "sqlite":
-            path_obj = self._storage_config.get("tape_path")
-            path = (
-                Path(path_obj)
-                if isinstance(path_obj, str) and path_obj.strip()
-                else data_dir / "local.sqlite3"
+            path = self._sqlite_storage_path(
+                "tape_path", self._local_sqlite_bundle_path
             )
             return SQLiteTapeStore(path)
         return JSONLTapeStore(data_dir / "tapes")
@@ -1833,11 +1875,9 @@ class SessionManager:
             _, _, PGCheckpointStore = _load_pg_storage_types()
             return cast(CheckpointStore, PGCheckpointStore(pool=self._get_pg_pool()))
         if backend == "sqlite":
-            path_obj = self._storage_config.get("checkpoint_path")
-            path = (
-                Path(path_obj)
-                if isinstance(path_obj, str) and path_obj.strip()
-                else data_dir / "local.sqlite3"
+            path = self._sqlite_storage_path(
+                "checkpoint_path",
+                self._local_sqlite_bundle_path,
             )
             return SQLiteCheckpointStore(path)
         return FSCheckpointStore(data_dir / "checkpoints")
@@ -1862,11 +1902,9 @@ class SessionManager:
             )
             return JSONLRuntimeStore(root)
         if backend == "sqlite":
-            path_obj = self._storage_config.get("runtime_path")
-            path = (
-                Path(path_obj)
-                if isinstance(path_obj, str) and path_obj.strip()
-                else Path(os.environ.get("AGENT_DATA_DIR", "./data")) / "local.sqlite3"
+            path = self._sqlite_storage_path(
+                "runtime_path",
+                self._local_sqlite_bundle_path,
             )
             return SQLiteRuntimeStore(path)
         raise ValueError(f"unsupported storage.runtime_backend: {backend}")

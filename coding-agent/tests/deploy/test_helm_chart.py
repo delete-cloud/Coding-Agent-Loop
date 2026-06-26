@@ -178,6 +178,25 @@ def test_helm_default_runtime_contract_is_runnable() -> None:
     assert "--allow-unauthenticated" not in main["command"]
 
 
+def test_helm_default_config_derives_local_sqlite_topic_store_path() -> None:
+    docs = _render()
+    storage = _agent_toml(docs)["storage"]
+
+    assert storage["paths"]["local"] == "/var/lib/coding-agent/data/local.sqlite3"
+    assert storage["tape_backend"] == "sqlite"
+    assert storage["http_session_backend"] == "sqlite"
+    assert storage["checkpoint_backend"] == "sqlite"
+    assert storage["runtime_backend"] == "sqlite"
+
+
+def test_helm_default_config_does_not_render_or_enable_memory_semantic() -> None:
+    docs = _render()
+    config = _agent_toml(docs)
+
+    assert "memory" not in config or "semantic" not in config["memory"]
+    assert "[memory.semantic]" not in _agent_toml_text(docs)
+
+
 def test_helm_agent_config_checksum_annotation_changes_with_config(
     tmp_path: Path,
 ) -> None:

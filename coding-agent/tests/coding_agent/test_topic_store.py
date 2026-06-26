@@ -36,6 +36,14 @@ class FakeTopicPool:
             if existing is not None:
                 return existing
             row = _topic_row(*args)
+            if row["status"] == "open":
+                for topic in self.topics.values():
+                    if (
+                        topic["status"] == "open"
+                        and topic["session_id"] == row["session_id"]
+                        and topic["tape_id"] == row["tape_id"]
+                    ):
+                        raise RuntimeError("duplicate open topic")
             self.topics[cast(str, row["topic_id"])] = row
             return row
         if "UPDATE topics" in query and "status = 'finalized'" in query:
@@ -57,6 +65,8 @@ class FakeTopicPool:
             return rows[0] if rows else None
         if "INSERT INTO topic_anchors" in query:
             topic_id, tape_id, seq, anchor_type, entry_id, metadata = args
+            if topic_id not in self.topics:
+                raise RuntimeError("parent topic not found")
             row = {
                 "topic_id": topic_id,
                 "tape_id": tape_id,
@@ -80,6 +90,11 @@ class FakeTopicPool:
                 source_entry_end_seq,
                 metadata,
             ) = args
+            if (
+                source_topic_id not in self.topics
+                or recalled_topic_id not in self.topics
+            ):
+                raise RuntimeError("parent topic not found")
             row = {
                 "source_topic_id": source_topic_id,
                 "recalled_topic_id": recalled_topic_id,
@@ -98,6 +113,8 @@ class FakeTopicPool:
             self.recall_links[key] = row
             return row
         if "INSERT INTO topic_costs" in query:
+            if args[0] not in self.topics:
+                raise RuntimeError("parent topic not found")
             row = self._upsert_cost(args)
             self.costs[cast(str, row["topic_id"])] = row
             return row
@@ -286,10 +303,10 @@ def _topic_row(*args: object) -> dict[str, object]:
     }
 
 
-def _open_topic(topic_id: str, seq: int = 3) -> TopicRecord:
+def _open_topic(topic_id: str, seq: int = 3, tape_id: str = "tape-1") -> TopicRecord:
     return TopicRecord(
         topic_id=topic_id,
-        tape_id="tape-1",
+        tape_id=tape_id,
         session_id="session-1",
         kind="coding",
         status="open",
@@ -419,8 +436,8 @@ async def test_topic_list_offset_uses_topic_id_tiebreak(
     store: PGTopicStore,
     fake_pool: FakeTopicPool,
 ) -> None:
-    await store.create_topic(_open_topic("topic-b"))
-    await store.create_topic(_open_topic("topic-a"))
+    await store.create_topic(_open_topic("topic-b", tape_id="tape-b"))
+    await store.create_topic(_open_topic("topic-a", tape_id="tape-a"))
 
     second_topic = await store.list_topics(session_id="session-1", limit=1, offset=1)
     after_first_topic = await store.list_topics(
@@ -448,6 +465,35 @@ async def test_topic_list_rejects_partial_cursor(store: PGTopicStore) -> None:
 
     with pytest.raises(ValueError, match="provided together"):
         await store.list_topics(after_topic_id="topic-a")
+
+
+@pytest.mark.asyncio
+async def test_pg_topic_store_fake_enforces_open_topic_uniqueness(
+    store: PGTopicStore,
+) -> None:
+    await store.create_topic(_open_topic("topic-1"))
+
+    with pytest.raises(RuntimeError, match="duplicate open topic"):
+        await store.create_topic(_open_topic("topic-2", seq=4))
+
+
+@pytest.mark.asyncio
+async def test_pg_topic_store_fake_rejects_orphan_child_rows(
+    store: PGTopicStore,
+) -> None:
+    with pytest.raises(RuntimeError, match="parent topic not found"):
+        await store.record_topic_anchor(
+            TopicAnchorRecord(
+                topic_id="missing",
+                tape_id="tape-1",
+                seq=3,
+                anchor_type="topic_initial",
+                entry_id="entry-1",
+            )
+        )
+
+    with pytest.raises(RuntimeError, match="parent topic not found"):
+        await store.update_topic_cost(TopicCostRecord(topic_id="missing"))
 
 
 @pytest.mark.asyncio
@@ -507,7 +553,7 @@ async def test_find_open_topic_by_session_and_tape(store: PGTopicStore) -> None:
 @pytest.mark.asyncio
 async def test_record_topic_anchor_and_recall_link(store: PGTopicStore) -> None:
     await store.create_topic(_open_topic("topic-1"))
-    await store.create_topic(_open_topic("topic-0", seq=0))
+    await store.create_topic(_open_topic("topic-0", seq=0, tape_id="tape-0"))
 
     initial = await store.record_topic_anchor(
         TopicAnchorRecord(
@@ -553,6 +599,8 @@ async def test_record_topic_anchor_and_recall_link(store: PGTopicStore) -> None:
 
 @pytest.mark.asyncio
 async def test_update_and_load_topic_cost_aggregate(store: PGTopicStore) -> None:
+    await store.create_topic(_open_topic("topic-1"))
+
     first = await store.update_topic_cost(
         TopicCostRecord(
             topic_id="topic-1",

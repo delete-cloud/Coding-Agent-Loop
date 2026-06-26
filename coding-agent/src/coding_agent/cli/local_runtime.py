@@ -14,6 +14,7 @@ from coding_agent.core.config import Config
 from coding_agent.runs import UNSET, UnsetType
 from coding_agent.stores.local import local_sqlite_storage_config
 from coding_agent.stores.local import local_sqlite_path_from_storage_config
+from coding_agent.stores.local import normalize_storage_path
 from coding_agent.server.session_manager import SessionManager
 from coding_agent.server.stores.session_owner_store import SQLiteSessionOwnerStore
 
@@ -157,8 +158,12 @@ class ServerBackedLocalCliSessionManager:
         fencing_token = self.fencing_token
         if owner_store is None:
             owner_store = SQLiteSessionOwnerStore(
-                local_sqlite_path_from_storage_config(
-                    dict(self.storage_config),
+                normalize_storage_path(
+                    str(
+                        local_sqlite_path_from_storage_config(
+                            dict(self.storage_config),
+                        )
+                    )
                 )
             )
             owner_id = owner_id or f"local-cli:{uuid4().hex}"
@@ -360,7 +365,9 @@ __all__ = [
 
 
 def create_agent(*args: Any, **kwargs: Any) -> tuple[Any, Any]:
-    return importlib.import_module("coding_agent.core.app").create_agent(*args, **kwargs)
+    return importlib.import_module("coding_agent.core.app").create_agent(
+        *args, **kwargs
+    )
 
 
 def create_local_cli_runtime(config: Config, consumer: Any) -> LocalCliRuntime:

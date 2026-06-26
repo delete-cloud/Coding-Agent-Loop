@@ -103,6 +103,7 @@ def _service(
     consumer: object,
     adapter: FakeRuntimeAdapter,
     executor: FakeLocalDaemonExecutor | None = None,
+    semantic_topic_store: object | None = None,
 ) -> LocalDaemonRuntimePreparationService:
     async def close_runtime(session: FakeRuntimeSession) -> None:
         session.runtime_pipeline = None
@@ -156,6 +157,7 @@ def _service(
             {"subagent_message_publisher": "bound"}
         ),
         runtime_preparation_request=runtime_preparation_request,
+        semantic_topic_store_factory=lambda: semantic_topic_store,
         adapter_factory=lambda pipeline, ctx, runtime_consumer: adapter,
     )
 
@@ -243,6 +245,29 @@ async def test_runtime_preparation_service_builds_runtime_through_executor(
     assert restored == ["tape-old"]
     assert runtime.adapter is adapter
     assert adapter.initialized is True
+
+
+@pytest.mark.asyncio
+async def test_runtime_preparation_threads_semantic_topic_store_to_create_agent(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    session = FakeRuntimeSession()
+    session.default_run_target = _request(workspace).target
+    created: dict[str, object] = {}
+    semantic_topic_store = object()
+
+    await _service(
+        created=created,
+        persisted=[],
+        restored=[],
+        consumer=object(),
+        adapter=FakeRuntimeAdapter(),
+        semantic_topic_store=semantic_topic_store,
+    ).build_runtime(session)
+
+    assert created["semantic_topic_store"] is semantic_topic_store
 
 
 @pytest.mark.asyncio

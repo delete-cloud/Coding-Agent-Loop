@@ -36,6 +36,7 @@ RuntimeFactory = Callable[..., tuple[object, object]]
 RuntimeAdapterFactory = Callable[[object, object, object], RuntimeTurnAdapter]
 SubagentMessagePublisherBinder = Callable[[object], None]
 RuntimePreparationRequestFactory = Callable[..., RunRequest]
+SemanticTopicStoreFactory = Callable[[], object | None]
 
 
 class RuntimeConsumer(Protocol):
@@ -73,6 +74,7 @@ class LocalDaemonRuntimePreparationService:
     make_consumer: RuntimeConsumerFactory
     bind_subagent_message_publisher: SubagentMessagePublisherBinder
     runtime_preparation_request: RuntimePreparationRequestFactory
+    semantic_topic_store_factory: SemanticTopicStoreFactory = lambda: None
     adapter_factory: RuntimeAdapterFactory = lambda pipeline, ctx, consumer: (
         PipelineAdapter(
             pipeline=pipeline,
@@ -205,6 +207,7 @@ class LocalDaemonRuntimePreparationService:
             additional_workspace_roots_override=list(
                 getattr(session, "additional_directories", [])
             ),
+            semantic_topic_store=self.semantic_topic_store_factory(),
             tape=await self.restore_tape(session.tape_id),
         )
         ctx.config["wire_consumer"] = consumer

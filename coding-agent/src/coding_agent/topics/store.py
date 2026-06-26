@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import json
+import sqlite3
+import threading
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Final
 
 from agentkit.storage.pg import AsyncPGPool, PGPool
@@ -629,12 +633,540 @@ class PGTopicStore:
         return _topic_cost_from_row(row)
 
 
+class SQLiteTopicStore:
+    _CREATE_SCHEMA_SQL: Final[str] = """
+    CREATE TABLE IF NOT EXISTS topics (
+        topic_id TEXT PRIMARY KEY,
+        tape_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        status TEXT NOT NULL,
+        title TEXT,
+        summary TEXT,
+        owner TEXT,
+        topic_initial_seq INTEGER NOT NULL,
+        topic_finalized_seq INTEGER,
+        created_at TEXT NOT NULL,
+        finalized_at TEXT,
+        metadata TEXT NOT NULL DEFAULT '{}',
+        updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS topics_session_status_created_idx
+        ON topics (session_id, status, created_at, topic_id);
+
+    CREATE INDEX IF NOT EXISTS topics_tape_status_initial_idx
+        ON topics (tape_id, status, topic_initial_seq, topic_id);
+
+    CREATE INDEX IF NOT EXISTS topics_status_created_idx
+        ON topics (status, created_at, topic_id);
+
+    CREATE UNIQUE INDEX IF NOT EXISTS topics_one_open_per_session_tape_idx
+        ON topics (session_id, tape_id)
+        WHERE status = 'open';
+
+    CREATE TABLE IF NOT EXISTS topic_anchors (
+        topic_id TEXT NOT NULL REFERENCES topics(topic_id) ON DELETE CASCADE,
+        tape_id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        anchor_type TEXT NOT NULL,
+        entry_id TEXT,
+        metadata TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (topic_id, seq, anchor_type)
+    );
+
+    CREATE INDEX IF NOT EXISTS topic_anchors_tape_seq_idx
+        ON topic_anchors (tape_id, seq);
+
+    CREATE TABLE IF NOT EXISTS topic_recall_links (
+        source_topic_id TEXT NOT NULL REFERENCES topics(topic_id) ON DELETE CASCADE,
+        recalled_topic_id TEXT NOT NULL REFERENCES topics(topic_id) ON DELETE CASCADE,
+        relation TEXT NOT NULL,
+        anchor_seq INTEGER,
+        source_entry_start_seq INTEGER,
+        source_entry_end_seq INTEGER,
+        metadata TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (source_topic_id, recalled_topic_id, relation)
+    );
+
+    CREATE INDEX IF NOT EXISTS topic_recall_links_recalled_idx
+        ON topic_recall_links (recalled_topic_id, source_topic_id);
+
+    CREATE TABLE IF NOT EXISTS topic_costs (
+        topic_id TEXT PRIMARY KEY REFERENCES topics(topic_id) ON DELETE CASCADE,
+        prompt_tokens INTEGER NOT NULL DEFAULT 0,
+        completion_tokens INTEGER NOT NULL DEFAULT 0,
+        total_tokens INTEGER NOT NULL DEFAULT 0,
+        run_count INTEGER NOT NULL DEFAULT 0,
+        action_count INTEGER NOT NULL DEFAULT 0,
+        validation_count INTEGER NOT NULL DEFAULT 0,
+        tool_call_count INTEGER NOT NULL DEFAULT 0,
+        metadata TEXT NOT NULL DEFAULT '{}',
+        updated_at TEXT NOT NULL
+    );
+    """
+
+    def __init__(self, path: Path | str) -> None:
+        self._path = Path(path)
+        self._lock = threading.Lock()
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        with self._connect() as connection:
+            connection.executescript(self._CREATE_SCHEMA_SQL)
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self._path, timeout=5.0)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout = 5000")
+        connection.execute("PRAGMA foreign_keys = ON")
+        return connection
+
+    async def create_topic(self, record: TopicRecord) -> TopicRecord:
+        now = _datetime_to_sqlite_text(datetime.now(UTC))
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO topics (
+                    topic_id,
+                    tape_id,
+                    session_id,
+                    kind,
+                    status,
+                    title,
+                    summary,
+                    owner,
+                    topic_initial_seq,
+                    topic_finalized_seq,
+                    created_at,
+                    finalized_at,
+                    metadata,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(topic_id) DO NOTHING
+                """,
+                (
+                    record.topic_id,
+                    record.tape_id,
+                    record.session_id,
+                    record.kind,
+                    record.status,
+                    record.title,
+                    record.summary,
+                    record.owner,
+                    record.topic_initial_seq,
+                    record.topic_finalized_seq,
+                    _datetime_to_sqlite_text(record.created_at),
+                    _optional_datetime_to_sqlite_text(record.finalized_at),
+                    _json_to_sqlite_text(record.metadata),
+                    now,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM topics WHERE topic_id = ?",
+                (record.topic_id,),
+            ).fetchone()
+        return _topic_from_sqlite_row(_required_sqlite_row(row, "topic insert"))
+
+    async def finalize_topic(
+        self,
+        topic_id: str,
+        *,
+        summary: str | None,
+        topic_finalized_seq: int,
+        finalized_at: datetime,
+        metadata: JSONObject,
+    ) -> TopicRecord:
+        return await self._close_topic(
+            "finalized",
+            "finalize",
+            topic_id,
+            summary=summary,
+            topic_finalized_seq=topic_finalized_seq,
+            finalized_at=finalized_at,
+            metadata=metadata,
+        )
+
+    async def abort_topic(
+        self,
+        topic_id: str,
+        *,
+        summary: str | None,
+        topic_finalized_seq: int | None,
+        finalized_at: datetime,
+        metadata: JSONObject,
+    ) -> TopicRecord:
+        return await self._close_topic(
+            "aborted",
+            "abort",
+            topic_id,
+            summary=summary,
+            topic_finalized_seq=topic_finalized_seq,
+            finalized_at=finalized_at,
+            metadata=metadata,
+        )
+
+    async def _close_topic(
+        self,
+        status: TopicStatus,
+        operation: str,
+        topic_id: str,
+        *,
+        summary: str | None,
+        topic_finalized_seq: int | None,
+        finalized_at: datetime,
+        metadata: JSONObject,
+    ) -> TopicRecord:
+        _require_non_empty("topic_id", topic_id)
+        _require_optional_display_text("summary", summary)
+        if topic_finalized_seq is not None:
+            _require_non_negative_int("topic_finalized_seq", topic_finalized_seq)
+        _require_datetime("finalized_at", finalized_at)
+        _require_json_object("metadata", metadata)
+        if status == "finalized" and topic_finalized_seq is None:
+            raise ValueError("topic_finalized_seq must be provided for finalize")
+        with self._lock, self._connect() as connection:
+            if status == "finalized":
+                row = connection.execute(
+                    """
+                    UPDATE topics
+                    SET status = ?,
+                        summary = ?,
+                        topic_finalized_seq = ?,
+                        finalized_at = ?,
+                        metadata = ?,
+                        updated_at = ?
+                    WHERE topic_id = ? AND status = 'open'
+                      AND ? >= topic_initial_seq
+                    RETURNING *
+                    """,
+                    (
+                        status,
+                        summary,
+                        topic_finalized_seq,
+                        _datetime_to_sqlite_text(finalized_at),
+                        _json_to_sqlite_text(metadata),
+                        _datetime_to_sqlite_text(datetime.now(UTC)),
+                        topic_id,
+                        topic_finalized_seq,
+                    ),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    """
+                    UPDATE topics
+                    SET status = ?,
+                        summary = ?,
+                        topic_finalized_seq = ?,
+                        finalized_at = ?,
+                        metadata = ?,
+                        updated_at = ?
+                    WHERE topic_id = ? AND status = 'open'
+                      AND (? IS NULL OR ? >= topic_initial_seq)
+                    RETURNING *
+                    """,
+                    (
+                        status,
+                        summary,
+                        topic_finalized_seq,
+                        _datetime_to_sqlite_text(finalized_at),
+                        _json_to_sqlite_text(metadata),
+                        _datetime_to_sqlite_text(datetime.now(UTC)),
+                        topic_id,
+                        topic_finalized_seq,
+                        topic_finalized_seq,
+                    ),
+                ).fetchone()
+        if row is None:
+            raise KeyError(f"open topic not found for {operation}: {topic_id}")
+        return _topic_from_sqlite_row(row)
+
+    async def load_topic(self, topic_id: str) -> TopicRecord | None:
+        _require_non_empty("topic_id", topic_id)
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM topics WHERE topic_id = ?",
+                (topic_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return _topic_from_sqlite_row(row)
+
+    async def list_topics(
+        self,
+        *,
+        session_id: str | None = None,
+        tape_id: str | None = None,
+        status: TopicStatus | None = None,
+        after_created_at: datetime | None = None,
+        after_topic_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[TopicRecord]:
+        if session_id is not None:
+            _require_non_empty("session_id", session_id)
+        if tape_id is not None:
+            _require_non_empty("tape_id", tape_id)
+        if status is not None:
+            _require_topic_status(status)
+        if (after_created_at is None) != (after_topic_id is None):
+            raise ValueError(
+                "after_created_at and after_topic_id must be provided together"
+            )
+        after_created_at_text: str | None = None
+        if after_created_at is not None:
+            _require_datetime("after_created_at", after_created_at)
+            after_created_at_text = _datetime_to_sqlite_text(after_created_at)
+        if after_topic_id is not None:
+            _require_non_empty("after_topic_id", after_topic_id)
+        _require_positive_int("limit", limit)
+        _require_non_negative_int("offset", offset)
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM topics
+                WHERE (? IS NULL OR session_id = ?)
+                  AND (? IS NULL OR tape_id = ?)
+                  AND (? IS NULL OR status = ?)
+                  AND (
+                    ? IS NULL
+                    OR created_at > ?
+                    OR (created_at = ? AND topic_id > ?)
+                  )
+                ORDER BY created_at, topic_id
+                LIMIT ?
+                OFFSET ?
+                """,
+                (
+                    session_id,
+                    session_id,
+                    tape_id,
+                    tape_id,
+                    status,
+                    status,
+                    after_created_at_text,
+                    after_created_at_text,
+                    after_created_at_text,
+                    after_topic_id,
+                    limit,
+                    offset,
+                ),
+            ).fetchall()
+        return [_topic_from_sqlite_row(row) for row in rows]
+
+    async def find_open_topic(
+        self,
+        *,
+        session_id: str,
+        tape_id: str,
+    ) -> TopicRecord | None:
+        _require_non_empty("session_id", session_id)
+        _require_non_empty("tape_id", tape_id)
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM topics
+                WHERE session_id = ? AND tape_id = ? AND status = 'open'
+                ORDER BY created_at DESC, topic_id DESC
+                LIMIT 1
+                """,
+                (session_id, tape_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return _topic_from_sqlite_row(row)
+
+    async def record_topic_anchor(
+        self,
+        record: TopicAnchorRecord,
+    ) -> TopicAnchorRecord:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                INSERT INTO topic_anchors (
+                    topic_id,
+                    tape_id,
+                    seq,
+                    anchor_type,
+                    entry_id,
+                    metadata,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(topic_id, seq, anchor_type)
+                DO UPDATE SET
+                    tape_id = excluded.tape_id,
+                    entry_id = excluded.entry_id,
+                    metadata = excluded.metadata
+                RETURNING *
+                """,
+                (
+                    record.topic_id,
+                    record.tape_id,
+                    record.seq,
+                    record.anchor_type,
+                    record.entry_id,
+                    _json_to_sqlite_text(record.metadata),
+                    _datetime_to_sqlite_text(record.created_at or datetime.now(UTC)),
+                ),
+            ).fetchone()
+        return _topic_anchor_from_sqlite_row(
+            _required_sqlite_row(row, "topic anchor upsert")
+        )
+
+    async def list_topic_anchors(self, topic_id: str) -> list[TopicAnchorRecord]:
+        _require_non_empty("topic_id", topic_id)
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM topic_anchors
+                WHERE topic_id = ?
+                ORDER BY seq, anchor_type
+                """,
+                (topic_id,),
+            ).fetchall()
+        return [_topic_anchor_from_sqlite_row(row) for row in rows]
+
+    async def record_recall_link(
+        self,
+        record: TopicRecallLinkRecord,
+    ) -> TopicRecallLinkRecord:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                INSERT INTO topic_recall_links (
+                    source_topic_id,
+                    recalled_topic_id,
+                    relation,
+                    anchor_seq,
+                    source_entry_start_seq,
+                    source_entry_end_seq,
+                    metadata,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_topic_id, recalled_topic_id, relation)
+                DO UPDATE SET
+                    anchor_seq = excluded.anchor_seq,
+                    source_entry_start_seq = excluded.source_entry_start_seq,
+                    source_entry_end_seq = excluded.source_entry_end_seq,
+                    metadata = excluded.metadata
+                RETURNING *
+                """,
+                (
+                    record.source_topic_id,
+                    record.recalled_topic_id,
+                    record.relation,
+                    record.anchor_seq,
+                    record.source_entry_start_seq,
+                    record.source_entry_end_seq,
+                    _json_to_sqlite_text(record.metadata),
+                    _datetime_to_sqlite_text(record.created_at or datetime.now(UTC)),
+                ),
+            ).fetchone()
+        return _topic_recall_link_from_sqlite_row(
+            _required_sqlite_row(row, "topic recall link upsert")
+        )
+
+    async def list_recall_links(
+        self,
+        source_topic_id: str,
+    ) -> list[TopicRecallLinkRecord]:
+        _require_non_empty("source_topic_id", source_topic_id)
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM topic_recall_links
+                WHERE source_topic_id = ?
+                ORDER BY created_at, recalled_topic_id, relation
+                """,
+                (source_topic_id,),
+            ).fetchall()
+        return [_topic_recall_link_from_sqlite_row(row) for row in rows]
+
+    async def update_topic_cost(
+        self,
+        delta: TopicCostRecord,
+    ) -> TopicCostRecord:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                INSERT INTO topic_costs (
+                    topic_id,
+                    prompt_tokens,
+                    completion_tokens,
+                    total_tokens,
+                    run_count,
+                    action_count,
+                    validation_count,
+                    tool_call_count,
+                    metadata,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(topic_id)
+                DO UPDATE SET
+                    prompt_tokens = topic_costs.prompt_tokens
+                        + excluded.prompt_tokens,
+                    completion_tokens = topic_costs.completion_tokens
+                        + excluded.completion_tokens,
+                    total_tokens = topic_costs.total_tokens
+                        + excluded.total_tokens,
+                    run_count = topic_costs.run_count + excluded.run_count,
+                    action_count = topic_costs.action_count + excluded.action_count,
+                    validation_count = topic_costs.validation_count
+                        + excluded.validation_count,
+                    tool_call_count = topic_costs.tool_call_count
+                        + excluded.tool_call_count,
+                    metadata = excluded.metadata,
+                    updated_at = excluded.updated_at
+                RETURNING *
+                """,
+                (
+                    delta.topic_id,
+                    delta.prompt_tokens,
+                    delta.completion_tokens,
+                    delta.total_tokens,
+                    delta.run_count,
+                    delta.action_count,
+                    delta.validation_count,
+                    delta.tool_call_count,
+                    _json_to_sqlite_text(delta.metadata),
+                    _datetime_to_sqlite_text(delta.updated_at or datetime.now(UTC)),
+                ),
+            ).fetchone()
+        return _topic_cost_from_sqlite_row(
+            _required_sqlite_row(row, "topic cost upsert")
+        )
+
+    async def load_topic_cost(self, topic_id: str) -> TopicCostRecord | None:
+        _require_non_empty("topic_id", topic_id)
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM topic_costs WHERE topic_id = ?",
+                (topic_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return _topic_cost_from_sqlite_row(row)
+
+
 def _required_row(
     row: dict[str, object] | None,
     context: str,
 ) -> dict[str, object]:
     if row is None:
         raise RuntimeError(f"postgres {context} returned no row")
+    return row
+
+
+def _required_sqlite_row(
+    row: sqlite3.Row | None,
+    context: str,
+) -> sqlite3.Row:
+    if row is None:
+        raise RuntimeError(f"sqlite {context} returned no row")
     return row
 
 
@@ -739,6 +1271,152 @@ def _topic_cost_from_row(row: dict[str, object]) -> TopicCostRecord:
         ),
         metadata=_required_json_object(row, "metadata", context="topic cost row"),
         updated_at=_optional_datetime(row, "updated_at", context="topic cost row"),
+    )
+
+
+def _topic_from_sqlite_row(row: sqlite3.Row) -> TopicRecord:
+    return TopicRecord(
+        topic_id=_sqlite_required_str(row, "topic_id", context="topic row"),
+        tape_id=_sqlite_required_str(row, "tape_id", context="topic row"),
+        session_id=_sqlite_required_str(row, "session_id", context="topic row"),
+        kind=_sqlite_required_str(row, "kind", context="topic row"),
+        status=_sqlite_required_str(row, "status", context="topic row"),
+        title=_sqlite_optional_str(row, "title", context="topic row"),
+        summary=_sqlite_optional_str(row, "summary", context="topic row"),
+        owner=_sqlite_optional_str(row, "owner", context="topic row"),
+        topic_initial_seq=_sqlite_required_int(
+            row,
+            "topic_initial_seq",
+            context="topic row",
+        ),
+        topic_finalized_seq=_sqlite_optional_int(
+            row,
+            "topic_finalized_seq",
+            context="topic row",
+        ),
+        created_at=_sqlite_required_datetime(row, "created_at", context="topic row"),
+        finalized_at=_sqlite_optional_datetime(
+            row,
+            "finalized_at",
+            context="topic row",
+        ),
+        metadata=_sqlite_required_json_object(row, "metadata", context="topic row"),
+    )
+
+
+def _topic_anchor_from_sqlite_row(row: sqlite3.Row) -> TopicAnchorRecord:
+    return TopicAnchorRecord(
+        topic_id=_sqlite_required_str(row, "topic_id", context="topic anchor row"),
+        tape_id=_sqlite_required_str(row, "tape_id", context="topic anchor row"),
+        seq=_sqlite_required_int(row, "seq", context="topic anchor row"),
+        anchor_type=_sqlite_required_str(
+            row,
+            "anchor_type",
+            context="topic anchor row",
+        ),
+        entry_id=_sqlite_optional_str(row, "entry_id", context="topic anchor row"),
+        metadata=_sqlite_required_json_object(
+            row,
+            "metadata",
+            context="topic anchor row",
+        ),
+        created_at=_sqlite_optional_datetime(
+            row,
+            "created_at",
+            context="topic anchor row",
+        ),
+    )
+
+
+def _topic_recall_link_from_sqlite_row(row: sqlite3.Row) -> TopicRecallLinkRecord:
+    return TopicRecallLinkRecord(
+        source_topic_id=_sqlite_required_str(
+            row,
+            "source_topic_id",
+            context="topic recall link row",
+        ),
+        recalled_topic_id=_sqlite_required_str(
+            row,
+            "recalled_topic_id",
+            context="topic recall link row",
+        ),
+        relation=_sqlite_required_str(
+            row,
+            "relation",
+            context="topic recall link row",
+        ),
+        anchor_seq=_sqlite_optional_int(
+            row,
+            "anchor_seq",
+            context="topic recall link row",
+        ),
+        source_entry_start_seq=_sqlite_optional_int(
+            row,
+            "source_entry_start_seq",
+            context="topic recall link row",
+        ),
+        source_entry_end_seq=_sqlite_optional_int(
+            row,
+            "source_entry_end_seq",
+            context="topic recall link row",
+        ),
+        metadata=_sqlite_required_json_object(
+            row,
+            "metadata",
+            context="topic recall link row",
+        ),
+        created_at=_sqlite_optional_datetime(
+            row,
+            "created_at",
+            context="topic recall link row",
+        ),
+    )
+
+
+def _topic_cost_from_sqlite_row(row: sqlite3.Row) -> TopicCostRecord:
+    return TopicCostRecord(
+        topic_id=_sqlite_required_str(row, "topic_id", context="topic cost row"),
+        prompt_tokens=_sqlite_required_int(
+            row,
+            "prompt_tokens",
+            context="topic cost row",
+        ),
+        completion_tokens=_sqlite_required_int(
+            row,
+            "completion_tokens",
+            context="topic cost row",
+        ),
+        total_tokens=_sqlite_required_int(
+            row,
+            "total_tokens",
+            context="topic cost row",
+        ),
+        run_count=_sqlite_required_int(row, "run_count", context="topic cost row"),
+        action_count=_sqlite_required_int(
+            row,
+            "action_count",
+            context="topic cost row",
+        ),
+        validation_count=_sqlite_required_int(
+            row,
+            "validation_count",
+            context="topic cost row",
+        ),
+        tool_call_count=_sqlite_required_int(
+            row,
+            "tool_call_count",
+            context="topic cost row",
+        ),
+        metadata=_sqlite_required_json_object(
+            row,
+            "metadata",
+            context="topic cost row",
+        ),
+        updated_at=_sqlite_optional_datetime(
+            row,
+            "updated_at",
+            context="topic cost row",
+        ),
     )
 
 
@@ -880,3 +1558,113 @@ def _required_json_object(
         raise TypeError(f"postgres {context} must include dict {key}")
     _require_json_object(key, value)
     return value
+
+
+def _sqlite_required_str(row: sqlite3.Row, key: str, *, context: str) -> str:
+    value = row[key]
+    if not isinstance(value, str):
+        raise TypeError(f"sqlite {context} must include string {key}")
+    return value
+
+
+def _sqlite_optional_str(
+    row: sqlite3.Row,
+    key: str,
+    *,
+    context: str,
+) -> str | None:
+    value = row[key]
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError(f"sqlite {context} must include string or None {key}")
+    return value
+
+
+def _sqlite_required_int(row: sqlite3.Row, key: str, *, context: str) -> int:
+    value = row[key]
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"sqlite {context} must include int {key}")
+    return value
+
+
+def _sqlite_optional_int(
+    row: sqlite3.Row,
+    key: str,
+    *,
+    context: str,
+) -> int | None:
+    value = row[key]
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"sqlite {context} must include int or None {key}")
+    return value
+
+
+def _sqlite_required_datetime(
+    row: sqlite3.Row,
+    key: str,
+    *,
+    context: str,
+) -> datetime:
+    value = row[key]
+    if not isinstance(value, str):
+        raise TypeError(f"sqlite {context} must include datetime text {key}")
+    return _datetime_from_sqlite_text(value)
+
+
+def _sqlite_optional_datetime(
+    row: sqlite3.Row,
+    key: str,
+    *,
+    context: str,
+) -> datetime | None:
+    value = row[key]
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError(f"sqlite {context} must include datetime text or None {key}")
+    return _datetime_from_sqlite_text(value)
+
+
+def _sqlite_required_json_object(
+    row: sqlite3.Row,
+    key: str,
+    *,
+    context: str,
+) -> JSONObject:
+    value = row[key]
+    if not isinstance(value, str):
+        raise TypeError(f"sqlite {context} must include JSON text {key}")
+    parsed = json.loads(value)
+    if not isinstance(parsed, dict):
+        raise TypeError(f"sqlite {context} must include JSON object {key}")
+    _require_json_object(key, parsed)
+    return parsed
+
+
+def _json_to_sqlite_text(value: JSONObject) -> str:
+    _require_json_object("metadata", value)
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _datetime_to_sqlite_text(value: datetime) -> str:
+    _require_datetime("datetime", value)
+    if value.tzinfo is None:
+        raise ValueError("datetime must be timezone-aware")
+    normalized = value.astimezone(UTC)
+    return normalized.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _optional_datetime_to_sqlite_text(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return _datetime_to_sqlite_text(value)
+
+
+def _datetime_from_sqlite_text(value: str) -> datetime:
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
+    except ValueError as exc:
+        raise ValueError(f"invalid sqlite datetime text: {value}") from exc

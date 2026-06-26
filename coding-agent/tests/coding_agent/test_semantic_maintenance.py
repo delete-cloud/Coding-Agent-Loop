@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import types
 from datetime import UTC, datetime
 
 import pytest
 
+from coding_agent.server.session_manager import SessionManager
+from coding_agent.server.stores.session_store import InMemorySessionStore
 from coding_agent.topics.memory import ReviewedMemoryRecord, TopicDerivedMemoryCandidate
 from coding_agent.topics.semantic_backends import (
     FAKE_SEMANTIC_INDEX_SCHEMA,
@@ -221,6 +224,50 @@ async def test_semantic_maintenance_rejects_invalid_batch_size() -> None:
 
     with pytest.raises(ValueError, match="batch_size must be positive"):
         await maintainer.rebuild(batch_size=0)
+
+
+@pytest.mark.asyncio
+async def test_semantic_maintenance_factory_unavailable_when_semantic_disabled() -> (
+    None
+):
+    manager = SessionManager(store=InMemorySessionStore())
+
+    async def ensure_runtime(session_id: str) -> object:
+        assert session_id == "session-1"
+        return types.SimpleNamespace(config={})
+
+    manager.ensure_session_runtime = ensure_runtime  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="semantic memory is disabled"):
+        await manager.semantic_memory_maintainer("session-1")
+
+
+@pytest.mark.asyncio
+async def test_semantic_maintenance_factory_reports_topic_store_available_when_selected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend, syncer = _syncer()
+    review_store = FakeReviewStore(())
+    topic_store = FakePagedTopicStore(())
+    manager = SessionManager(store=InMemorySessionStore())
+
+    async def ensure_runtime(session_id: str) -> object:
+        assert session_id == "session-1"
+        return types.SimpleNamespace(
+            config={
+                "semantic_memory_backend": backend,
+                "semantic_memory_syncer": syncer,
+                "memory_review_store": review_store,
+            }
+        )
+
+    manager.ensure_session_runtime = ensure_runtime  # type: ignore[method-assign]
+    monkeypatch.setattr(manager, "selected_topic_store", lambda: topic_store)
+
+    maintainer = await manager.semantic_memory_maintainer("session-1")
+    status = await maintainer.status()
+
+    assert status.topic_store_available is True
 
 
 def _syncer() -> tuple[FakeSemanticMemoryBackend, SemanticMemorySyncer]:

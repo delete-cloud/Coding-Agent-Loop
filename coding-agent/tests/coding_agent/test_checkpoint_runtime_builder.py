@@ -70,6 +70,7 @@ def _builder(
     local_daemon_executor: LocalDaemonExecutor | None = None,
     observed_targets: list[RunTarget | None] | None = None,
     created_kwargs: dict[str, object] | None = None,
+    semantic_topic_store: object | None = None,
 ) -> CheckpointRuntimeBuilder:
     def resolve_environment(target: RunTarget | None) -> object:
         if observed_targets is not None:
@@ -111,6 +112,7 @@ def _builder(
             ctx,
             consumer,
         ),
+        semantic_topic_store_factory=lambda: semantic_topic_store,
         runtime_preparation_request=lambda session, *, purpose: RunRequest(
             session_id=session.id,
             run_id="runtime-prepare",
@@ -153,6 +155,33 @@ async def test_checkpoint_runtime_builder_direct_injects_plugin_states_before_in
     assert runtime.adapter.plugin_states_at_initialize == {
         "topic": {"current_topic_id": "topic-1"}
     }
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_runtime_builder_threads_semantic_topic_store_to_create_agent() -> (
+    None
+):
+    session = FakeSession(
+        default_run_target=RunTarget(
+            workspace=LocalPathWorkspaceRef(path="/repo"),
+            executor=InlineExecutorRef(),
+            isolation=IsolationPolicy(kind="default_local_sandbox"),
+        )
+    )
+    created_kwargs: dict[str, object] = {}
+    semantic_topic_store = object()
+
+    await _builder(
+        created_kwargs=created_kwargs,
+        semantic_topic_store=semantic_topic_store,
+    ).prepare_runtime(
+        session=session,
+        restored_tape=Tape(entries=[], tape_id="tape-1"),
+        restored_config=_config(),
+        plugin_states={},
+    )
+
+    assert created_kwargs["semantic_topic_store"] is semantic_topic_store
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,7 @@
 """Tests for local CLI runtime/session boundary behavior."""
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 
 from coding_agent.cli.local_runtime import ServerBackedLocalCliSessionManager
@@ -142,6 +143,35 @@ async def test_server_backed_local_cli_default_sqlite_owner_starts_renewal(
     try:
         assert manager.owner_store is not None
         assert manager._owner_renew_task is not None
+    finally:
+        await manager.close()
+
+
+async def test_server_backed_local_cli_normalizes_paths_local_owner_store(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    manager = ServerBackedLocalCliSessionManager(
+        storage_config={
+            "paths": {"local": "~/bundle/local.sqlite3"},
+            "http_session_backend": "sqlite",
+            "tape_backend": "sqlite",
+            "checkpoint_backend": "sqlite",
+            "runtime_backend": "sqlite",
+        },
+    )
+
+    try:
+        expected_path = home / "bundle" / "local.sqlite3"
+        assert manager.owner_store._path.resolve() == expected_path.resolve()
+        assert manager._delegate._local_durable_store is not None
+        assert (
+            manager._delegate._local_durable_store._path.resolve()
+            == expected_path.resolve()
+        )
+        assert not Path("./~").exists()
     finally:
         await manager.close()
 

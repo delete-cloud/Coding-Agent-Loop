@@ -73,6 +73,7 @@ class RuntimeCheckpointRestoreService:
     runtime_preparation_request: RuntimePreparationRequestFactory
     close_runtime: CloseCheckpointRuntime
     persist_session: PersistCheckpointSession
+    semantic_topic_store_factory: Callable[[], object | None] = lambda: None
     restore_durable_state: RestoreDurableCheckpointState | None = None
 
     async def restore(
@@ -106,6 +107,7 @@ class RuntimeCheckpointRestoreService:
             restore_consumer_factory=self.restore_consumer_factory,
             adapter_factory=self.adapter_factory,
             runtime_preparation_request=self.runtime_preparation_request,
+            semantic_topic_store_factory=self.semantic_topic_store_factory,
         ).prepare_runtime(
             session=session,
             restored_tape=restored_tape,

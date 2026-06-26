@@ -93,6 +93,7 @@ from coding_agent.stores.runtime_store import (
 )
 from coding_agent.stores.local import local_sqlite_path_from_storage_config
 from coding_agent.stores.local import local_sqlite_storage_config
+from coding_agent.stores.local import normalize_storage_path
 from coding_agent.stores.local import storage_has_any_sqlite_backend
 from coding_agent.events import DisplayEvent, DisplayEventStreamProjector
 from coding_agent.runs.scheduled import (
@@ -102,7 +103,6 @@ from coding_agent.runs.scheduled import (
     ScheduleTriggerRecord,
 )
 from coding_agent.topics.store import (
-    PGTopicStore,
     TopicAnchorRecord,
     TopicCostRecord,
     TopicRecallLinkRecord,
@@ -810,12 +810,13 @@ def _build_session_manager() -> SessionManager:
         logger.exception("Production config validation failed")
         raise
     has_local_sqlite_intent = storage_has_any_sqlite_backend(effective_storage_config)
+    local_sqlite_owner_path = normalize_storage_path(
+        str(local_sqlite_path_from_storage_config(effective_storage_config))
+    )
     manager = SessionManager(
         storage_config=effective_storage_config,
         owner_store=(
-            SQLiteSessionOwnerStore(
-                local_sqlite_path_from_storage_config(effective_storage_config)
-            )
+            SQLiteSessionOwnerStore(local_sqlite_owner_path)
             if has_local_sqlite_intent
             else None
         ),
@@ -5109,16 +5110,9 @@ def _console_scheduled_run_store() -> PGScheduledRunStore | None:
         return None
 
 
-def _console_topic_store() -> PGTopicStore | None:
+def _console_topic_store() -> Any | None:
     try:
-        storage_config = _load_storage_config()
-    except Exception:
-        logger.exception("Unable to load storage config for console topic store")
-        return None
-    if not _storage_uses_pg_http_sessions(storage_config):
-        return None
-    try:
-        return PGTopicStore(pool=session_manager.pg_pool)
+        return session_manager.selected_topic_store()
     except Exception:
         logger.exception("Unable to initialize console topic store")
         return None

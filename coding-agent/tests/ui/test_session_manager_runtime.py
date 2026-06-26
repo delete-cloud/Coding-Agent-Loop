@@ -67,7 +67,11 @@ from coding_agent.server.session_manager import (
     SessionManager,
     _load_pg_storage_types,
 )
+from coding_agent.server.stores.session_owner_store import SQLiteSessionOwnerStore
 from coding_agent.server.stores.session_store import InMemorySessionStore
+from coding_agent.stores.durable_local import FencedSQLiteTopicStore
+from coding_agent.stores.local import local_sqlite_path, local_sqlite_storage_config
+from coding_agent.topics.store import PGTopicStore
 from coding_agent.server.stores.workspace_store import (
     JSONValue,
     WorkspaceRecord,
@@ -103,6 +107,72 @@ def _external_worker_run_target() -> RunTarget:
         executor=ExternalWorkerExecutorRef(executor_kind="local_cli"),
         isolation=IsolationPolicy(kind="external_worker_policy"),
     )
+
+
+def test_selected_topic_store_returns_fenced_sqlite_store_for_local_durable_bundle(
+    tmp_path: Path,
+) -> None:
+    manager = SessionManager(
+        storage_config=local_sqlite_storage_config(tmp_path),
+        owner_store=SQLiteSessionOwnerStore(local_sqlite_path(tmp_path)),
+        owner_id="owner-a",
+        fencing_token=999,
+    )
+
+    assert isinstance(manager.selected_topic_store(), FencedSQLiteTopicStore)
+
+
+def test_selected_topic_store_uses_normalized_local_bundle_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    bundle_path = home / "bundle" / "local.sqlite3"
+    manager = SessionManager(
+        storage_config={
+            "paths": {"local": "~/bundle/local.sqlite3"},
+            "http_session_backend": "sqlite",
+            "tape_backend": "sqlite",
+            "checkpoint_backend": "sqlite",
+            "runtime_backend": "sqlite",
+        },
+        owner_store=SQLiteSessionOwnerStore(bundle_path),
+        owner_id="owner-a",
+        fencing_token=999,
+    )
+
+    selected = manager.selected_topic_store()
+
+    assert manager._local_durable_store is not None
+    assert isinstance(selected, FencedSQLiteTopicStore)
+    assert manager._local_durable_store._path.resolve() == bundle_path.resolve()
+    assert selected._path.resolve() == bundle_path.resolve()
+
+
+def test_selected_topic_store_returns_pg_topic_store_for_pg_durable_mode() -> None:
+    manager = SessionManager(
+        storage_config={
+            "http_session_backend": "pg",
+            "tape_backend": "pg",
+            "checkpoint_backend": "pg",
+            "runtime_backend": "pg",
+        },
+        pg_pool=object(),
+    )
+
+    assert isinstance(manager.selected_topic_store(), PGTopicStore)
+
+
+def test_selected_topic_store_is_none_for_custom_or_mixed_storage(
+    tmp_path: Path,
+) -> None:
+    mixed_config = local_sqlite_storage_config(tmp_path)
+    mixed_config["runtime_backend"] = "jsonl"
+    mixed_config["runtime_path"] = str(tmp_path / "runtime-jsonl")
+    manager = SessionManager(storage_config=mixed_config)
+
+    assert manager.selected_topic_store() is None
 
 
 class FakeRuntimeStore:
