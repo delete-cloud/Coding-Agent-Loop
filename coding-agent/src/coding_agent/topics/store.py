@@ -193,6 +193,9 @@ class PGTopicStore:
     CREATE INDEX IF NOT EXISTS topics_tape_status_initial_idx
         ON topics (tape_id, status, topic_initial_seq, topic_id);
 
+    CREATE INDEX IF NOT EXISTS topics_status_created_idx
+        ON topics (status, created_at, topic_id);
+
     CREATE UNIQUE INDEX IF NOT EXISTS topics_one_open_per_session_tape_idx
         ON topics (session_id, tape_id)
         WHERE status = 'open';
@@ -295,8 +298,14 @@ class PGTopicStore:
     WHERE ($1::text IS NULL OR session_id = $1)
       AND ($2::text IS NULL OR tape_id = $2)
       AND ($3::text IS NULL OR status = $3)
+      AND (
+        $4::timestamptz IS NULL
+        OR created_at > $4
+        OR (created_at = $4 AND topic_id > $5)
+      )
     ORDER BY created_at, topic_id
-    LIMIT $4
+    LIMIT $6
+    OFFSET $7
     """
     _FIND_OPEN_TOPIC_SQL: Final[str] = """
     SELECT * FROM topics
@@ -494,7 +503,10 @@ class PGTopicStore:
         session_id: str | None = None,
         tape_id: str | None = None,
         status: TopicStatus | None = None,
+        after_created_at: datetime | None = None,
+        after_topic_id: str | None = None,
         limit: int = 100,
+        offset: int = 0,
     ) -> list[TopicRecord]:
         if session_id is not None:
             _require_non_empty("session_id", session_id)
@@ -502,10 +514,26 @@ class PGTopicStore:
             _require_non_empty("tape_id", tape_id)
         if status is not None:
             _require_topic_status(status)
+        if (after_created_at is None) != (after_topic_id is None):
+            raise ValueError(
+                "after_created_at and after_topic_id must be provided together"
+            )
+        if after_created_at is not None:
+            _require_datetime("after_created_at", after_created_at)
+        if after_topic_id is not None:
+            _require_non_empty("after_topic_id", after_topic_id)
         _require_positive_int("limit", limit)
+        _require_non_negative_int("offset", offset)
         pool = await self._ensure_schema()
         rows = await pool.fetch(
-            self._LIST_TOPICS_SQL, session_id, tape_id, status, limit
+            self._LIST_TOPICS_SQL,
+            session_id,
+            tape_id,
+            status,
+            after_created_at,
+            after_topic_id,
+            limit,
+            offset,
         )
         return [_topic_from_row(row) for row in rows]
 
