@@ -18,7 +18,7 @@ from coding_agent.topics.store import TopicRecord
 class FakePagedTopicStore:
     def __init__(self, topics: tuple[TopicRecord, ...]) -> None:
         self._topics = topics
-        self.calls: list[tuple[int, int]] = []
+        self.calls: list[tuple[int, str | None]] = []
 
     async def list_topics(
         self,
@@ -26,21 +26,31 @@ class FakePagedTopicStore:
         session_id: str | None = None,
         tape_id: str | None = None,
         status: str | None = None,
+        after_created_at: datetime | None = None,
+        after_topic_id: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[TopicRecord]:
         del session_id, tape_id
-        self.calls.append((limit, offset))
+        self.calls.append((limit, after_topic_id))
         topics = [
             topic for topic in self._topics if status is None or topic.status == status
         ]
+        topics.sort(key=lambda topic: (topic.created_at, topic.topic_id))
+        if after_created_at is not None and after_topic_id is not None:
+            topics = [
+                topic
+                for topic in topics
+                if (topic.created_at, topic.topic_id)
+                > (after_created_at, after_topic_id)
+            ]
         return topics[offset : offset + limit]
 
 
-class MutatingPagedTopicStore:
+class DuplicatingPagedTopicStore(FakePagedTopicStore):
     def __init__(self, topics: tuple[TopicRecord, ...]) -> None:
-        self._topics = topics
-        self.calls: list[tuple[int, int]] = []
+        super().__init__(topics)
+        self._first_topic = topics[0]
 
     async def list_topics(
         self,
@@ -48,17 +58,23 @@ class MutatingPagedTopicStore:
         session_id: str | None = None,
         tape_id: str | None = None,
         status: str | None = None,
+        after_created_at: datetime | None = None,
+        after_topic_id: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[TopicRecord]:
-        del session_id, tape_id
-        self.calls.append((limit, offset))
-        topics = [
-            topic for topic in self._topics if status is None or topic.status == status
-        ]
+        page = await super().list_topics(
+            session_id=session_id,
+            tape_id=tape_id,
+            status=status,
+            after_created_at=after_created_at,
+            after_topic_id=after_topic_id,
+            limit=limit,
+            offset=offset,
+        )
         if len(self.calls) > 1:
-            topics = (_topic("topic-new", title="New", summary="New summary"), *topics)
-        return list(topics[offset : offset + limit])
+            return [self._first_topic, *page]
+        return page
 
 
 class FakeReviewStore:
@@ -104,7 +120,7 @@ async def test_semantic_maintenance_rebuild_scans_topic_store_in_pages() -> None
 
     report = await maintainer.rebuild(batch_size=50)
 
-    assert topic_store.calls == [(50, 0), (50, 50), (50, 100)]
+    assert topic_store.calls == [(50, None), (50, "topic-049"), (50, "topic-099")]
     assert report.topic_count == 125
     assert report.reviewed_memory_count == 1
     assert report.indexed_count == 126
@@ -137,12 +153,12 @@ async def test_semantic_maintenance_rebuild_requires_topic_store_before_clearing
 
 
 @pytest.mark.asyncio
-async def test_semantic_maintenance_rebuild_rejects_unstable_topic_scan() -> None:
+async def test_semantic_maintenance_rebuild_rejects_duplicate_topic_scan() -> None:
     backend, syncer = _syncer()
     await syncer.sync_topic(
         _topic("topic-existing", title="Existing", summary="Keep existing topic")
     )
-    topic_store = MutatingPagedTopicStore(
+    topic_store = DuplicatingPagedTopicStore(
         (
             _topic("topic-001", title="First", summary="First summary"),
             _topic("topic-002", title="Second", summary="Second summary"),
@@ -159,7 +175,7 @@ async def test_semantic_maintenance_rebuild_rejects_unstable_topic_scan() -> Non
     with pytest.raises(RuntimeError, match="topic scan changed during rebuild"):
         await maintainer.rebuild(batch_size=2)
 
-    assert topic_store.calls == [(2, 0), (2, 2)]
+    assert topic_store.calls == [(2, None), (2, "topic-002")]
     assert await backend.list_ids() == ["topic-summary:topic-existing:2-9"]
 
 

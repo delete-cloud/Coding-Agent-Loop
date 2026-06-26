@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Protocol
 
 from coding_agent.topics.memory import ReviewedMemoryRecord
@@ -19,6 +20,8 @@ class TopicListingStore(Protocol):
         session_id: str | None = None,
         tape_id: str | None = None,
         status: TopicStatus | None = None,
+        after_created_at: datetime | None = None,
+        after_topic_id: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> Sequence[TopicRecord]: ...
@@ -92,13 +95,15 @@ class SemanticMemoryMaintainer:
             raise RuntimeError("topic_store is required for semantic memory rebuild")
         topics: list[TopicRecord] = []
         seen_topic_ids: set[str] = set()
-        offset = 0
+        after_created_at: datetime | None = None
+        after_topic_id: str | None = None
         while True:
             page = tuple(
                 await self.topic_store.list_topics(
                     status="finalized",
+                    after_created_at=after_created_at,
+                    after_topic_id=after_topic_id,
                     limit=batch_size,
-                    offset=offset,
                 )
             )
             if not page:
@@ -113,7 +118,9 @@ class SemanticMemoryMaintainer:
             topics.extend(page)
             if len(page) < batch_size:
                 return tuple(topics)
-            offset += len(page)
+            last_topic = page[-1]
+            after_created_at = last_topic.created_at
+            after_topic_id = last_topic.topic_id
 
 
 def _require_positive_int(field_name: str, value: int) -> None:

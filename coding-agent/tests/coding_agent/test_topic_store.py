@@ -108,13 +108,29 @@ class FakeTopicPool:
     async def fetch(self, query: str, *args: object) -> list[dict[str, object]]:
         self.executed.append((query, args))
         if "SELECT * FROM topics" in query:
-            session_id, tape_id, status, limit, offset = args
+            (
+                session_id,
+                tape_id,
+                status,
+                after_created_at,
+                after_topic_id,
+                limit,
+                offset,
+            ) = args
             rows = [
                 row
                 for row in self.topics.values()
                 if (session_id is None or row["session_id"] == session_id)
                 and (tape_id is None or row["tape_id"] == tape_id)
                 and (status is None or row["status"] == status)
+                and (
+                    after_created_at is None
+                    or (
+                        cast(datetime, row["created_at"]),
+                        cast(str, row["topic_id"]),
+                    )
+                    > (cast(datetime, after_created_at), cast(str, after_topic_id))
+                )
             ]
             rows.sort(
                 key=lambda row: (
@@ -316,6 +332,7 @@ async def test_topic_store_schema_is_idempotent(
     assert "CREATE TABLE IF NOT EXISTS topic_anchors" in schema_calls[0]
     assert "CREATE TABLE IF NOT EXISTS topic_recall_links" in schema_calls[0]
     assert "CREATE TABLE IF NOT EXISTS topic_costs" in schema_calls[0]
+    assert "CREATE INDEX IF NOT EXISTS topics_status_created_idx" in schema_calls[0]
     assert (
         "topic_id TEXT NOT NULL REFERENCES topics(topic_id) ON DELETE CASCADE"
         in (schema_calls[0])
@@ -390,9 +407,11 @@ async def test_topic_create_finalize_abort_and_list(
     list_queries = [
         query
         for query, args in fake_pool.executed
-        if "SELECT * FROM topics" in query and len(args) == 5
+        if "SELECT * FROM topics" in query and len(args) == 7
     ]
-    assert all("OFFSET $5" in query for query in list_queries)
+    assert all("created_at = $4 AND topic_id > $5" in query for query in list_queries)
+    assert all("LIMIT $6" in query for query in list_queries)
+    assert all("OFFSET $7" in query for query in list_queries)
 
 
 @pytest.mark.asyncio
@@ -404,15 +423,31 @@ async def test_topic_list_offset_uses_topic_id_tiebreak(
     await store.create_topic(_open_topic("topic-a"))
 
     second_topic = await store.list_topics(session_id="session-1", limit=1, offset=1)
+    after_first_topic = await store.list_topics(
+        session_id="session-1",
+        after_created_at=_dt(9),
+        after_topic_id="topic-a",
+        limit=10,
+    )
 
     assert [topic.topic_id for topic in second_topic] == ["topic-b"]
+    assert [topic.topic_id for topic in after_first_topic] == ["topic-b"]
     list_queries = [
         query
         for query, args in fake_pool.executed
-        if "SELECT * FROM topics" in query and len(args) == 5
+        if "SELECT * FROM topics" in query and len(args) == 7
     ]
     assert all("ORDER BY created_at, topic_id" in query for query in list_queries)
-    assert all("OFFSET $5" in query for query in list_queries)
+    assert all("OFFSET $7" in query for query in list_queries)
+
+
+@pytest.mark.asyncio
+async def test_topic_list_rejects_partial_cursor(store: PGTopicStore) -> None:
+    with pytest.raises(ValueError, match="provided together"):
+        await store.list_topics(after_created_at=_dt(9))
+
+    with pytest.raises(ValueError, match="provided together"):
+        await store.list_topics(after_topic_id="topic-a")
 
 
 @pytest.mark.asyncio
