@@ -297,6 +297,7 @@ class PGTopicStore:
       AND ($3::text IS NULL OR status = $3)
     ORDER BY created_at, topic_id
     LIMIT $4
+    OFFSET $5
     """
     _FIND_OPEN_TOPIC_SQL: Final[str] = """
     SELECT * FROM topics
@@ -495,6 +496,7 @@ class PGTopicStore:
         tape_id: str | None = None,
         status: TopicStatus | None = None,
         limit: int = 100,
+        offset: int = 0,
     ) -> list[TopicRecord]:
         if session_id is not None:
             _require_non_empty("session_id", session_id)
@@ -503,9 +505,10 @@ class PGTopicStore:
         if status is not None:
             _require_topic_status(status)
         _require_positive_int("limit", limit)
+        _require_non_negative_int("offset", offset)
         pool = await self._ensure_schema()
         rows = await pool.fetch(
-            self._LIST_TOPICS_SQL, session_id, tape_id, status, limit
+            self._LIST_TOPICS_SQL, session_id, tape_id, status, limit, offset
         )
         return [_topic_from_row(row) for row in rows]
 

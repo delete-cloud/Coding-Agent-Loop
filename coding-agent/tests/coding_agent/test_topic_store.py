@@ -108,7 +108,7 @@ class FakeTopicPool:
     async def fetch(self, query: str, *args: object) -> list[dict[str, object]]:
         self.executed.append((query, args))
         if "SELECT * FROM topics" in query:
-            session_id, tape_id, status, limit = args
+            session_id, tape_id, status, limit, offset = args
             rows = [
                 row
                 for row in self.topics.values()
@@ -116,8 +116,15 @@ class FakeTopicPool:
                 and (tape_id is None or row["tape_id"] == tape_id)
                 and (status is None or row["status"] == status)
             ]
-            rows.sort(key=lambda row: cast(datetime, row["created_at"]))
-            return rows[: cast(int, limit)]
+            rows.sort(
+                key=lambda row: (
+                    cast(datetime, row["created_at"]),
+                    cast(str, row["topic_id"]),
+                )
+            )
+            start = cast(int, offset)
+            end = start + cast(int, limit)
+            return rows[start:end]
         if "SELECT * FROM topic_anchors" in query:
             topic_id = cast(str, args[0])
             rows = [row for key, row in self.anchors.items() if key[0] == topic_id]
@@ -309,8 +316,9 @@ async def test_topic_store_schema_is_idempotent(
     assert "CREATE TABLE IF NOT EXISTS topic_anchors" in schema_calls[0]
     assert "CREATE TABLE IF NOT EXISTS topic_recall_links" in schema_calls[0]
     assert "CREATE TABLE IF NOT EXISTS topic_costs" in schema_calls[0]
-    assert "topic_id TEXT NOT NULL REFERENCES topics(topic_id) ON DELETE CASCADE" in (
-        schema_calls[0]
+    assert (
+        "topic_id TEXT NOT NULL REFERENCES topics(topic_id) ON DELETE CASCADE"
+        in (schema_calls[0])
     )
     assert (
         "source_topic_id TEXT NOT NULL REFERENCES topics(topic_id) ON DELETE CASCADE"
@@ -330,6 +338,7 @@ async def test_topic_store_schema_is_idempotent(
 @pytest.mark.asyncio
 async def test_topic_create_finalize_abort_and_list(
     store: PGTopicStore,
+    fake_pool: FakeTopicPool,
 ) -> None:
     created = await store.create_topic(_open_topic("topic-1"))
     await store.create_topic(
@@ -368,6 +377,7 @@ async def test_topic_create_finalize_abort_and_list(
     finalized_topics = await store.list_topics(
         session_id="session-1", status="finalized"
     )
+    offset_topics = await store.list_topics(session_id="session-1", limit=1, offset=1)
 
     assert created.status == "open"
     assert finalized.status == "finalized"
@@ -376,6 +386,33 @@ async def test_topic_create_finalize_abort_and_list(
     assert aborted.status == "aborted"
     assert loaded == finalized
     assert [topic.topic_id for topic in finalized_topics] == ["topic-1"]
+    assert [topic.topic_id for topic in offset_topics] == ["topic-2"]
+    list_queries = [
+        query
+        for query, args in fake_pool.executed
+        if "SELECT * FROM topics" in query and len(args) == 5
+    ]
+    assert all("OFFSET $5" in query for query in list_queries)
+
+
+@pytest.mark.asyncio
+async def test_topic_list_offset_uses_topic_id_tiebreak(
+    store: PGTopicStore,
+    fake_pool: FakeTopicPool,
+) -> None:
+    await store.create_topic(_open_topic("topic-b"))
+    await store.create_topic(_open_topic("topic-a"))
+
+    second_topic = await store.list_topics(session_id="session-1", limit=1, offset=1)
+
+    assert [topic.topic_id for topic in second_topic] == ["topic-b"]
+    list_queries = [
+        query
+        for query, args in fake_pool.executed
+        if "SELECT * FROM topics" in query and len(args) == 5
+    ]
+    assert all("ORDER BY created_at, topic_id" in query for query in list_queries)
+    assert all("OFFSET $5" in query for query in list_queries)
 
 
 @pytest.mark.asyncio
