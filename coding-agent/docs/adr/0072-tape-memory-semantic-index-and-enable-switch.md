@@ -240,9 +240,7 @@ unchecked items remain required by the ADR.
 - [x] `tests/coding_agent/test_semantic_tape_index.py::test_hybrid_merge_is_deterministic_and_dedups`
 - [x] `tests/coding_agent/test_memory_index_backend_contract.py::test_schema_identity_mismatch_fails_clearly`
 - [x] `tests/coding_agent/test_memory_index_backend_contract.py::test_schema_identity_mismatch_requires_explicit_rebuild_and_clears_stale_docs`
-- [x] `tests/coding_agent/test_memory_switch.py::test_disabled_semantic_config_does_not_initialize_provider_or_backend`
-- [x] Disabled semantic config does not require credentials:
-      `tests/coding_agent/test_memory_switch.py::test_disabled_semantic_config_does_not_initialize_provider_or_backend`
+- [x] `tests/coding_agent/test_memory_switch.py::test_disabled_semantic_config_does_not_initialize_provider_or_backend` covers disabled semantic config without credentials.
 - [x] `tests/coding_agent/test_memory_switch.py::test_nested_semantic_config_preserves_existing_memory_switch_defaults`
 - [x] `tests/coding_agent/test_semantic_tape_index.py::test_semantic_index_rejects_invalid_source_ref_before_indexing`
 - [x] `tests/coding_agent/test_semantic_tape_index.py::test_semantic_index_rejects_backend_hit_with_invalid_source_ref`
