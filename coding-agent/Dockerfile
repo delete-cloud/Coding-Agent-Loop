@@ -20,19 +20,24 @@ RUN pnpm build
 
 FROM ${PYTHON_BASE_IMAGE} AS builder
 
+ARG PIP_DEFAULT_TIMEOUT=120
+ARG PIP_INDEX_URL=https://pypi.org/simple
+ARG UV_DEFAULT_INDEX=https://pypi.org/simple
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    PIP_DEFAULT_TIMEOUT=${PIP_DEFAULT_TIMEOUT} \
     UV_LINK_MODE=copy
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir uv
+RUN PIP_INDEX_URL="${PIP_INDEX_URL}" pip install --no-cache-dir uv
 
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 
-RUN uv sync --frozen --no-dev
-RUN uv pip install --python /app/.venv/bin/python redis
+RUN UV_DEFAULT_INDEX="${UV_DEFAULT_INDEX}" uv sync --frozen --no-dev
+RUN UV_DEFAULT_INDEX="${UV_DEFAULT_INDEX}" uv pip install --python /app/.venv/bin/python redis
 
 
 FROM ${PYTHON_BASE_IMAGE} AS runtime

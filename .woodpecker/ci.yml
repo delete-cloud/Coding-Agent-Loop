@@ -6,6 +6,9 @@ when:
 steps:
   lint:
     image: python:3.12-slim
+    environment:
+      PIP_DEFAULT_TIMEOUT: "120"
+      PIP_INDEX_URL: https://pypi.tuna.tsinghua.edu.cn/simple
     commands:
       - cd coding-agent
       - python -m pip install -e '.[dev,redis]' ruff
@@ -13,6 +16,9 @@ steps:
 
   smoke-tests:
     image: python:3.12-slim
+    environment:
+      PIP_DEFAULT_TIMEOUT: "120"
+      PIP_INDEX_URL: https://pypi.tuna.tsinghua.edu.cn/simple
     commands:
       - cd coding-agent
       - python -m pip install -e '.[dev,redis]'
@@ -33,13 +39,16 @@ steps:
         from_secret: proxy_url
       HTTPS_PROXY:
         from_secret: proxy_url
+      PIP_DEFAULT_TIMEOUT: "120"
+      PIP_INDEX_URL: https://pypi.tuna.tsinghua.edu.cn/simple
+      UV_DEFAULT_INDEX: https://pypi.tuna.tsinghua.edu.cn/simple
       no_proxy: git.mesh.kinaz.me,localhost,127.0.0.1,.svc,.cluster.local,10.0.0.0/8,192.168.0.0/16
       NO_PROXY: git.mesh.kinaz.me,localhost,127.0.0.1,.svc,.cluster.local,10.0.0.0/8,192.168.0.0/16
     commands:
       - mkdir -p /kaniko/.docker
       - auth="$(printf '%s:%s' "$REGISTRY_USERNAME" "$REGISTRY_PASSWORD" | base64 | tr -d '\n')"
       - printf '{"auths":{"git.mesh.kinaz.me":{"auth":"%s"}}}\n' "$auth" > /kaniko/.docker/config.json
-      - /kaniko/executor --context "$CI_WORKSPACE/coding-agent" --dockerfile "$CI_WORKSPACE/coding-agent/Dockerfile" --build-arg PYTHON_BASE_IMAGE=git.mesh.kinaz.me/kina/python:3.12-slim --destination "git.mesh.kinaz.me/kina/coding-agent:${CI_COMMIT_SHA}" --destination "git.mesh.kinaz.me/kina/coding-agent:main"
+      - /kaniko/executor --context "$CI_WORKSPACE/coding-agent" --dockerfile "$CI_WORKSPACE/coding-agent/Dockerfile" --build-arg PYTHON_BASE_IMAGE=git.mesh.kinaz.me/kina/python:3.12-slim --build-arg PIP_DEFAULT_TIMEOUT="$PIP_DEFAULT_TIMEOUT" --build-arg PIP_INDEX_URL="$PIP_INDEX_URL" --build-arg UV_DEFAULT_INDEX="$UV_DEFAULT_INDEX" --destination "git.mesh.kinaz.me/kina/coding-agent:${CI_COMMIT_SHA}" --destination "git.mesh.kinaz.me/kina/coding-agent:main"
     when:
       - event:
           - push
