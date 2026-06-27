@@ -8,7 +8,7 @@ steps:
     image: python:3.12-slim
     environment:
       PIP_DEFAULT_TIMEOUT: "120"
-      PIP_INDEX_URL: https://pypi.tuna.tsinghua.edu.cn/simple
+      PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple
     commands:
       - cd coding-agent
       - python -m pip install -e '.[dev,redis]' ruff
@@ -18,7 +18,7 @@ steps:
     image: python:3.12-slim
     environment:
       PIP_DEFAULT_TIMEOUT: "120"
-      PIP_INDEX_URL: https://pypi.tuna.tsinghua.edu.cn/simple
+      PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple
     commands:
       - cd coding-agent
       - python -m pip install -e '.[dev,redis]'
@@ -40,8 +40,8 @@ steps:
       HTTPS_PROXY:
         from_secret: proxy_url
       PIP_DEFAULT_TIMEOUT: "120"
-      PIP_INDEX_URL: https://pypi.tuna.tsinghua.edu.cn/simple
-      UV_DEFAULT_INDEX: https://pypi.tuna.tsinghua.edu.cn/simple
+      PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple
+      UV_DEFAULT_INDEX: https://mirrors.aliyun.com/pypi/simple
       no_proxy: git.mesh.kinaz.me,localhost,127.0.0.1,.svc,.cluster.local,10.0.0.0/8,192.168.0.0/16
       NO_PROXY: git.mesh.kinaz.me,localhost,127.0.0.1,.svc,.cluster.local,10.0.0.0/8,192.168.0.0/16
     commands:
