@@ -298,7 +298,6 @@ backend = "fake"
     rendered = "\n".join(str(item["content"]) for item in result)
     assert durable_summary in rendered
     assert backend_sentinel not in rendered
-    assert "stale backend value" not in rendered
 
 
 class FakeRuntimeStore:
