@@ -71,6 +71,9 @@ from coding_agent.server.auth import AuthContext
 from coding_agent.server.stores.workspace_store import JSONValue, WorkspaceRecord
 from coding_agent.server.stores.session_owner_store import SessionOwnerRecord
 from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictError
+from coding_agent.server.stores.session_owner_store import (
+    SessionOwnershipConflictReason,
+)
 from coding_agent.topics.memory import (
     MemoryReviewStore,
     ReviewedMemoryRecord,
@@ -83,6 +86,7 @@ from coding_agent.topics.semantic_backends import (
 from coding_agent.topics.semantic_index import SafeSemanticMemoryIndex, SemanticDocId
 from coding_agent.topics.semantic_sync import (
     SemanticMemoryReviewSyncService,
+    SemanticSyncReport,
     SemanticMemorySyncer,
 )
 from coding_agent.server.http_server import (
@@ -349,6 +353,333 @@ class _FailingReviewedMemorySyncer:
     ) -> object:
         del record
         raise self._exc
+
+
+class TestSemanticMemoryMaintenance:
+    async def test_semantic_status_requires_admin(
+        self,
+        client: AsyncClient,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv(
+            "CODING_AGENT_SERVER_CONFIG", str(_write_auth_config(tmp_path))
+        )
+        monkeypatch.setattr(settings, "http_api_key", None)
+        register_session("semantic-admin-session")
+
+        response = await client.get(
+            "/sessions/semantic-admin-session/memory/semantic/status",
+            headers={"Authorization": "Bearer user-token-a"},
+        )
+
+        assert response.status_code == 403
+        assert response.json()["detail"] == "Admin token required"
+
+    async def test_semantic_status_returns_counts_without_mutating_backend(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config, review_store, backend, syncer = _semantic_review_runtime_config()
+        accepted_candidate = _review_candidate(
+            "memory-status-accepted",
+            session_id="semantic-status-session",
+        )
+        rejected_candidate = _review_candidate(
+            "memory-status-rejected",
+            session_id="semantic-status-session",
+        )
+        review_store.add_candidate(accepted_candidate)
+        review_store.add_candidate(rejected_candidate)
+        accepted = review_store.accept_candidate_for_session(
+            "semantic-status-session",
+            "memory-status-accepted",
+            reason="Useful",
+        )
+        review_store.reject_candidate_for_session(
+            "semantic-status-session",
+            "memory-status-rejected",
+            reason="Too narrow",
+        )
+        await syncer.sync_reviewed_memory(accepted)
+        register_session("semantic-status-session")
+
+        async def fake_ensure_session_runtime(session_id: str) -> object:
+            assert session_id == "semantic-status-session"
+            return _runtime_ctx(config)
+
+        monkeypatch.setattr(
+            session_manager,
+            "ensure_session_runtime",
+            fake_ensure_session_runtime,
+        )
+        monkeypatch.setattr(session_manager, "selected_topic_store", lambda: None)
+        before_ids = await backend.list_ids()
+
+        response = await client.get(
+            "/sessions/semantic-status-session/memory/semantic/status"
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "document_count": 1,
+            "reviewed_memory_count": 2,
+            "accepted_reviewed_memory_count": 1,
+            "topic_store_available": False,
+        }
+        assert await backend.list_ids() == before_ids
+
+    async def test_semantic_status_disabled_returns_409(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        register_session("semantic-disabled-session")
+
+        async def fake_ensure_session_runtime(session_id: str) -> object:
+            assert session_id == "semantic-disabled-session"
+            return _runtime_ctx({})
+
+        monkeypatch.setattr(
+            session_manager,
+            "ensure_session_runtime",
+            fake_ensure_session_runtime,
+        )
+
+        response = await client.get(
+            "/sessions/semantic-disabled-session/memory/semantic/status"
+        )
+
+        assert response.status_code == 409
+        assert response.json()["detail"] == "semantic memory is disabled"
+
+    async def test_semantic_status_unknown_session_returns_404(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        response = await client.get(
+            "/sessions/missing-semantic-session/memory/semantic/status"
+        )
+
+        assert response.status_code == 404
+        assert (
+            response.json()["detail"] == "Session not found: missing-semantic-session"
+        )
+
+    async def test_semantic_rebuild_requires_admin(
+        self,
+        client: AsyncClient,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv(
+            "CODING_AGENT_SERVER_CONFIG", str(_write_auth_config(tmp_path))
+        )
+        monkeypatch.setattr(settings, "http_api_key", None)
+        register_session("semantic-rebuild-admin-session")
+
+        response = await client.post(
+            "/sessions/semantic-rebuild-admin-session/memory/semantic/rebuild",
+            headers={"Authorization": "Bearer user-token-a"},
+            json={"batch_size": 10, "allow_rebuild": True},
+        )
+
+        assert response.status_code == 403
+        assert response.json()["detail"] == "Admin token required"
+
+    async def test_semantic_rebuild_returns_report(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        register_session("semantic-rebuild-session")
+        rebuild_calls: list[tuple[str, int, bool]] = []
+
+        async def fake_rebuild_semantic_memory(
+            session_id: str,
+            *,
+            batch_size: int,
+            allow_rebuild: bool,
+        ) -> SemanticSyncReport:
+            rebuild_calls.append((session_id, batch_size, allow_rebuild))
+            return SemanticSyncReport(
+                topic_count=2,
+                reviewed_memory_count=1,
+                indexed_count=3,
+                skipped_count=0,
+                deleted_count=4,
+                indexed_ids=("topic-summary:topic-a:1-9", "memory:memory-a"),
+                deleted_ids=("topic-summary:old-topic:1-2",),
+            )
+
+        async def fail_direct_maintainer_call(session_id: str) -> object:
+            del session_id
+            raise AssertionError("HTTP must call SessionManager rebuild facade")
+
+        monkeypatch.setattr(
+            session_manager,
+            "rebuild_semantic_memory",
+            fake_rebuild_semantic_memory,
+        )
+        monkeypatch.setattr(
+            session_manager,
+            "semantic_memory_maintainer",
+            fail_direct_maintainer_call,
+        )
+
+        response = await client.post(
+            "/sessions/semantic-rebuild-session/memory/semantic/rebuild",
+            json={"batch_size": 25, "allow_rebuild": False},
+        )
+
+        assert response.status_code == 200
+        assert rebuild_calls == [("semantic-rebuild-session", 25, False)]
+        assert response.json() == {
+            "topic_count": 2,
+            "reviewed_memory_count": 1,
+            "indexed_count": 3,
+            "skipped_count": 0,
+            "deleted_count": 4,
+            "indexed_ids": ["topic-summary:topic-a:1-9", "memory:memory-a"],
+            "deleted_ids": ["topic-summary:old-topic:1-2"],
+        }
+
+    async def test_semantic_rebuild_active_turn_returns_409_without_clearing_backend(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        session = register_session("semantic-active-session")
+        session.turn_in_progress = True
+        body_called = False
+
+        class FailingMaintainer:
+            async def rebuild(
+                self,
+                *,
+                batch_size: int,
+                allow_rebuild: bool,
+            ) -> SemanticSyncReport:
+                nonlocal body_called
+                del batch_size, allow_rebuild
+                body_called = True
+                raise AssertionError("destructive rebuild body was reached")
+
+        async def fake_maintainer(session_id: str) -> FailingMaintainer:
+            assert session_id == "semantic-active-session"
+            return FailingMaintainer()
+
+        monkeypatch.setattr(
+            session_manager, "semantic_memory_maintainer", fake_maintainer
+        )
+
+        response = await client.post(
+            "/sessions/semantic-active-session/memory/semantic/rebuild",
+            json={"batch_size": 10, "allow_rebuild": True},
+        )
+
+        assert response.status_code == 409
+        assert response.json()["detail"] == "Turn already in progress"
+        assert body_called is False
+
+    async def test_semantic_rebuild_missing_topic_store_returns_409_without_clearing_backend(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config, review_store, backend, syncer = _semantic_review_runtime_config()
+        candidate = _review_candidate(
+            "memory-rebuild-existing",
+            session_id="semantic-missing-topic-store-session",
+        )
+        review_store.add_candidate(candidate)
+        accepted = review_store.accept_candidate_for_session(
+            "semantic-missing-topic-store-session",
+            "memory-rebuild-existing",
+            reason="Useful",
+        )
+        await syncer.sync_reviewed_memory(accepted)
+        register_session("semantic-missing-topic-store-session")
+
+        async def fake_ensure_session_runtime(session_id: str) -> object:
+            assert session_id == "semantic-missing-topic-store-session"
+            return _runtime_ctx(config)
+
+        monkeypatch.setattr(
+            session_manager,
+            "ensure_session_runtime",
+            fake_ensure_session_runtime,
+        )
+        monkeypatch.setattr(session_manager, "selected_topic_store", lambda: None)
+        before_ids = await backend.list_ids()
+
+        response = await client.post(
+            "/sessions/semantic-missing-topic-store-session/memory/semantic/rebuild",
+            json={"batch_size": 10, "allow_rebuild": True},
+        )
+
+        assert response.status_code == 409
+        assert response.json()["detail"] == (
+            "topic_store is required for semantic memory rebuild"
+        )
+        assert await backend.list_ids() == before_ids
+
+    async def test_semantic_rebuild_owner_conflict_maps_to_http_conflict(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        register_session("semantic-owner-conflict-session")
+
+        async def fake_rebuild_semantic_memory(
+            session_id: str,
+            *,
+            batch_size: int,
+            allow_rebuild: bool,
+        ) -> SemanticSyncReport:
+            del session_id, batch_size, allow_rebuild
+            raise SessionOwnershipConflictError(
+                "stale owner or fencing token rejected",
+                reason=SessionOwnershipConflictReason.STALE_OWNER,
+            )
+
+        monkeypatch.setattr(
+            session_manager,
+            "rebuild_semantic_memory",
+            fake_rebuild_semantic_memory,
+        )
+
+        response = await client.post(
+            "/sessions/semantic-owner-conflict-session/memory/semantic/rebuild",
+            json={"batch_size": 10, "allow_rebuild": True},
+        )
+
+        assert response.status_code == 409
+        assert response.json()["detail"] == "stale owner or fencing token rejected"
+
+    async def test_semantic_rebuild_request_validates_batch_size_and_explicit_allow_rebuild(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        register_session("semantic-schema-session")
+
+        zero = await client.post(
+            "/sessions/semantic-schema-session/memory/semantic/rebuild",
+            json={"batch_size": 0, "allow_rebuild": True},
+        )
+        too_large = await client.post(
+            "/sessions/semantic-schema-session/memory/semantic/rebuild",
+            json={"batch_size": 1001, "allow_rebuild": True},
+        )
+        missing_allow_rebuild = await client.post(
+            "/sessions/semantic-schema-session/memory/semantic/rebuild",
+            json={"batch_size": 10},
+        )
+
+        assert zero.status_code == 422
+        assert too_large.status_code == 422
+        assert missing_allow_rebuild.status_code == 422
 
 
 def test_http_server_uses_canonical_rate_limiter_module():

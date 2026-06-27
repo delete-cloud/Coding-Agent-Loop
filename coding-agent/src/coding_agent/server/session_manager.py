@@ -87,7 +87,11 @@ from coding_agent.stores.runtime_store import (
 )
 from coding_agent.stores import RuntimeStore
 from coding_agent.topics.store import PGTopicStore, SQLiteTopicStore
-from coding_agent.topics.semantic_maintenance import SemanticMemoryMaintainer
+from coding_agent.topics.semantic_maintenance import (
+    SemanticMemoryMaintainer,
+    SemanticMemoryStatus,
+)
+from coding_agent.topics.semantic_sync import SemanticSyncReport
 from coding_agent.executors import (
     LocalDaemonExecutor,
 )
@@ -250,6 +254,7 @@ _ACTIVE_RESUME_BLOCKING_RUN_STATUSES = {
     "running",
     "cancelling",
 }
+_SEMANTIC_MEMORY_REBUILD_MAX_BATCH_SIZE = 1000
 
 
 @dataclass(frozen=True)
@@ -1242,6 +1247,45 @@ class SessionManager:
             backend=backend,
             review_store=review_store,
             topic_store=self.selected_topic_store(),
+        )
+
+    async def semantic_memory_status(self, session_id: str) -> SemanticMemoryStatus:
+        maintainer = await self.semantic_memory_maintainer(session_id)
+        return await maintainer.status()
+
+    async def rebuild_semantic_memory(
+        self,
+        session_id: str,
+        *,
+        batch_size: int,
+        allow_rebuild: bool,
+    ) -> SemanticSyncReport:
+        if (
+            isinstance(batch_size, bool)
+            or not isinstance(batch_size, int)
+            or batch_size <= 0
+            or batch_size > _SEMANTIC_MEMORY_REBUILD_MAX_BATCH_SIZE
+        ):
+            raise ValueError("batch_size must be between 1 and 1000")
+        if not isinstance(allow_rebuild, bool):
+            raise ValueError("allow_rebuild must be a boolean")
+
+        async def rebuild_admitted_semantic_memory(
+            session: object,
+        ) -> SemanticSyncReport:
+            del session
+            maintainer = await self.semantic_memory_maintainer(session_id)
+            return await maintainer.rebuild(
+                batch_size=batch_size,
+                allow_rebuild=allow_rebuild,
+            )
+
+        return cast(
+            SemanticSyncReport,
+            await self._runtime_maintenance_admission.run_exclusive(
+                session_id,
+                rebuild_admitted_semantic_memory,
+            ),
         )
 
     def configure_owner_leases(

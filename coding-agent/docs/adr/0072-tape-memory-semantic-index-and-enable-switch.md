@@ -156,6 +156,28 @@ clearing semantic documents. Read-only maintenance status may still report
 `topic_store_available = false`, but that status is not permission to rebuild
 from a partial source set.
 
+Semantic maintenance HTTP APIs are product-layer operational APIs, not AgentKit
+primitives. Because full rebuild clears and replaces a shared derived semantic
+backend from global authoritative stores, the rebuild surface is admin-only and
+must not be authorized solely by session ownership. The first HTTP surface is
+session-anchored only to reuse runtime/config selection:
+`GET /sessions/{session_id}/memory/semantic/status` and
+`POST /sessions/{session_id}/memory/semantic/rebuild`. Both endpoints require
+admin auth when auth is configured. The status endpoint is read-only and must
+not repair, rebuild, clear, or mutate the backend.
+
+The rebuild endpoint is an explicit destructive maintenance action. HTTP must
+call a `SessionManager` maintenance method, not construct or call
+`SemanticMemoryMaintainer.rebuild()` directly. That manager method must run
+through `RuntimeMaintenanceAdmissionService.run_exclusive()` so active turns,
+owner assertion, and fencing conflicts are checked before the derived semantic
+backend is cleared. Active-turn admission failures return 409 and must leave
+the backend untouched. Missing selected durable `TopicStore` and disabled
+semantic memory also return conflict-style operational errors before any clear
+or upsert. The `allow_rebuild` request field controls backend schema rebuild
+permission; it is not a confirmation flag for ordinary destructive document
+clearing.
+
 Reviewed-memory transition APIs are session-scoped product APIs. The HTTP
 surface is `POST /sessions/{session_id}/memory/reviews/{candidate_id}` with a
 target status of `accepted`, `rejected`, or `archived` and an optional safe
@@ -241,6 +263,15 @@ verification finds that some have already landed.
 - [x] `tests/coding_agent/test_semantic_maintenance.py::test_semantic_maintenance_rebuild_requires_topic_store_before_clearing`
 - [x] `tests/coding_agent/test_semantic_maintenance.py::test_semantic_maintenance_rebuild_rejects_duplicate_topic_scan`
 - [x] `tests/coding_agent/test_semantic_maintenance.py::test_semantic_maintenance_status_counts_documents_and_review_states`
+- [x] `tests/ui/test_session_manager_runtime.py::test_rebuild_semantic_memory_uses_maintenance_admission_and_indexes_sources`
+- [x] `tests/ui/test_session_manager_runtime.py::test_rebuild_semantic_memory_active_turn_leaves_backend_untouched`
+- [x] `tests/ui/test_http_server.py::TestSemanticMemoryMaintenance::test_semantic_status_requires_admin`
+- [x] `tests/ui/test_http_server.py::TestSemanticMemoryMaintenance::test_semantic_status_returns_counts_without_mutating_backend`
+- [x] `tests/ui/test_http_server.py::TestSemanticMemoryMaintenance::test_semantic_rebuild_requires_admin`
+- [x] `tests/ui/test_http_server.py::TestSemanticMemoryMaintenance::test_semantic_rebuild_returns_report`
+- [x] `tests/ui/test_http_server.py::TestSemanticMemoryMaintenance::test_semantic_rebuild_active_turn_returns_409_without_clearing_backend`
+- [x] `tests/ui/test_http_server.py::TestSemanticMemoryMaintenance::test_semantic_rebuild_missing_topic_store_returns_409_without_clearing_backend`
+- [x] `tests/ui/test_http_server.py::TestSemanticMemoryMaintenance::test_semantic_rebuild_owner_conflict_maps_to_http_conflict`
 - [ ] `tests/coding_agent/test_memory_switch.py::test_semantic_enabled_fake_backend_registers_plugin_and_exposes_index_by_default`
 - [ ] `tests/coding_agent/test_memory_switch.py::test_semantic_enabled_with_read_disabled_exposes_index_without_registering_plugin`
 - [ ] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_accept_candidate_updates_semantic_index`
