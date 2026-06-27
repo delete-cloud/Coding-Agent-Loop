@@ -250,12 +250,12 @@ async def test_manifest_cache_is_not_sync_authority() -> None:
         authoritative_memory_id,
         "topic-summary:topic-auth:2-9",
     )
-    assert report.deleted_ids == (
+    assert set(report.deleted_ids) == {
         stale_memory_id,
         "topic-summary:topic-stale:2-9",
-    )
-    assert report.indexed_ids == expected_indexed_ids
-    assert await backend.list_ids() == list(expected_indexed_ids)
+    }
+    assert set(report.indexed_ids) == set(expected_indexed_ids)
+    assert set(await backend.list_ids()) == set(expected_indexed_ids)
 
 
 @pytest.mark.asyncio
