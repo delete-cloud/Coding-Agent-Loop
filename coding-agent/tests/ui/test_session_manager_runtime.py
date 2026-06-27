@@ -16,7 +16,9 @@ from agentkit.checkpoint.models import CheckpointMeta
 from agentkit.tools import FatalToolExecutionError
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
+from agentkit.runtime.pipeline import PipelineContext
 from coding_agent.adapter.types import StopReason, TurnOutcome
+from coding_agent.core.app import create_agent
 from coding_agent.observability.agent import JsonlAgentObservationStore
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.environment import (
@@ -71,7 +73,8 @@ from coding_agent.server.stores.session_owner_store import SQLiteSessionOwnerSto
 from coding_agent.server.stores.session_store import InMemorySessionStore
 from coding_agent.stores.durable_local import FencedSQLiteTopicStore
 from coding_agent.stores.local import local_sqlite_path, local_sqlite_storage_config
-from coding_agent.topics.store import PGTopicStore
+from coding_agent.topics.semantic_index import SemanticDocId
+from coding_agent.topics.store import PGTopicStore, TopicRecord
 from coding_agent.server.stores.workspace_store import (
     JSONValue,
     WorkspaceRecord,
@@ -178,6 +181,124 @@ def test_selected_topic_store_is_none_for_custom_or_mixed_storage(
     manager = SessionManager(storage_config=mixed_config)
 
     assert manager.selected_topic_store() is None
+
+
+@pytest.mark.asyncio
+async def test_sqlite_durable_semantic_rebuild_recalled_by_later_build_context_without_backend_hit_text(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "agent.toml"
+    config_path.write_text(
+        """
+[agent]
+name = "test-agent"
+model = "claude-sonnet-4-20250514"
+provider = "anthropic"
+
+[memory]
+read_enabled = true
+write_enabled = true
+
+[memory.semantic]
+enabled = true
+backend = "fake"
+""".strip()
+    )
+
+    def create_agent_with_semantic_fake(**kwargs: Any) -> tuple[Any, Any]:
+        kwargs["config_path"] = config_path
+        kwargs["data_dir"] = tmp_path / "data"
+        kwargs["api_key"] = "sk-test"
+        return create_agent(**kwargs)
+
+    manager = SessionManager(
+        storage_config=local_sqlite_storage_config(tmp_path),
+        owner_store=SQLiteSessionOwnerStore(local_sqlite_path(tmp_path)),
+        owner_id="owner-a",
+        fencing_token=999,
+        create_agent_fn=create_agent_with_semantic_fake,
+    )
+    session_id = await manager.create_session(repo_path=tmp_path)
+    runtime_ctx = await manager.ensure_session_runtime(session_id)
+    session = manager.get_session(session_id)
+    assert session.tape_id is not None
+
+    topic_store = manager.selected_topic_store()
+    assert topic_store is not None
+    created_at = datetime(2026, 6, 24, 9, 0, tzinfo=UTC)
+    await topic_store.create_topic(
+        TopicRecord(
+            topic_id="topic-auth-gateway",
+            tape_id=session.tape_id,
+            session_id=session_id,
+            kind="coding",
+            status="open",
+            title="Auth gateway",
+            summary=None,
+            owner=None,
+            topic_initial_seq=2,
+            topic_finalized_seq=None,
+            created_at=created_at,
+            finalized_at=None,
+            metadata={"profile": "local"},
+        )
+    )
+    durable_summary = (
+        "Authoritative durable topic summary says JWT middleware lives in the "
+        "auth gateway."
+    )
+    finalized = await topic_store.finalize_topic(
+        "topic-auth-gateway",
+        summary=durable_summary,
+        topic_finalized_seq=9,
+        finalized_at=datetime(2026, 6, 24, 9, 5, tzinfo=UTC),
+        metadata={"profile": "local"},
+    )
+
+    maintainer = await manager.semantic_memory_maintainer(session_id)
+    report = await maintainer.rebuild()
+
+    document_id = str(SemanticDocId.for_topic(finalized))
+    assert report.topic_count == 1
+    assert document_id in await runtime_ctx.config["semantic_memory_backend"].list_ids()
+
+    backend_sentinel = "jwt middleware backend sentinel must never render"
+    await runtime_ctx.config["semantic_memory_backend"].upsert(
+        document_id,
+        backend_sentinel,
+        {
+            "kind": "topic_summary",
+            "topic_id": finalized.topic_id,
+            "tape_id": finalized.tape_id,
+            "session_id": finalized.session_id,
+            "topic_kind": finalized.kind,
+            "topic_status": finalized.status,
+            "source_start_seq": finalized.topic_initial_seq,
+            "source_end_seq": finalized.topic_finalized_seq,
+            "profile": "local",
+        },
+    )
+    later_tape = Tape(tape_id=session.tape_id)
+    later_tape.append(
+        Entry(
+            kind="message",
+            payload={"role": "user", "content": "Where is jwt middleware?"},
+            timestamp=datetime(2026, 6, 24, 10, 0, tzinfo=UTC).timestamp(),
+        )
+    )
+    runtime_pipeline = manager.get_session(session_id).runtime_pipeline
+    assert runtime_pipeline is not None
+    semantic_plugin = runtime_pipeline._registry.get("semantic_memory")
+
+    result = await semantic_plugin.build_context(
+        tape=later_tape,
+        ctx=PipelineContext(tape=later_tape, session_id=session_id),
+    )
+
+    rendered = "\n".join(str(item["content"]) for item in result)
+    assert durable_summary in rendered
+    assert backend_sentinel not in rendered
+    assert "stale backend value" not in rendered
 
 
 class FakeRuntimeStore:
