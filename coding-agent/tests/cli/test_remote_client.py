@@ -433,6 +433,96 @@ class _RemoteFakeResponse:
         return self._payload
 
 
+def test_remote_semantic_memory_client_helpers_call_exact_endpoints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from coding_agent.remote.client import (
+        RemoteEndpoint,
+        get_remote_semantic_memory_status,
+        rebuild_remote_semantic_memory,
+    )
+
+    calls: list[tuple[str, str, dict[str, object] | None, dict[str, str]]] = []
+
+    class FakeClient:
+        def __init__(
+            self,
+            *,
+            base_url: str,
+            headers: dict[str, str] | None = None,
+            timeout: float,
+        ) -> None:
+            assert base_url == "http://agent.example"
+            assert timeout == 30.0
+            self.headers = headers or {}
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def get(self, path: str) -> _RemoteFakeResponse:
+            calls.append(("get", path, None, self.headers))
+            return _RemoteFakeResponse(
+                {
+                    "document_count": 3,
+                    "reviewed_memory_count": 4,
+                    "accepted_reviewed_memory_count": 2,
+                    "topic_store_available": True,
+                }
+            )
+
+        def post(
+            self, path: str, json: dict[str, object] | None = None
+        ) -> _RemoteFakeResponse:
+            calls.append(("post", path, json, self.headers))
+            return _RemoteFakeResponse(
+                {
+                    "topic_count": 5,
+                    "reviewed_memory_count": 2,
+                    "indexed_count": 6,
+                    "skipped_count": 1,
+                    "deleted_count": 1,
+                    "indexed_ids": ["topic:1", "memory:1"],
+                    "deleted_ids": ["stale:1"],
+                }
+            )
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+    endpoint = RemoteEndpoint("dev", "http://agent.example", "secret-token")
+
+    status = get_remote_semantic_memory_status(endpoint, "sess-1")
+    rebuild = rebuild_remote_semantic_memory(
+        endpoint,
+        "sess-1",
+        25,
+        True,
+    )
+
+    assert status == {
+        "document_count": 3,
+        "reviewed_memory_count": 4,
+        "accepted_reviewed_memory_count": 2,
+        "topic_store_available": True,
+    }
+    assert rebuild["indexed_ids"] == ["topic:1", "memory:1"]
+    assert calls == [
+        (
+            "get",
+            "/sessions/sess-1/memory/semantic/status",
+            None,
+            {"Authorization": "Bearer secret-token"},
+        ),
+        (
+            "post",
+            "/sessions/sess-1/memory/semantic/rebuild",
+            {"batch_size": 25, "allow_rebuild": True},
+            {"Authorization": "Bearer secret-token"},
+        ),
+    ]
+
+
 def test_serve_config_sets_explicit_server_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2730,6 +2820,201 @@ def test_remote_sessions_commands_call_operations_api(
         ("get", "/sessions/sess-1", {"Authorization": "Bearer secret-token"}),
         ("post", "/sessions/sess-1/cancel", {"Authorization": "Bearer secret-token"}),
         ("delete", "/sessions/sess-1", {"Authorization": "Bearer secret-token"}),
+    ]
+
+
+def test_remote_memory_status_prints_semantic_memory_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "remotes.json"
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["remote", "add", "dev", "http://agent.example", "--token", "secret-token"],
+        catch_exceptions=False,
+    )
+    calls: list[tuple[str, str, dict[str, str]]] = []
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            headers = kwargs.get("headers")
+            self.headers = headers if isinstance(headers, dict) else {}
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def get(self, path: str) -> _RemoteFakeResponse:
+            calls.append(("get", path, self.headers))
+            assert path == "/sessions/sess-1/memory/semantic/status"
+            return _RemoteFakeResponse(
+                {
+                    "document_count": 3,
+                    "reviewed_memory_count": 4,
+                    "accepted_reviewed_memory_count": 2,
+                    "topic_store_available": True,
+                }
+            )
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+
+    result = runner.invoke(
+        main,
+        ["remote", "memory", "status", "dev", "--session", "sess-1"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "document_count: 3" in result.output
+    assert "reviewed_memory_count: 4" in result.output
+    assert "accepted_reviewed_memory_count: 2" in result.output
+    assert "topic_store_available: True" in result.output
+    assert calls == [
+        (
+            "get",
+            "/sessions/sess-1/memory/semantic/status",
+            {"Authorization": "Bearer secret-token"},
+        )
+    ]
+
+
+def test_remote_memory_rebuild_requires_confirm_before_http_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "remotes.json"
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["remote", "add", "dev", "http://agent.example", "--token", "secret-token"],
+        catch_exceptions=False,
+    )
+    calls: list[str] = []
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+            calls.append("http-client-created")
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+
+    result = runner.invoke(
+        main,
+        ["remote", "memory", "rebuild", "dev", "--session", "sess-1"],
+    )
+    allow_rebuild_result = runner.invoke(
+        main,
+        [
+            "remote",
+            "memory",
+            "rebuild",
+            "dev",
+            "--session",
+            "sess-1",
+            "--allow-rebuild",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "Pass --confirm to rebuild semantic memory." in result.output
+    assert allow_rebuild_result.exit_code != 0
+    assert "Pass --confirm to rebuild semantic memory." in allow_rebuild_result.output
+    assert calls == []
+
+
+def test_remote_memory_rebuild_posts_confirmed_payload_and_prints_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "remotes.json"
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["remote", "add", "dev", "http://agent.example", "--token", "secret-token"],
+        catch_exceptions=False,
+    )
+    calls: list[tuple[str, dict[str, object] | None, dict[str, str]]] = []
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            headers = kwargs.get("headers")
+            self.headers = headers if isinstance(headers, dict) else {}
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def post(
+            self, path: str, json: dict[str, object] | None = None
+        ) -> _RemoteFakeResponse:
+            calls.append((path, json, self.headers))
+            assert path == "/sessions/sess-1/memory/semantic/rebuild"
+            return _RemoteFakeResponse(
+                {
+                    "topic_count": 5,
+                    "reviewed_memory_count": 2,
+                    "indexed_count": 6,
+                    "skipped_count": 1,
+                    "deleted_count": 1,
+                    "indexed_ids": ["topic:1", "memory:1"],
+                    "deleted_ids": ["stale:1"],
+                }
+            )
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+
+    default_result = runner.invoke(
+        main,
+        [
+            "remote",
+            "memory",
+            "rebuild",
+            "dev",
+            "--session",
+            "sess-1",
+            "--confirm",
+        ],
+        catch_exceptions=False,
+    )
+    custom_result = runner.invoke(
+        main,
+        [
+            "remote",
+            "memory",
+            "rebuild",
+            "dev",
+            "--session",
+            "sess-1",
+            "--confirm",
+            "--batch-size",
+            "25",
+            "--allow-rebuild",
+        ],
+        catch_exceptions=False,
+    )
+
+    assert default_result.exit_code == 0
+    assert custom_result.exit_code == 0
+    assert "indexed_count: 6" in custom_result.output
+    assert "deleted_count: 1" in custom_result.output
+    assert '"topic:1"' in custom_result.output
+    assert '"stale:1"' in custom_result.output
+    assert calls == [
+        (
+            "/sessions/sess-1/memory/semantic/rebuild",
+            {"batch_size": 10, "allow_rebuild": False},
+            {"Authorization": "Bearer secret-token"},
+        ),
+        (
+            "/sessions/sess-1/memory/semantic/rebuild",
+            {"batch_size": 25, "allow_rebuild": True},
+            {"Authorization": "Bearer secret-token"},
+        ),
     ]
 
 

@@ -518,6 +518,68 @@ def _json_dumps_pretty(value: object) -> str:
     return json.dumps(value, indent=2, sort_keys=True)
 
 
+@remote.group("memory")
+def remote_memory() -> None:
+    """Inspect and maintain remote memory."""
+
+
+@remote_memory.command("status")
+@click.argument("name")
+@click.option("--session", "session_id", required=True, help="Remote session ID.")
+def remote_memory_status(name: str, session_id: str) -> None:
+    """Show semantic memory maintenance status."""
+    from coding_agent.remote.client import (
+        get_remote,
+        get_remote_semantic_memory_status,
+    )
+
+    endpoint = get_remote(name)
+    _print_mapping(get_remote_semantic_memory_status(endpoint, session_id))
+
+
+@remote_memory.command("rebuild")
+@click.argument("name")
+@click.option("--session", "session_id", required=True, help="Remote session ID.")
+@click.option(
+    "--confirm",
+    is_flag=True,
+    help="Confirm destructive semantic memory rebuild.",
+)
+@click.option(
+    "--batch-size",
+    default=10,
+    show_default=True,
+    type=click.IntRange(min=1, max=1000),
+    help="Topic scan page size for rebuild.",
+)
+@click.option(
+    "--allow-rebuild",
+    is_flag=True,
+    help="Allow backend schema rebuild on schema mismatch.",
+)
+def remote_memory_rebuild(
+    name: str,
+    session_id: str,
+    confirm: bool,
+    batch_size: int,
+    allow_rebuild: bool,
+) -> None:
+    """Rebuild the derived semantic memory index."""
+    if not confirm:
+        raise click.ClickException("Pass --confirm to rebuild semantic memory.")
+    from coding_agent.remote.client import get_remote, rebuild_remote_semantic_memory
+
+    endpoint = get_remote(name)
+    _print_mapping(
+        rebuild_remote_semantic_memory(
+            endpoint,
+            session_id,
+            batch_size,
+            allow_rebuild,
+        )
+    )
+
+
 def _git_workspace_source_for_remote_run(
     repo_path: Path,
     *,
