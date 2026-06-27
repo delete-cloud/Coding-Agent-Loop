@@ -61,8 +61,8 @@ Target tests:
 Loop policy:
 - Engineer implements the smallest correct change and runs the target tests.
 - Reviewer reviews only the resulting diff and affected tests.
-- Reviewer reports only P0/P1 findings for this design-sensitive slice.
-- Engineer fixes only accepted P0/P1 findings and reruns the same target tests.
+- Reviewer reports only P1/P2 findings for this design-sensitive slice.
+- Engineer fixes only accepted P1/P2 findings and reruns the same target tests.
 - Verifier reruns the exact target tests and reports pass/fail only.
 
 Stop conditions:
