@@ -115,7 +115,11 @@ from coding_agent.topics.memory import (
     memory_candidate_session_id,
 )
 from coding_agent.topics.range_index import require_recall_safe_text
-from coding_agent.topics.semantic_sync import SemanticMemoryReviewSyncService
+from coding_agent.topics.semantic_maintenance import SemanticMemoryStatus
+from coding_agent.topics.semantic_sync import (
+    SemanticMemoryReviewSyncService,
+    SemanticSyncReport,
+)
 from coding_agent.server.auth import (
     AuthContext,
     auth_context_from_headers,
@@ -231,6 +235,9 @@ from coding_agent.server.schemas import (
     RuntimeMessageSnapshotResponse,
     RuntimeRunListResponse,
     RuntimeRunResponse,
+    SemanticMemoryRebuildRequest,
+    SemanticMemoryRebuildResponse,
+    SemanticMemoryStatusResponse,
     SessionListResponse,
     SessionResponse,
     SessionResultResponse,
@@ -2760,6 +2767,100 @@ def _memory_review_transition_response(
         tags=list(candidate.tags),
         confidence=candidate.confidence,
     )
+
+
+def _semantic_memory_status_response(
+    status: SemanticMemoryStatus,
+) -> SemanticMemoryStatusResponse:
+    return SemanticMemoryStatusResponse(
+        document_count=status.document_count,
+        reviewed_memory_count=status.reviewed_memory_count,
+        accepted_reviewed_memory_count=status.accepted_reviewed_memory_count,
+        topic_store_available=status.topic_store_available,
+    )
+
+
+def _semantic_memory_rebuild_response(
+    report: SemanticSyncReport,
+) -> SemanticMemoryRebuildResponse:
+    return SemanticMemoryRebuildResponse(
+        topic_count=report.topic_count,
+        reviewed_memory_count=report.reviewed_memory_count,
+        indexed_count=report.indexed_count,
+        skipped_count=report.skipped_count,
+        deleted_count=report.deleted_count,
+        indexed_ids=list(report.indexed_ids),
+        deleted_ids=list(report.deleted_ids),
+    )
+
+
+def _semantic_memory_runtime_exception(exc: RuntimeError) -> HTTPException:
+    detail = _http_exception_detail(exc)
+    if detail in {
+        "semantic memory is disabled",
+        "topic_store is required for semantic memory rebuild",
+    }:
+        return HTTPException(status_code=409, detail=detail)
+    if detail == "turn already in progress":
+        return HTTPException(status_code=409, detail="Turn already in progress")
+    return HTTPException(status_code=500, detail=detail)
+
+
+@app.get(
+    "/sessions/{session_id}/memory/semantic/status",
+    response_model=SemanticMemoryStatusResponse,
+)
+@limiter.limit(RateLimits.GET_SESSION)
+async def get_semantic_memory_status(
+    request: Request,
+    session_id: str,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> SemanticMemoryStatusResponse:
+    del request
+    auth_context = _normalize_direct_auth_context(auth_context)
+    _require_admin_context(auth_context)
+    _ = await _get_visible_session(session_id, auth_context)
+    try:
+        status = await session_manager.semantic_memory_status(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
+    except SessionOwnershipConflictError as exc:
+        raise _owner_conflict_http_exception(exc, session_id=session_id) from exc
+    except RuntimeError as exc:
+        raise _semantic_memory_runtime_exception(exc) from exc
+    return _semantic_memory_status_response(status)
+
+
+@app.post(
+    "/sessions/{session_id}/memory/semantic/rebuild",
+    response_model=SemanticMemoryRebuildResponse,
+)
+@limiter.limit(RateLimits.CLOSE_SESSION)
+async def rebuild_semantic_memory(
+    request: Request,
+    session_id: str,
+    body: SemanticMemoryRebuildRequest,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> SemanticMemoryRebuildResponse:
+    del request
+    auth_context = _normalize_direct_auth_context(auth_context)
+    _require_admin_context(auth_context)
+    _ = await _get_visible_session(session_id, auth_context)
+    try:
+        report = await session_manager.rebuild_semantic_memory(
+            session_id,
+            batch_size=body.batch_size,
+            allow_rebuild=body.allow_rebuild,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
+    except SessionOwnershipConflictError as exc:
+        raise _owner_conflict_http_exception(exc, session_id=session_id) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise _semantic_memory_runtime_exception(exc) from exc
+    return _semantic_memory_rebuild_response(report)
 
 
 @app.post(

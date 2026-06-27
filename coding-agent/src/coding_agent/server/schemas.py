@@ -10,6 +10,8 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictBool,
+    StrictInt,
     ValidationInfo,
     field_validator,
 )
@@ -130,6 +132,39 @@ class MemoryReviewTransitionResponse(BaseModel):
     scope: str
     tags: list[str]
     confidence: float
+
+
+class SemanticMemoryStatusResponse(BaseModel):
+    """Response schema for semantic memory maintenance status."""
+
+    document_count: int = Field(..., ge=0)
+    reviewed_memory_count: int = Field(..., ge=0)
+    accepted_reviewed_memory_count: int = Field(..., ge=0)
+    topic_store_available: bool
+
+
+class SemanticMemoryRebuildRequest(BaseModel):
+    """Request schema for semantic memory rebuild maintenance."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    batch_size: StrictInt = Field(..., ge=1, le=1000)
+    allow_rebuild: StrictBool = Field(
+        ...,
+        description="Allow semantic backend schema rebuild on schema mismatch.",
+    )
+
+
+class SemanticMemoryRebuildResponse(BaseModel):
+    """Response schema for semantic memory rebuild maintenance."""
+
+    topic_count: int = Field(..., ge=0)
+    reviewed_memory_count: int = Field(..., ge=0)
+    indexed_count: int = Field(..., ge=0)
+    skipped_count: int = Field(..., ge=0)
+    deleted_count: int = Field(..., ge=0)
+    indexed_ids: list[str]
+    deleted_ids: list[str]
 
 
 class ApproveRequest(BaseModel):

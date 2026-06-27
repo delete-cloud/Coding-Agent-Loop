@@ -74,6 +74,7 @@ from coding_agent.server.stores.session_store import InMemorySessionStore
 from coding_agent.stores.durable_local import FencedSQLiteTopicStore
 from coding_agent.stores.local import local_sqlite_path, local_sqlite_storage_config
 from coding_agent.topics.semantic_index import SemanticDocId
+from coding_agent.topics.semantic_sync import SemanticSyncReport
 from coding_agent.topics.store import PGTopicStore, TopicRecord
 from coding_agent.server.stores.workspace_store import (
     JSONValue,
@@ -255,8 +256,11 @@ backend = "fake"
         metadata={"profile": "local"},
     )
 
-    maintainer = await manager.semantic_memory_maintainer(session_id)
-    report = await maintainer.rebuild()
+    report = await manager.rebuild_semantic_memory(
+        session_id,
+        batch_size=100,
+        allow_rebuild=True,
+    )
 
     document_id = str(SemanticDocId.for_topic(finalized))
     assert report.topic_count == 1
@@ -298,6 +302,140 @@ backend = "fake"
     rendered = "\n".join(str(item["content"]) for item in result)
     assert durable_summary in rendered
     assert backend_sentinel not in rendered
+
+
+@pytest.mark.asyncio
+async def test_rebuild_semantic_memory_uses_maintenance_admission_and_indexes_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "agent.toml"
+    config_path.write_text(
+        """
+[agent]
+name = "test-agent"
+model = "claude-sonnet-4-20250514"
+provider = "anthropic"
+
+[memory]
+read_enabled = true
+write_enabled = true
+
+[memory.semantic]
+enabled = true
+backend = "fake"
+""".strip()
+    )
+
+    def create_agent_with_semantic_fake(**kwargs: Any) -> tuple[Any, Any]:
+        kwargs["config_path"] = config_path
+        kwargs["data_dir"] = tmp_path / "data"
+        kwargs["api_key"] = "sk-test"
+        return create_agent(**kwargs)
+
+    manager = SessionManager(
+        storage_config=local_sqlite_storage_config(tmp_path),
+        owner_store=SQLiteSessionOwnerStore(local_sqlite_path(tmp_path)),
+        owner_id="owner-a",
+        fencing_token=999,
+        create_agent_fn=create_agent_with_semantic_fake,
+    )
+    session_id = await manager.create_session(repo_path=tmp_path)
+    runtime_ctx = await manager.ensure_session_runtime(session_id)
+    session = manager.get_session(session_id)
+    assert session.tape_id is not None
+    topic_store = manager.selected_topic_store()
+    assert topic_store is not None
+    await topic_store.create_topic(
+        TopicRecord(
+            topic_id="topic-maintenance-admission",
+            tape_id=session.tape_id,
+            session_id=session_id,
+            kind="coding",
+            status="open",
+            title="Maintenance admission",
+            summary=None,
+            owner=None,
+            topic_initial_seq=3,
+            topic_finalized_seq=None,
+            created_at=datetime(2026, 6, 24, 11, 0, tzinfo=UTC),
+            finalized_at=None,
+            metadata={"profile": "local"},
+        )
+    )
+    finalized = await topic_store.finalize_topic(
+        "topic-maintenance-admission",
+        summary="Semantic rebuild must pass through maintenance admission.",
+        topic_finalized_seq=12,
+        finalized_at=datetime(2026, 6, 24, 11, 5, tzinfo=UTC),
+        metadata={"profile": "local"},
+    )
+    original_admission = manager._runtime_maintenance_admission
+    admitted_session_ids: list[str] = []
+
+    class SpyMaintenanceAdmission:
+        async def run_exclusive(self, admitted_session_id: str, body: Any) -> object:
+            admitted_session_ids.append(admitted_session_id)
+            return await original_admission.run_exclusive(admitted_session_id, body)
+
+    monkeypatch.setattr(
+        manager,
+        "_runtime_maintenance_admission",
+        SpyMaintenanceAdmission(),
+    )
+
+    report = await manager.rebuild_semantic_memory(
+        session_id,
+        batch_size=25,
+        allow_rebuild=True,
+    )
+
+    document_id = str(SemanticDocId.for_topic(finalized))
+    assert admitted_session_ids == [session_id]
+    assert report.topic_count == 1
+    assert report.indexed_ids == (document_id,)
+    assert document_id in await runtime_ctx.config["semantic_memory_backend"].list_ids()
+
+
+@pytest.mark.asyncio
+async def test_rebuild_semantic_memory_active_turn_leaves_backend_untouched(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = SessionManager(
+        store=InMemorySessionStore(),
+        storage_config=local_sqlite_storage_config(tmp_path),
+    )
+    session_id = await manager.create_session(repo_path=tmp_path)
+    session = manager.get_session(session_id)
+    session.turn_in_progress = True
+    body_called = False
+
+    class FailingMaintainer:
+        async def rebuild(
+            self,
+            *,
+            batch_size: int,
+            allow_rebuild: bool,
+        ) -> SemanticSyncReport:
+            nonlocal body_called
+            body_called = True
+            raise AssertionError("destructive semantic rebuild body was reached")
+
+    async def failing_maintainer(admitted_session_id: str) -> FailingMaintainer:
+        assert admitted_session_id == session_id
+        return FailingMaintainer()
+
+    monkeypatch.setattr(manager, "semantic_memory_maintainer", failing_maintainer)
+
+    with pytest.raises(RuntimeError, match="turn already in progress"):
+        await manager.rebuild_semantic_memory(
+            session_id,
+            batch_size=10,
+            allow_rebuild=True,
+        )
+
+    assert body_called is False
 
 
 class FakeRuntimeStore:
