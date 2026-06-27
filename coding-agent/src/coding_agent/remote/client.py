@@ -276,6 +276,30 @@ def get_remote_session(endpoint: RemoteEndpoint, session_id: str) -> dict[str, o
     return data
 
 
+def get_remote_semantic_memory_status(
+    endpoint: RemoteEndpoint, session_id: str
+) -> dict[str, object]:
+    return _get_remote_json(
+        endpoint,
+        f"/sessions/{session_id}/memory/semantic/status",
+        "get remote semantic memory status",
+    )
+
+
+def rebuild_remote_semantic_memory(
+    endpoint: RemoteEndpoint,
+    session_id: str,
+    batch_size: int,
+    allow_rebuild: bool,
+) -> dict[str, object]:
+    return _post_remote_json(
+        endpoint,
+        f"/sessions/{session_id}/memory/semantic/rebuild",
+        "rebuild remote semantic memory",
+        json={"batch_size": batch_size, "allow_rebuild": allow_rebuild},
+    )
+
+
 def list_remote_session_runs(
     endpoint: RemoteEndpoint,
     session_id: str,
