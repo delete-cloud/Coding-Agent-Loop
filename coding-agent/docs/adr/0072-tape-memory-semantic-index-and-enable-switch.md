@@ -224,41 +224,48 @@ blob abstraction does not provide.
 Implementation is staged. The read/write switch, semantic backend contract,
 LanceDB backend, sync/review transition wiring, and maintenance rebuild guard
 have started landing across PRs. The checklist records the required proof for
-accepting this ADR; checked items are landed and were re-run during this ADR
-update, while unchecked items remain required by the ADR even if later
-verification finds that some have already landed.
+accepting this ADR; checked items have named executable coverage, while
+unchecked items remain required by the ADR.
 
-- [ ] `tests/coding_agent/test_memory_switch.py::test_read_off_suppresses_grounding_injection`
-- [ ] `tests/coding_agent/test_memory_switch.py::test_recall_planner_enabled_is_derived_from_effective_read`
-- [ ] `tests/coding_agent/test_memory_switch.py::test_write_off_suppresses_turn_end_memory_record`
-- [ ] `tests/coding_agent/test_memory_switch.py::test_write_off_suppresses_topic_end_long_term_memory`
-- [ ] `tests/coding_agent/test_memory_switch.py::test_write_off_suppresses_topic_finalization_review_candidate`
-- [ ] `tests/coding_agent/test_memory_switch.py::test_memory_off_leaves_tape_entries_intact`
-- [ ] `tests/coding_agent/test_memory_switch.py::test_memory_switch_truth_table`
-- [ ] `tests/coding_agent/test_memory_switch.py::test_kb_toggle_is_independent_from_memory_toggle`
-- [ ] `tests/coding_agent/test_semantic_tape_index.py::test_semantic_index_rejects_forbidden_text_before_indexing`
-- [ ] `tests/coding_agent/test_semantic_tape_index.py::test_semantic_index_rejects_forbidden_text_before_query_embedding`
-- [ ] `tests/coding_agent/test_semantic_tape_index.py::test_hybrid_merge_is_deterministic_and_dedups`
-- [ ] `tests/coding_agent/test_semantic_tape_index.py::test_schema_identity_mismatch_fails_clearly`
-- [ ] `tests/coding_agent/test_semantic_tape_index.py::test_schema_identity_mismatch_requires_explicit_rebuild`
-- [ ] `tests/coding_agent/test_semantic_tape_index.py::test_disabled_semantic_config_does_not_initialize_provider_or_backend`
-- [ ] `tests/coding_agent/test_semantic_tape_index.py::test_disabled_semantic_config_does_not_require_credentials`
-- [ ] `tests/coding_agent/test_memory_switch.py::test_nested_semantic_config_preserves_existing_memory_switch_defaults`
-- [ ] `tests/coding_agent/test_semantic_tape_index.py::test_source_grammar_rejects_invalid_sources`
-- [ ] `tests/coding_agent/test_semantic_tape_index.py::test_scope_grammar_rejects_invalid_scopes`
-- [ ] `tests/coding_agent/test_semantic_tape_index.py::test_scoped_delete_cannot_delete_across_scopes`
-- [ ] `tests/coding_agent/test_semantic_tape_index.py::test_full_topic_scan_handles_more_than_100_topics`
-- [ ] `tests/coding_agent/test_semantic_tape_index.py::test_stale_hit_is_dropped_during_rehydration`
-- [ ] `tests/coding_agent/test_semantic_tape_index.py::test_rehydration_never_renders_memory_hit_text_directly`
-- [ ] `tests/coding_agent/test_semantic_tape_index.py::test_semantic_ranking_is_additive_refill`
-- [ ] `tests/coding_agent/test_semantic_tape_index.py::test_memory_hit_score_is_normalized_high_is_better`
+- [x] `tests/coding_agent/test_memory_switch.py::test_read_off_suppresses_grounding_injection`
+- [x] `tests/coding_agent/test_memory_switch.py::test_recall_planner_enabled_is_derived_from_effective_read`
+- [x] `tests/coding_agent/test_memory_switch.py::test_write_off_suppresses_turn_end_memory_record`
+- [x] `tests/coding_agent/test_memory_switch.py::test_write_off_suppresses_topic_end_long_term_memory`
+- [x] `tests/coding_agent/test_memory_switch.py::test_write_off_suppresses_topic_finalization_review_candidate`
+- [x] `tests/coding_agent/test_memory_switch.py::test_memory_off_leaves_tape_entries_intact`
+- [x] `tests/coding_agent/test_memory_switch.py::test_memory_switch_truth_table`
+- [x] `tests/coding_agent/test_memory_switch.py::test_kb_toggle_is_independent_from_memory_toggle`
+- [x] `tests/coding_agent/test_semantic_tape_index.py::test_semantic_index_rejects_forbidden_text_before_indexing`
+- [x] `tests/coding_agent/test_semantic_tape_index.py::test_semantic_index_rejects_forbidden_text_before_query_embedding`
+- [x] `tests/coding_agent/test_semantic_tape_index.py::test_hybrid_merge_is_deterministic_and_dedups`
+- [x] `tests/coding_agent/test_memory_index_backend_contract.py::test_schema_identity_mismatch_fails_clearly`
+- [x] `tests/coding_agent/test_memory_index_backend_contract.py::test_schema_identity_mismatch_requires_explicit_rebuild_and_clears_stale_docs`
+- [x] `tests/coding_agent/test_memory_switch.py::test_disabled_semantic_config_does_not_initialize_provider_or_backend`
+- [x] Disabled semantic config does not require credentials:
+      `tests/coding_agent/test_memory_switch.py::test_disabled_semantic_config_does_not_initialize_provider_or_backend`
+- [x] `tests/coding_agent/test_memory_switch.py::test_nested_semantic_config_preserves_existing_memory_switch_defaults`
+- [x] `tests/coding_agent/test_semantic_tape_index.py::test_semantic_index_rejects_invalid_source_ref_before_indexing`
+- [x] `tests/coding_agent/test_semantic_tape_index.py::test_semantic_index_rejects_backend_hit_with_invalid_source_ref`
+- [x] `tests/coding_agent/test_memory_index_backend_contract.py::test_source_scope_grammar_rejects_invalid_scopes`
+- [x] `tests/coding_agent/test_memory_index_backend_contract.py::test_scoped_delete_cannot_delete_across_scopes`
+- [x] `tests/coding_agent/test_memory_index_backend_contract.py::test_lancedb_scoped_delete_cannot_delete_across_scopes`
+- [x] `tests/coding_agent/test_semantic_sync.py::test_full_topic_scan_handles_more_than_100_topics`
+- [x] `tests/coding_agent/test_semantic_recall.py::test_stale_semantic_topic_doc_id_is_dropped`
+- [x] `tests/coding_agent/test_semantic_recall.py::test_missing_unfinalized_no_summary_and_source_topic_hits_are_dropped`
+- [x] `tests/coding_agent/test_semantic_recall.py::test_accepted_memory_hit_is_rehydrated_and_other_statuses_are_dropped`
+- [x] `tests/coding_agent/test_semantic_recall.py::test_semantic_topic_hit_is_rehydrated_from_authoritative_topic`
+- [x] `tests/ui/test_session_manager_runtime.py::test_sqlite_durable_semantic_rebuild_recalled_by_later_build_context_without_backend_hit_text`
+- [x] `tests/coding_agent/test_semantic_recall.py::test_deterministic_topics_stay_first_and_semantic_hits_refill_after`
+- [x] `tests/coding_agent/test_semantic_recall.py::test_semantic_refill_does_not_expand_beyond_configured_limit`
+- [x] `tests/coding_agent/test_semantic_tape_index.py::test_hybrid_merge_keeps_deterministic_topics_before_high_score_semantic_refill`
+- [x] `tests/coding_agent/test_memory_index_backend_contract.py::test_memory_hit_score_is_normalized_high_is_better_by_result_ordering`
 - [ ] `tests/agentkit/storage/test_protocols.py::test_memory_index_protocol_stays_provider_agnostic`
-- [ ] `tests/coding_agent/test_semantic_sync.py::test_sync_indexes_only_finalized_topic_summaries`
-- [ ] `tests/coding_agent/test_semantic_sync.py::test_sync_indexes_only_accepted_reviewed_memories`
-- [ ] `tests/coding_agent/test_semantic_sync.py::test_sync_skips_candidate_rejected_and_archived_memories`
+- [x] `tests/coding_agent/test_semantic_sync.py::test_sync_indexes_only_finalized_topic_summaries`
+- [x] `tests/coding_agent/test_semantic_sync.py::test_sync_indexes_only_accepted_reviewed_memories`
+- [x] `tests/coding_agent/test_semantic_sync.py::test_sync_skips_candidate_rejected_and_archived_memories`
 - [ ] `tests/coding_agent/test_semantic_sync.py::test_manifest_cache_is_not_sync_authority`
-- [ ] `tests/coding_agent/test_semantic_sync.py::test_full_rebuild_is_idempotent`
-- [ ] `tests/coding_agent/test_semantic_sync.py::test_manual_rebuild_startup_and_event_triggers_share_sync_contract`
+- [x] `tests/coding_agent/test_semantic_sync.py::test_full_rebuild_is_idempotent`
+- [x] `tests/coding_agent/test_semantic_sync.py::test_manual_rebuild_startup_and_event_triggers_share_sync_contract`
 - [x] `tests/coding_agent/test_semantic_maintenance.py::test_semantic_maintenance_rebuild_scans_topic_store_in_pages`
 - [x] `tests/coding_agent/test_semantic_maintenance.py::test_semantic_maintenance_rebuild_requires_topic_store_before_clearing`
 - [x] `tests/coding_agent/test_semantic_maintenance.py::test_semantic_maintenance_rebuild_rejects_duplicate_topic_scan`
@@ -272,19 +279,19 @@ verification finds that some have already landed.
 - [x] `tests/ui/test_http_server.py::TestSemanticMemoryMaintenance::test_semantic_rebuild_active_turn_returns_409_without_clearing_backend`
 - [x] `tests/ui/test_http_server.py::TestSemanticMemoryMaintenance::test_semantic_rebuild_missing_topic_store_returns_409_without_clearing_backend`
 - [x] `tests/ui/test_http_server.py::TestSemanticMemoryMaintenance::test_semantic_rebuild_owner_conflict_maps_to_http_conflict`
-- [ ] `tests/coding_agent/test_memory_switch.py::test_semantic_enabled_fake_backend_registers_plugin_and_exposes_index_by_default`
-- [ ] `tests/coding_agent/test_memory_switch.py::test_semantic_enabled_with_read_disabled_exposes_index_without_registering_plugin`
-- [ ] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_accept_candidate_updates_semantic_index`
-- [ ] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_reject_candidate_deletes_stale_semantic_index`
-- [ ] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_missing_candidate_returns_404_without_index_side_effects`
-- [ ] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_terminal_transition_returns_400_without_index_side_effects`
-- [ ] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_same_status_terminal_transition_resyncs_existing_record`
-- [ ] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_unsafe_reason_returns_400_without_store_or_index_side_effects`
-- [ ] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_semantic_disabled_updates_review_store_directly`
-- [ ] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_semantic_sync_failure_returns_500`
-- [ ] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_semantic_transition_race_value_error_returns_400`
-- [ ] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_semantic_sync_value_error_after_transition_returns_500`
-- [ ] `tests/coding_agent/test_memory_index_backend_contract.py::test_fake_backend_satisfies_memory_index_contract`
+- [x] `tests/coding_agent/test_memory_switch.py::test_semantic_enabled_fake_backend_registers_plugin_and_exposes_index_by_default`
+- [x] `tests/coding_agent/test_memory_switch.py::test_semantic_enabled_with_read_disabled_exposes_index_without_registering_plugin`
+- [x] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_accept_candidate_updates_semantic_index`
+- [x] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_reject_candidate_deletes_stale_semantic_index`
+- [x] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_missing_candidate_returns_404_without_index_side_effects`
+- [x] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_terminal_transition_returns_400_without_index_side_effects`
+- [x] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_same_status_terminal_transition_resyncs_existing_record`
+- [x] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_unsafe_reason_returns_400_without_store_or_index_side_effects`
+- [x] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_semantic_disabled_updates_review_store_directly`
+- [x] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_semantic_sync_failure_returns_500`
+- [x] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_semantic_transition_race_value_error_returns_400`
+- [x] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_semantic_sync_value_error_after_transition_returns_500`
+- [x] `tests/coding_agent/test_memory_index_backend_contract.py::test_fake_backend_satisfies_memory_index_contract`
 - [ ] `uv run pytest -q`
 
 ## References
