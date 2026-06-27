@@ -1,8 +1,17 @@
+from dataclasses import fields
+import inspect
 from typing import Any
 
 import pytest
 from agentkit.result.models import ArtifactRef
-from agentkit.storage.protocols import ArtifactStore, TapeStore, DocIndex, SessionStore
+from agentkit.storage.protocols import (
+    ArtifactStore,
+    DocIndex,
+    MemoryHit,
+    MemoryIndex,
+    SessionStore,
+    TapeStore,
+)
 
 
 class InMemoryTapeStore:
@@ -38,6 +47,30 @@ class InMemoryDocIndex:
 
     async def delete(self, doc_id: str) -> None:
         self._docs = [d for d in self._docs if d["id"] != doc_id]
+
+
+class InMemoryMemoryIndex:
+    def __init__(self):
+        self._memories: dict[str, MemoryHit] = {}
+
+    async def upsert(
+        self,
+        memory_id: str,
+        text: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        self._memories[memory_id] = MemoryHit(
+            memory_id=memory_id,
+            text=text,
+            score=1.0,
+            metadata=metadata,
+        )
+
+    async def search(self, query: str, limit: int = 10) -> list[MemoryHit]:
+        return list(self._memories.values())[:limit]
+
+    async def delete(self, memory_id: str) -> None:
+        self._memories.pop(memory_id, None)
 
 
 class InMemorySessionStore:
@@ -164,3 +197,40 @@ class TestStorageProtocols:
         assert await store.load_artifact_ref("artifact_patch_1") is None
         assert await store.list_artifact_refs("session_1") == []
         assert await store.load_artifact_ref("artifact_patch_2") == other_ref
+
+
+def test_memory_index_protocol_stays_provider_agnostic():
+    idx = InMemoryMemoryIndex()
+
+    assert isinstance(idx, MemoryIndex)
+    assert _public_protocol_methods(MemoryIndex) == {"upsert", "search", "delete"}
+    assert list(inspect.signature(MemoryIndex.upsert).parameters) == [
+        "self",
+        "memory_id",
+        "text",
+        "metadata",
+    ]
+    assert list(inspect.signature(MemoryIndex.search).parameters) == [
+        "self",
+        "query",
+        "limit",
+    ]
+    assert list(inspect.signature(MemoryIndex.delete).parameters) == [
+        "self",
+        "memory_id",
+    ]
+    assert [field.name for field in fields(MemoryHit)] == [
+        "memory_id",
+        "text",
+        "score",
+        "metadata",
+        "source_refs",
+    ]
+
+
+def _public_protocol_methods(protocol: type) -> set[str]:
+    return {
+        name
+        for name, value in protocol.__dict__.items()
+        if not name.startswith("_") and callable(value)
+    }

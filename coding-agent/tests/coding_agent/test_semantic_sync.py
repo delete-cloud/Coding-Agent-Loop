@@ -215,6 +215,50 @@ async def test_full_rebuild_is_idempotent() -> None:
 
 
 @pytest.mark.asyncio
+async def test_manifest_cache_is_not_sync_authority() -> None:
+    backend, syncer = _syncer()
+    stale_topic = _topic("topic-stale", title="Stale topic", summary="Delete me")
+    stale_memory = ReviewedMemoryRecord(
+        candidate=_candidate(
+            "memory-stale",
+            title="Stale memory",
+            summary="Delete me too",
+        ),
+        status="accepted",
+    )
+    authoritative_topic = _topic(
+        "topic-auth",
+        title="Auth convention",
+        summary="Use JWT",
+    )
+    authoritative_memory = ReviewedMemoryRecord(
+        candidate=_candidate(
+            "memory-auth",
+            title="Accepted auth",
+            summary="JWT rule",
+        ),
+        status="accepted",
+    )
+    stale_memory_id = _reviewed_memory_doc_id(stale_memory)
+    authoritative_memory_id = _reviewed_memory_doc_id(authoritative_memory)
+    await syncer.sync_topic(stale_topic)
+    await syncer.sync_reviewed_memory(stale_memory)
+
+    report = await syncer.rebuild([authoritative_topic], [authoritative_memory])
+
+    expected_indexed_ids = (
+        authoritative_memory_id,
+        "topic-summary:topic-auth:2-9",
+    )
+    assert set(report.deleted_ids) == {
+        stale_memory_id,
+        "topic-summary:topic-stale:2-9",
+    }
+    assert set(report.indexed_ids) == set(expected_indexed_ids)
+    assert set(await backend.list_ids()) == set(expected_indexed_ids)
+
+
+@pytest.mark.asyncio
 async def test_full_topic_scan_handles_more_than_100_topics() -> None:
     backend, syncer = _syncer()
     topics = [

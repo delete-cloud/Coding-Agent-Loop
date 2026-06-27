@@ -257,11 +257,11 @@ unchecked items remain required by the ADR.
 - [x] `tests/coding_agent/test_semantic_recall.py::test_semantic_refill_does_not_expand_beyond_configured_limit`
 - [x] `tests/coding_agent/test_semantic_tape_index.py::test_hybrid_merge_keeps_deterministic_topics_before_high_score_semantic_refill`
 - [x] `tests/coding_agent/test_memory_index_backend_contract.py::test_memory_hit_score_is_normalized_high_is_better_by_result_ordering`
-- [ ] `tests/agentkit/storage/test_protocols.py::test_memory_index_protocol_stays_provider_agnostic`
+- [x] `tests/agentkit/storage/test_protocols.py::test_memory_index_protocol_stays_provider_agnostic`
 - [x] `tests/coding_agent/test_semantic_sync.py::test_sync_indexes_only_finalized_topic_summaries`
 - [x] `tests/coding_agent/test_semantic_sync.py::test_sync_indexes_only_accepted_reviewed_memories`
 - [x] `tests/coding_agent/test_semantic_sync.py::test_sync_skips_candidate_rejected_and_archived_memories`
-- [ ] `tests/coding_agent/test_semantic_sync.py::test_manifest_cache_is_not_sync_authority`
+- [x] `tests/coding_agent/test_semantic_sync.py::test_manifest_cache_is_not_sync_authority`
 - [x] `tests/coding_agent/test_semantic_sync.py::test_full_rebuild_is_idempotent`
 - [x] `tests/coding_agent/test_semantic_sync.py::test_manual_rebuild_startup_and_event_triggers_share_sync_contract`
 - [x] `tests/coding_agent/test_semantic_maintenance.py::test_semantic_maintenance_rebuild_scans_topic_store_in_pages`
@@ -290,7 +290,7 @@ unchecked items remain required by the ADR.
 - [x] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_semantic_transition_race_value_error_returns_400`
 - [x] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_semantic_sync_value_error_after_transition_returns_500`
 - [x] `tests/coding_agent/test_memory_index_backend_contract.py::test_fake_backend_satisfies_memory_index_contract`
-- [ ] `uv run pytest -q`
+- [x] `uv run pytest -q`
 
 ## References
 
