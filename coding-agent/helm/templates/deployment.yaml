@@ -96,6 +96,13 @@ spec:
                   name: {{ default (printf "%s-api-key" (include "coding-agent.fullname" .)) .Values.server.auth.secretName | quote }}
                   key: {{ required "server.auth.secretKey is required when server.auth.enabled=true" .Values.server.auth.secretKey | quote }}
             {{- end }}
+            {{- if .Values.server.auth.adminBearerTokenEnv }}
+            - name: {{ .Values.server.auth.adminBearerTokenEnv | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default (printf "%s-admin-api-key" (include "coding-agent.fullname" .)) .Values.server.auth.adminSecretName | quote }}
+                  key: {{ required "server.auth.adminSecretKey is required when server.auth.adminBearerTokenEnv is set" .Values.server.auth.adminSecretKey | quote }}
+            {{- end }}
             {{- if .Values.redis.enabled }}
             - name: AGENT_SESSION_REDIS_URL
               value: {{ default (printf "redis://127.0.0.1:%v/0" .Values.redis.sidecar.port) .Values.redis.url | quote }}

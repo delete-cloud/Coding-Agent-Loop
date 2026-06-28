@@ -20,6 +20,9 @@ server:
     bearerTokenEnv: CODING_AGENT_API_KEY
     secretName: ""
     secretKey: api-key
+    adminBearerTokenEnv: ""
+    adminSecretName: ""
+    adminSecretKey: api-key
 
 webui:
   enabled: true

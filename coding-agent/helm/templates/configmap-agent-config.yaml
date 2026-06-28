@@ -24,6 +24,9 @@ data:
     {{- if .Values.server.auth.enabled }}
     bearer_token_env = {{ required "server.auth.bearerTokenEnv is required when server.auth.enabled=true" .Values.server.auth.bearerTokenEnv | quote }}
     {{- end }}
+    {{- if .Values.server.auth.adminBearerTokenEnv }}
+    admin_bearer_token_env = {{ .Values.server.auth.adminBearerTokenEnv | quote }}
+    {{- end }}
 
     [agent.plugins]
     enabled = [
