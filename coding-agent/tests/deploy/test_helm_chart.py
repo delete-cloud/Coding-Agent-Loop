@@ -600,6 +600,83 @@ def test_helm_default_configures_http_auth() -> None:
     }
 
 
+def test_helm_default_does_not_configure_admin_http_auth() -> None:
+    docs = _render()
+    server = _agent_toml(docs)["server"]
+
+    assert "admin_bearer_token_env" not in server
+
+    main = _container(docs)
+    with pytest.raises(
+        AssertionError, match="missing env var CODING_AGENT_ADMIN_API_KEY"
+    ):
+        _env_var(main, "CODING_AGENT_ADMIN_API_KEY")
+    assert all(
+        item.get("valueFrom", {}).get("secretKeyRef", {}).get("name")
+        != "coding-agent-coding-agent-admin-api-key"
+        for item in main.get("env", [])
+    )
+
+
+def test_helm_admin_http_auth_uses_configured_secret_ref() -> None:
+    docs = _render(
+        "--set",
+        "server.auth.adminBearerTokenEnv=CODING_AGENT_ADMIN_API_KEY",
+        "--set",
+        "server.auth.adminSecretName=coding-agent-admin-api-key",
+        "--set",
+        "server.auth.adminSecretKey=admin-api-key",
+    )
+    server = _agent_toml(docs)["server"]
+
+    assert server["admin_bearer_token_env"] == "CODING_AGENT_ADMIN_API_KEY"
+
+    admin_token_env = _env_var(_container(docs), "CODING_AGENT_ADMIN_API_KEY")
+    assert admin_token_env["valueFrom"]["secretKeyRef"] == {
+        "name": "coding-agent-admin-api-key",
+        "key": "admin-api-key",
+    }
+
+
+def test_helm_admin_http_auth_defaults_secret_name() -> None:
+    docs = _render(
+        "--set",
+        "server.auth.adminBearerTokenEnv=CODING_AGENT_ADMIN_API_KEY",
+        "--set",
+        "server.auth.adminSecretKey=admin-api-key",
+    )
+    server = _agent_toml(docs)["server"]
+
+    assert server["admin_bearer_token_env"] == "CODING_AGENT_ADMIN_API_KEY"
+
+    admin_token_env = _env_var(_container(docs), "CODING_AGENT_ADMIN_API_KEY")
+    assert admin_token_env["valueFrom"]["secretKeyRef"] == {
+        "name": "coding-agent-coding-agent-admin-api-key",
+        "key": "admin-api-key",
+    }
+
+
+def test_helm_user_bearer_token_behavior_remains_unchanged() -> None:
+    docs = _render(
+        "--set",
+        "server.auth.bearerTokenEnv=CUSTOM_AGENT_API_KEY",
+        "--set",
+        "server.auth.secretName=custom-agent-api-key",
+        "--set",
+        "server.auth.secretKey=custom-api-key",
+    )
+    server = _agent_toml(docs)["server"]
+
+    assert server["bearer_token_env"] == "CUSTOM_AGENT_API_KEY"
+    assert "admin_bearer_token_env" not in server
+
+    token_env = _env_var(_container(docs), "CUSTOM_AGENT_API_KEY")
+    assert token_env["valueFrom"]["secretKeyRef"] == {
+        "name": "custom-agent-api-key",
+        "key": "custom-api-key",
+    }
+
+
 def test_helm_default_exposes_webui_static_dir_and_cors_whitelist() -> None:
     docs = _render()
     main = _container(docs)

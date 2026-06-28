@@ -10,6 +10,9 @@ server:
     bearerTokenEnv: CODING_AGENT_API_KEY
     secretName: coding-agent-coding-agent-api-key
     secretKey: api-key
+    adminBearerTokenEnv: ""
+    adminSecretName: ""
+    adminSecretKey: api-key
 
 cors:
   origins:
