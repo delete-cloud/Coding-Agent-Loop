@@ -618,6 +618,31 @@ def test_helm_default_does_not_configure_admin_http_auth() -> None:
     )
 
 
+def test_helm_admin_http_auth_can_be_enabled_without_user_auth() -> None:
+    docs = _render(
+        "--set",
+        "server.auth.enabled=false",
+        "--set",
+        "server.auth.adminBearerTokenEnv=CODING_AGENT_ADMIN_API_KEY",
+        "--set",
+        "server.auth.adminSecretKey=admin-api-key",
+    )
+    server = _agent_toml(docs)["server"]
+
+    assert "bearer_token_env" not in server
+    assert server["admin_bearer_token_env"] == "CODING_AGENT_ADMIN_API_KEY"
+
+    main = _container(docs)
+    with pytest.raises(AssertionError, match="missing env var CODING_AGENT_API_KEY"):
+        _env_var(main, "CODING_AGENT_API_KEY")
+
+    admin_token_env = _env_var(main, "CODING_AGENT_ADMIN_API_KEY")
+    assert admin_token_env["valueFrom"]["secretKeyRef"] == {
+        "name": "coding-agent-coding-agent-admin-api-key",
+        "key": "admin-api-key",
+    }
+
+
 def test_helm_admin_http_auth_uses_configured_secret_ref() -> None:
     docs = _render(
         "--set",
