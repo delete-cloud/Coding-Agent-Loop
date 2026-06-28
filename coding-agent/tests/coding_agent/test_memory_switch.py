@@ -923,6 +923,33 @@ embedding_base_url = "https://api.siliconflow.cn/v1"
     }
 
 
+def test_semantic_enabled_rejects_empty_embedding_schema_override(
+    tmp_path: Path,
+) -> None:
+    config_path = _default_plugin_config(
+        tmp_path,
+        memory="""
+
+[memory]
+
+[memory.semantic]
+enabled = true
+backend = "lancedb"
+embedding_model = ""
+""",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"\[memory\.semantic\]\.embedding_model must be non-empty",
+    ):
+        create_agent(
+            config_path=config_path,
+            data_dir=tmp_path / "data",
+            api_key="sk-test",
+        )
+
+
 def test_semantic_enabled_forwards_explicit_topic_dependencies_to_plugin(
     tmp_path: Path,
 ) -> None:

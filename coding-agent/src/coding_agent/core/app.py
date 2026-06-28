@@ -265,10 +265,19 @@ def _semantic_schema_from_config(
     default_schema = _default_semantic_schema(backend)
     return replace(
         default_schema,
-        embedding_provider_id=embedding_provider_id
-        or default_schema.embedding_provider_id,
-        embedding_model=embedding_model or default_schema.embedding_model,
-        embedding_dim=embedding_dim or default_schema.embedding_dim,
+        embedding_provider_id=(
+            embedding_provider_id
+            if embedding_provider_id is not None
+            else default_schema.embedding_provider_id
+        ),
+        embedding_model=(
+            embedding_model
+            if embedding_model is not None
+            else default_schema.embedding_model
+        ),
+        embedding_dim=(
+            embedding_dim if embedding_dim is not None else default_schema.embedding_dim
+        ),
     )
 
 
@@ -301,6 +310,8 @@ def _optional_semantic_string(
         return None
     if not isinstance(value, str):
         raise ValueError(f"[memory.semantic].{key} must be a string")
+    if not value:
+        raise ValueError(f"[memory.semantic].{key} must be non-empty")
     return value
 
 
