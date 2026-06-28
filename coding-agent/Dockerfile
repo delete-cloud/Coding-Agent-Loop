@@ -44,6 +44,9 @@ RUN python -m venv /app/.venv \
 
 FROM ${PYTHON_BASE_IMAGE} AS runtime
 
+ARG APT_DEBIAN_MIRROR=http://deb.debian.org/debian
+ARG APT_DEBIAN_SECURITY_MIRROR=http://deb.debian.org/debian-security
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/app/.venv/bin:$PATH" \
@@ -51,7 +54,18 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     AGENT_DATA_DIR="/var/lib/coding-agent/data" \
     WEBUI_DIST_DIR="/app/webui-dist"
 
-RUN apt-get update \
+RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+        sed -i \
+            -e "s|^URIs: http://deb.debian.org/debian-security$|URIs: ${APT_DEBIAN_SECURITY_MIRROR}|" \
+            -e "s|^URIs: http://deb.debian.org/debian$|URIs: ${APT_DEBIAN_MIRROR}|" \
+            /etc/apt/sources.list.d/debian.sources; \
+    elif [ -f /etc/apt/sources.list ]; then \
+        sed -i \
+            -e "s|http://deb.debian.org/debian-security|${APT_DEBIAN_SECURITY_MIRROR}|g" \
+            -e "s|http://deb.debian.org/debian|${APT_DEBIAN_MIRROR}|g" \
+            /etc/apt/sources.list; \
+    fi \
+    && apt-get update \
     && apt-get install -y --no-install-recommends bubblewrap git \
     && rm -rf /var/lib/apt/lists/*
 
