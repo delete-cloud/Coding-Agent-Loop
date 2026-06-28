@@ -1,6 +1,7 @@
 ARG PYTHON_BASE_IMAGE=python:3.12-slim
+ARG NODE_BASE_IMAGE=node:20-alpine
 
-FROM node:20-alpine AS webui
+FROM ${NODE_BASE_IMAGE} AS webui
 
 ARG PNPM_VERSION=10.23.0
 
