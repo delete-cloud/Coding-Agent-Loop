@@ -923,6 +923,35 @@ embedding_base_url = "https://api.siliconflow.cn/v1"
     }
 
 
+def test_semantic_config_dict_emits_only_changed_embedding_schema_overrides(
+    tmp_path: Path,
+) -> None:
+    config_path = _default_plugin_config(
+        tmp_path,
+        memory="""
+
+[memory]
+
+[memory.semantic]
+enabled = true
+backend = "lancedb"
+embedding_dim = 1024
+""",
+    )
+
+    _pipeline, ctx = create_agent(
+        config_path=config_path,
+        data_dir=tmp_path / "data",
+        api_key="sk-test",
+    )
+
+    assert ctx.config["memory"]["semantic"] == {
+        "enabled": True,
+        "backend": "lancedb",
+        "embedding_dim": 1024,
+    }
+
+
 def test_semantic_enabled_rejects_empty_embedding_schema_override(
     tmp_path: Path,
 ) -> None:
@@ -936,6 +965,33 @@ def test_semantic_enabled_rejects_empty_embedding_schema_override(
 enabled = true
 backend = "lancedb"
 embedding_model = ""
+""",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"\[memory\.semantic\]\.embedding_model must be non-empty",
+    ):
+        create_agent(
+            config_path=config_path,
+            data_dir=tmp_path / "data",
+            api_key="sk-test",
+        )
+
+
+def test_semantic_enabled_rejects_whitespace_embedding_schema_override(
+    tmp_path: Path,
+) -> None:
+    config_path = _default_plugin_config(
+        tmp_path,
+        memory="""
+
+[memory]
+
+[memory.semantic]
+enabled = true
+backend = "lancedb"
+embedding_model = "   "
 """,
     )
 

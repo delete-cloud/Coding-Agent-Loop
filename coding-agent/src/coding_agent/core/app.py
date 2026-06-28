@@ -288,17 +288,14 @@ def _semantic_schema_config_payload(
     if backend not in semantic_backend_registry.available_semantic_memory_backends():
         return {}
     default_schema = _default_semantic_schema(backend)
-    if (
-        schema.embedding_provider_id == default_schema.embedding_provider_id
-        and schema.embedding_model == default_schema.embedding_model
-        and schema.embedding_dim == default_schema.embedding_dim
-    ):
-        return {}
-    return {
-        "embedding_provider_id": schema.embedding_provider_id,
-        "embedding_model": schema.embedding_model,
-        "embedding_dim": schema.embedding_dim,
-    }
+    payload: dict[str, object] = {}
+    if schema.embedding_provider_id != default_schema.embedding_provider_id:
+        payload["embedding_provider_id"] = schema.embedding_provider_id
+    if schema.embedding_model != default_schema.embedding_model:
+        payload["embedding_model"] = schema.embedding_model
+    if schema.embedding_dim != default_schema.embedding_dim:
+        payload["embedding_dim"] = schema.embedding_dim
+    return payload
 
 
 def _optional_semantic_string(
@@ -310,7 +307,7 @@ def _optional_semantic_string(
         return None
     if not isinstance(value, str):
         raise ValueError(f"[memory.semantic].{key} must be a string")
-    if not value:
+    if not value.strip():
         raise ValueError(f"[memory.semantic].{key} must be non-empty")
     return value
 
