@@ -218,6 +218,7 @@ def test_helm_semantic_memory_enabled_renders_config() -> None:
     )
     config = _agent_toml(docs)
 
+    assert "semantic_memory" in config["agent"]["plugins"]["enabled"]
     assert config["memory"]["semantic"] == {
         "enabled": True,
         "backend": "lancedb",
@@ -228,6 +229,44 @@ def test_helm_semantic_memory_enabled_renders_config() -> None:
         "embedding_dim": 1024,
         "embedding_base_url": "https://api.siliconflow.cn/v1",
     }
+
+
+def test_helm_semantic_memory_enabled_bootstraps_runtime(tmp_path: Path) -> None:
+    data_mount = tmp_path / "data"
+    docs = _render(
+        "--set",
+        f"persistence.data.mountPath={data_mount}",
+        "--set",
+        "memory.semantic.enabled=true",
+        "--set",
+        "memory.semantic.backend=lancedb",
+        "--set",
+        "memory.semantic.dbPath=semantic-memory",
+        "--set",
+        "memory.semantic.embeddingProviderId=siliconflow",
+        "--set",
+        "memory.semantic.embeddingModel=BAAI/bge-m3",
+        "--set",
+        "memory.semantic.embeddingDim=1024",
+        "--set",
+        "memory.semantic.embeddingBaseUrl=https://api.siliconflow.cn/v1",
+    )
+    config_path = tmp_path / "agent.toml"
+    config_path.write_text(_agent_toml_text(docs), encoding="utf-8")
+
+    pipeline, ctx = create_agent(
+        config_path=config_path,
+        data_dir=tmp_path / "unused-data-dir",
+        workspace_root=tmp_path / "workspace",
+        api_key="sk-test",
+    )
+
+    backend = ctx.config["semantic_memory_backend"]
+    assert backend.schema.embedding_provider_id == "siliconflow"
+    assert backend.schema.embedding_model == "BAAI/bge-m3"
+    assert backend.schema.embedding_dim == 1024
+    assert backend.db_path == data_mount / "semantic-memory"
+    assert "semantic_memory" in pipeline._registry.plugin_ids()
 
 
 def test_helm_agent_config_checksum_annotation_changes_with_config(

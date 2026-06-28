@@ -38,6 +38,9 @@ data:
       "session_metrics",
       "shell_session",
       "skills",
+      {{- if .Values.memory.semantic.enabled }}
+      "semantic_memory",
+      {{- end }}
       {{- if .Values.kb.enabled }}
       "kb",
       {{- end }}
