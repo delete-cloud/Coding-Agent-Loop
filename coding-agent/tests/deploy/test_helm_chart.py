@@ -835,7 +835,8 @@ def test_runtime_image_installs_native_linux_sandbox_binary() -> None:
 def test_runtime_image_builds_and_copies_webui_dist() -> None:
     dockerfile = (ROOT / "Dockerfile").read_text()
 
-    assert "FROM node:20-alpine AS webui" in dockerfile
+    assert "ARG NODE_BASE_IMAGE=node:20-alpine" in dockerfile
+    assert "FROM ${NODE_BASE_IMAGE} AS webui" in dockerfile
     assert "ARG PNPM_VERSION=" in dockerfile
     assert 'corepack prepare "pnpm@${PNPM_VERSION}" --activate' in dockerfile
     assert (
