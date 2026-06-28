@@ -109,6 +109,17 @@ agent:
       memoryLimitMb: null
       dockerImage: python:3.11-slim
 
+memory:
+  semantic:
+    enabled: false
+    backend: lancedb
+    dbPath: semantic-memory
+    tableName: semantic_memory
+    embeddingProviderId: openai
+    embeddingModel: text-embedding-3-small
+    embeddingDim: 1536
+    embeddingBaseUrl: null
+
 kb:
   enabled: false
   dbPath: kb

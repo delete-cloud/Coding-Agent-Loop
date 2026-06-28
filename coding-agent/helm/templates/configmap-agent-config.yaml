@@ -38,6 +38,9 @@ data:
       "session_metrics",
       "shell_session",
       "skills",
+      {{- if .Values.memory.semantic.enabled }}
+      "semantic_memory",
+      {{- end }}
       {{- if .Values.kb.enabled }}
       "kb",
       {{- end }}
@@ -53,6 +56,21 @@ data:
     [storage.paths]
     local = {{ printf "%s/local.sqlite3" .Values.persistence.data.mountPath | quote }}
     docs = {{ printf "%s/docs" .Values.persistence.data.mountPath | quote }}
+
+    {{- if .Values.memory.semantic.enabled }}
+    [memory.semantic]
+    enabled = true
+    backend = {{ .Values.memory.semantic.backend | quote }}
+    db_path = {{ printf "%s/%s" (.Values.persistence.data.mountPath | trimSuffix "/") (.Values.memory.semantic.dbPath | trimPrefix "/") | quote }}
+    table_name = {{ .Values.memory.semantic.tableName | quote }}
+    embedding_provider_id = {{ .Values.memory.semantic.embeddingProviderId | quote }}
+    embedding_model = {{ .Values.memory.semantic.embeddingModel | quote }}
+    embedding_dim = {{ .Values.memory.semantic.embeddingDim }}
+    {{- if .Values.memory.semantic.embeddingBaseUrl }}
+    embedding_base_url = {{ .Values.memory.semantic.embeddingBaseUrl | quote }}
+    {{- end }}
+
+    {{- end }}
 
     {{- if .Values.kb.enabled }}
     [kb]
