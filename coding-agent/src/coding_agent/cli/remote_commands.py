@@ -44,12 +44,23 @@ def remote_add(
     """Add or update a named remote endpoint."""
     from coding_agent.remote.client import add_remote
 
+    normalized_admin_token = admin_token.strip() if admin_token is not None else None
+    normalized_admin_token_env = (
+        admin_token_env.strip() if admin_token_env is not None else None
+    )
+    if admin_token is not None and not normalized_admin_token:
+        raise click.ClickException("Admin token must not be blank.")
+    if admin_token_env is not None and not normalized_admin_token_env:
+        raise click.ClickException(
+            "Admin token environment variable must not be blank."
+        )
+
     endpoint = add_remote(
         name,
         url,
         token,
-        admin_token=admin_token,
-        admin_token_env=admin_token_env,
+        admin_token=normalized_admin_token,
+        admin_token_env=normalized_admin_token_env,
     )
     click.echo(f"Added remote {endpoint.name}: {endpoint.url}")
 

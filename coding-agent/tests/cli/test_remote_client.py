@@ -1623,7 +1623,7 @@ def test_remote_add_persists_admin_token_options_and_list_redacts_them(
             "--token",
             "user-token",
             "--admin-token",
-            "admin-secret",
+            " admin-secret ",
         ],
         catch_exceptions=False,
     )
@@ -1635,7 +1635,7 @@ def test_remote_add_persists_admin_token_options_and_list_redacts_them(
             "env",
             "http://agent-env.example",
             "--admin-token-env",
-            "REMOTE_ADMIN_TOKEN",
+            " REMOTE_ADMIN_TOKEN ",
         ],
         catch_exceptions=False,
     )
@@ -1694,6 +1694,51 @@ def test_remote_add_rejects_conflicting_admin_token_options(
 
     assert result.exit_code != 0
     assert "Pass either --admin-token or --admin-token-env, not both." in result.output
+    assert not config_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("option", "value", "message"),
+    [
+        ("--admin-token", "", "Admin token must not be blank."),
+        ("--admin-token", "   ", "Admin token must not be blank."),
+        (
+            "--admin-token-env",
+            "",
+            "Admin token environment variable must not be blank.",
+        ),
+        (
+            "--admin-token-env",
+            "   ",
+            "Admin token environment variable must not be blank.",
+        ),
+    ],
+)
+def test_remote_add_rejects_blank_admin_token_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    option: str,
+    value: str,
+    message: str,
+) -> None:
+    config_path = tmp_path / "remotes.json"
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    runner = CliRunner()
+
+    result = runner.invoke(
+        main,
+        [
+            "remote",
+            "add",
+            "dev",
+            "http://agent.example",
+            option,
+            value,
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert message in result.output
     assert not config_path.exists()
 
 
@@ -3112,8 +3157,6 @@ def test_remote_memory_status_prints_semantic_memory_status(
             "http://agent.example",
             "--token",
             "user-token",
-            "--admin-token",
-            "admin-token",
         ],
         catch_exceptions=False,
     )
@@ -3159,7 +3202,7 @@ def test_remote_memory_status_prints_semantic_memory_status(
         (
             "get",
             "/sessions/sess-1/memory/semantic/status",
-            {"Authorization": "Bearer admin-token"},
+            {"Authorization": "Bearer user-token"},
         )
     ]
 
