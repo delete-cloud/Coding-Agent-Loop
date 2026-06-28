@@ -13,6 +13,11 @@ RUN set -eux; \
         -e "s|^URIs: http://deb.debian.org/debian-security$|URIs: ${APT_DEBIAN_SECURITY_MIRROR}|" \
         -e "s|^URIs: http://deb.debian.org/debian$|URIs: ${APT_DEBIAN_MIRROR}|" \
         /etc/apt/sources.list.d/debian.sources; \
+    elif [ -f /etc/apt/sources.list ]; then \
+      sed -i \
+        -e "s|http://deb.debian.org/debian-security|${APT_DEBIAN_SECURITY_MIRROR}|g" \
+        -e "s|http://deb.debian.org/debian|${APT_DEBIAN_MIRROR}|g" \
+        /etc/apt/sources.list; \
     fi; \
     apt-get update; \
     apt-get install -y --no-install-recommends ca-certificates curl tar gzip; \
