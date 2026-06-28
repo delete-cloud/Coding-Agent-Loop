@@ -5,7 +5,7 @@ import inspect
 import uuid
 from collections.abc import Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -78,6 +78,8 @@ class SemanticMemoryConfig:
             payload["table_name"] = self.table_name
         if self.embedding_base_url is not None:
             payload["embedding_base_url"] = self.embedding_base_url
+        if schema_payload := _semantic_schema_config_payload(self.backend, self.schema):
+            payload.update(schema_payload)
         return payload
 
 
@@ -231,18 +233,87 @@ def _parse_semantic_memory_config(
     embedding_base_url = raw_semantic_cfg.get("embedding_base_url")
     if embedding_base_url is not None and not isinstance(embedding_base_url, str):
         raise ValueError("[memory.semantic].embedding_base_url must be a string")
+    schema = _semantic_schema_from_config(backend, raw_semantic_cfg)
     return SemanticMemoryConfig(
         enabled=enabled,
         backend=backend,
-        schema=(
-            _default_semantic_schema(backend)
-            if backend in semantic_backend_registry.available_semantic_memory_backends()
-            else FAKE_SEMANTIC_INDEX_SCHEMA
-        ),
+        schema=schema,
         db_path=db_path,
         table_name=table_name,
         embedding_base_url=embedding_base_url,
     )
+
+
+def _semantic_schema_from_config(
+    backend: str,
+    raw_semantic_cfg: Mapping[str, Any],
+) -> SemanticIndexSchema:
+    embedding_provider_id = _optional_semantic_string(
+        raw_semantic_cfg,
+        "embedding_provider_id",
+    )
+    embedding_model = _optional_semantic_string(
+        raw_semantic_cfg,
+        "embedding_model",
+    )
+    embedding_dim = _optional_semantic_positive_int(
+        raw_semantic_cfg,
+        "embedding_dim",
+    )
+    if backend not in semantic_backend_registry.available_semantic_memory_backends():
+        return FAKE_SEMANTIC_INDEX_SCHEMA
+    default_schema = _default_semantic_schema(backend)
+    return replace(
+        default_schema,
+        embedding_provider_id=embedding_provider_id
+        or default_schema.embedding_provider_id,
+        embedding_model=embedding_model or default_schema.embedding_model,
+        embedding_dim=embedding_dim or default_schema.embedding_dim,
+    )
+
+
+def _semantic_schema_config_payload(
+    backend: str,
+    schema: SemanticIndexSchema,
+) -> dict[str, object]:
+    if backend not in semantic_backend_registry.available_semantic_memory_backends():
+        return {}
+    default_schema = _default_semantic_schema(backend)
+    if (
+        schema.embedding_provider_id == default_schema.embedding_provider_id
+        and schema.embedding_model == default_schema.embedding_model
+        and schema.embedding_dim == default_schema.embedding_dim
+    ):
+        return {}
+    return {
+        "embedding_provider_id": schema.embedding_provider_id,
+        "embedding_model": schema.embedding_model,
+        "embedding_dim": schema.embedding_dim,
+    }
+
+
+def _optional_semantic_string(
+    raw_semantic_cfg: Mapping[str, Any],
+    key: str,
+) -> str | None:
+    value = raw_semantic_cfg.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"[memory.semantic].{key} must be a string")
+    return value
+
+
+def _optional_semantic_positive_int(
+    raw_semantic_cfg: Mapping[str, Any],
+    key: str,
+) -> int | None:
+    value = raw_semantic_cfg.get(key)
+    if value is None:
+        return None
+    if type(value) is not int or value <= 0:
+        raise ValueError(f"[memory.semantic].{key} must be a positive integer")
+    return value
 
 
 def _default_semantic_schema(backend: str) -> SemanticIndexSchema:

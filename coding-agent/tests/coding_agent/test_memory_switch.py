@@ -797,9 +797,18 @@ backend = "fake"
         db_path: object,
         table_name: object,
         embedding_base_url: object,
+        embedding_fn: object | None = None,
     ) -> FakeSemanticMemoryBackend:
         calls.append(
-            (backend, schema, data_dir, db_path, table_name, embedding_base_url)
+            (
+                backend,
+                schema,
+                data_dir,
+                db_path,
+                table_name,
+                embedding_base_url,
+                embedding_fn,
+            )
         )
         return RecordingBackend(schema=schema)
 
@@ -822,6 +831,7 @@ backend = "fake"
             tmp_path / "data" / "kb",
             None,
             "semantic_memory",
+            None,
             None,
         )
     ]
@@ -868,6 +878,49 @@ embedding_base_url = "https://example.invalid/v1"
         "embedding_base_url": "https://example.invalid/v1",
     }
     assert "semantic_memory" in pipeline._registry.plugin_ids()
+
+
+def test_semantic_enabled_lancedb_backend_uses_configured_embedding_schema(
+    tmp_path: Path,
+) -> None:
+    config_path = _default_plugin_config(
+        tmp_path,
+        memory="""
+
+[memory]
+read_enabled = true
+write_enabled = true
+
+[memory.semantic]
+enabled = true
+backend = "lancedb"
+db_path = "semantic-memory"
+embedding_provider_id = "siliconflow"
+embedding_model = "BAAI/bge-m3"
+embedding_dim = 1024
+embedding_base_url = "https://api.siliconflow.cn/v1"
+""",
+    )
+
+    _pipeline, ctx = create_agent(
+        config_path=config_path,
+        data_dir=tmp_path / "data",
+        api_key="sk-test",
+    )
+
+    backend = ctx.config["semantic_memory_backend"]
+    assert backend.schema.embedding_provider_id == "siliconflow"
+    assert backend.schema.embedding_model == "BAAI/bge-m3"
+    assert backend.schema.embedding_dim == 1024
+    assert ctx.config["memory"]["semantic"] == {
+        "enabled": True,
+        "backend": "lancedb",
+        "db_path": "semantic-memory",
+        "embedding_base_url": "https://api.siliconflow.cn/v1",
+        "embedding_provider_id": "siliconflow",
+        "embedding_model": "BAAI/bge-m3",
+        "embedding_dim": 1024,
+    }
 
 
 def test_semantic_enabled_forwards_explicit_topic_dependencies_to_plugin(
