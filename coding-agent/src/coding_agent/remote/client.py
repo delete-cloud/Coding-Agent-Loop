@@ -135,7 +135,9 @@ def add_remote(
     normalized_url = url.rstrip("/")
     if not normalized_url:
         raise click.ClickException("Remote URL must not be empty")
-    _validate_admin_credential_choice(admin_token, admin_token_env)
+    admin_token, admin_token_env = _normalize_admin_credentials(
+        admin_token, admin_token_env
+    )
     remotes = load_remotes()
     endpoint = RemoteEndpoint(
         name=name,
@@ -181,22 +183,51 @@ def admin_auth_headers(endpoint: RemoteEndpoint) -> dict[str, str]:
 def _resolve_admin_token(endpoint: RemoteEndpoint) -> str | None:
     _validate_admin_credential_choice(endpoint.admin_token, endpoint.admin_token_env)
     if endpoint.admin_token is not None:
-        if not endpoint.admin_token.strip():
+        admin_token = endpoint.admin_token.strip()
+        if not admin_token:
             raise click.ClickException(f"Remote {endpoint.name} has blank admin_token")
-        return endpoint.admin_token
+        return admin_token
     if endpoint.admin_token_env is not None:
-        if not endpoint.admin_token_env.strip():
+        admin_token_env = endpoint.admin_token_env.strip()
+        if not admin_token_env:
             raise click.ClickException(
                 f"Remote {endpoint.name} has blank admin_token_env"
             )
-        value = os.environ.get(endpoint.admin_token_env)
-        if value is None or not value.strip():
+        value = os.environ.get(admin_token_env)
+        admin_token = value.strip() if value is not None else None
+        if not admin_token:
             raise click.ClickException(
                 "Admin token environment variable is not set or is blank: "
-                f"{endpoint.admin_token_env}"
+                f"{admin_token_env}"
             )
-        return value
+        return admin_token
     return None
+
+
+def _normalize_admin_credentials(
+    admin_token: str | None, admin_token_env: str | None
+) -> tuple[str | None, str | None]:
+    normalized_admin_token = _normalize_admin_credential(
+        admin_token,
+        blank_message="Admin token must not be blank.",
+    )
+    normalized_admin_token_env = _normalize_admin_credential(
+        admin_token_env,
+        blank_message="Admin token environment variable must not be blank.",
+    )
+    _validate_admin_credential_choice(
+        normalized_admin_token, normalized_admin_token_env
+    )
+    return normalized_admin_token, normalized_admin_token_env
+
+
+def _normalize_admin_credential(value: str | None, *, blank_message: str) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        raise click.ClickException(blank_message)
+    return normalized
 
 
 def _validate_admin_credential_choice(

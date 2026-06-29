@@ -630,6 +630,34 @@ def test_remote_semantic_memory_admin_token_env_resolves_from_environment(
     assert calls == [{"Authorization": "Bearer env-admin-token"}]
 
 
+def test_remote_admin_auth_headers_strip_direct_and_env_admin_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from coding_agent.remote.client import RemoteEndpoint, admin_auth_headers
+
+    monkeypatch.setenv("REMOTE_ADMIN_TOKEN", " env-admin-token ")
+
+    direct_headers = admin_auth_headers(
+        RemoteEndpoint(
+            name="direct",
+            url="http://agent.example",
+            token="user-token",
+            admin_token=" admin-token ",
+        )
+    )
+    env_headers = admin_auth_headers(
+        RemoteEndpoint(
+            name="env",
+            url="http://agent-env.example",
+            token="user-token",
+            admin_token_env="REMOTE_ADMIN_TOKEN",
+        )
+    )
+
+    assert direct_headers == {"Authorization": "Bearer admin-token"}
+    assert env_headers == {"Authorization": "Bearer env-admin-token"}
+
+
 @pytest.mark.parametrize("env_value", [None, "", "   "])
 def test_remote_semantic_memory_admin_token_env_missing_or_blank_fails_fast(
     monkeypatch: pytest.MonkeyPatch,
@@ -1660,15 +1688,68 @@ def test_remote_add_persists_admin_token_options_and_list_redacts_them(
     listed = runner.invoke(main, ["remote", "list"], catch_exceptions=False)
 
     assert listed.exit_code == 0
-    assert "direct" in listed.output
-    assert "env" in listed.output
-    assert "user-auth=token" in listed.output
-    assert "user-auth=no-token" in listed.output
-    assert "admin-auth=admin-token" in listed.output
-    assert "admin-auth=admin-token-env" in listed.output
+    rows: dict[str, list[str]] = {}
+    for line in listed.output.splitlines():
+        parts = line.split("\t")
+        assert len(parts) == 4
+        rows[parts[0]] = parts
+    assert rows == {
+        "direct": [
+            "direct",
+            "http://agent.example",
+            "user-auth=token",
+            "admin-auth=admin-token",
+        ],
+        "env": [
+            "env",
+            "http://agent-env.example",
+            "user-auth=no-token",
+            "admin-auth=admin-token-env",
+        ],
+    }
     assert "user-token" not in listed.output
     assert "admin-secret" not in listed.output
     assert "REMOTE_ADMIN_TOKEN" not in listed.output
+
+
+def test_add_remote_normalizes_admin_token_credentials_for_direct_callers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from coding_agent.remote.client import add_remote
+
+    config_path = tmp_path / "remotes.json"
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+
+    direct = add_remote(
+        "direct",
+        "http://agent.example/",
+        "user-token",
+        admin_token=" admin-secret ",
+    )
+    env = add_remote(
+        "env",
+        "http://agent-env.example",
+        None,
+        admin_token_env=" REMOTE_ADMIN_TOKEN ",
+    )
+
+    assert direct.admin_token == "admin-secret"
+    assert direct.admin_token_env is None
+    assert env.admin_token is None
+    assert env.admin_token_env == "REMOTE_ADMIN_TOKEN"
+    assert json.loads(config_path.read_text(encoding="utf-8")) == {
+        "remotes": {
+            "direct": {
+                "url": "http://agent.example",
+                "token": "user-token",
+                "admin_token": "admin-secret",
+            },
+            "env": {
+                "url": "http://agent-env.example",
+                "admin_token_env": "REMOTE_ADMIN_TOKEN",
+            },
+        }
+    }
 
 
 def test_remote_add_rejects_conflicting_admin_token_options(
@@ -1739,6 +1820,39 @@ def test_remote_add_rejects_blank_admin_token_credentials(
 
     assert result.exit_code != 0
     assert message in result.output
+    assert not config_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"admin_token": ""}, "Admin token must not be blank."),
+        ({"admin_token": "   "}, "Admin token must not be blank."),
+        (
+            {"admin_token_env": ""},
+            "Admin token environment variable must not be blank.",
+        ),
+        (
+            {"admin_token_env": "   "},
+            "Admin token environment variable must not be blank.",
+        ),
+    ],
+)
+def test_add_remote_rejects_blank_admin_token_credentials_for_direct_callers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kwargs: dict[str, str],
+    message: str,
+) -> None:
+    from coding_agent.remote.client import add_remote
+
+    config_path = tmp_path / "remotes.json"
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+
+    with pytest.raises(click.ClickException) as exc_info:
+        add_remote("dev", "http://agent.example", None, **kwargs)
+
+    assert message in str(exc_info.value)
     assert not config_path.exists()
 
 
