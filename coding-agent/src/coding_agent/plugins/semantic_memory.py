@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime
 import inspect
 from typing import Any, Callable
 
-from agentkit.tape.tape import Tape
+from agentkit.runtime.messages import RuntimeMessageKind
 from agentkit.runtime.pipeline import PipelineContext
+from agentkit.tape.tape import Tape
 from coding_agent.topics.memory import (
     MemoryReviewStore,
     ReviewedMemoryRecord,
@@ -25,6 +27,14 @@ from coding_agent.topics.semantic_recall import (
     SemanticTopicStore,
 )
 from coding_agent.topics.store import TopicRecord
+
+
+_RUNTIME_QUERY_KINDS = frozenset(
+    {
+        RuntimeMessageKind.USER_STEER,
+        RuntimeMessageKind.SUBAGENT_MESSAGE,
+    }
+)
 
 
 class _NoopTopicStore:
@@ -68,7 +78,9 @@ class SemanticMemoryPlugin:
         if tape is None:
             return []
 
-        user_message = _latest_user_message(tape)
+        user_message = _latest_runtime_prompt_message(kwargs.get("ctx"))
+        if user_message is None:
+            user_message = _latest_user_message(tape)
         if user_message is None:
             return []
         if not _is_recall_safe_query(user_message):
@@ -112,6 +124,28 @@ def _latest_user_message(tape: Tape) -> str | None:
         content = entry.payload.get("content")
         if role == "user" and isinstance(content, str) and content.strip():
             return content
+    return None
+
+
+def _latest_runtime_prompt_message(ctx: object) -> str | None:
+    if not isinstance(ctx, PipelineContext):
+        return None
+
+    for item in reversed(ctx.runtime_messages):
+        message = item.message
+        if message.kind not in _RUNTIME_QUERY_KINDS:
+            continue
+        text = _runtime_payload_text(message.payload)
+        if text is not None:
+            return text
+    return None
+
+
+def _runtime_payload_text(payload: Mapping[str, object]) -> str | None:
+    for key in ("text", "message", "content"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
     return None
 
 

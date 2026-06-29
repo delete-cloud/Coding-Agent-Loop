@@ -5,6 +5,11 @@ from datetime import UTC, datetime
 import pytest
 
 from agentkit.plugin.registry import PluginRegistry
+from agentkit.runtime.messages import (
+    RuntimeMessage,
+    RuntimeMessageKind,
+    SequencedRuntimeMessage,
+)
 from agentkit.runtime.pipeline import PipelineContext
 from agentkit.runtime.hook_runtime import HookRuntime
 from agentkit.runtime.pipeline import Pipeline
@@ -127,6 +132,242 @@ async def test_build_context_rehydrates_topic_hits_from_authoritative_store() ->
         rendered
     )
     assert "jwt middleware backend sentinel must never render" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_build_context_uses_runtime_prompt_when_tape_has_no_user_message() -> (
+    None
+):
+    topic = _topic(
+        "topic-runtime",
+        title="Runtime prompt recall",
+        summary="Authoritative runtime prompt summary says image tag 085c82f.",
+    )
+    topic_store = FakeTopicStore((topic,))
+    index = SafeSemanticMemoryIndex(FakeSemanticMemoryBackend())
+    await index.upsert(
+        SemanticMemoryDocument(
+            memory_id=SemanticDocId.for_topic(topic),
+            text="runtime prompt image tag backend sentinel must never render",
+            metadata={"kind": "topic_summary"},
+            source_refs=(SemanticSourceRef.for_topic(topic),),
+        )
+    )
+    plugin = SemanticMemoryPlugin(
+        semantic_index=index,
+        memory_review_store=MemoryReviewStore(),
+        read_enabled=True,
+        topic_store=topic_store,
+    )
+    tape = Tape(tape_id="tape-runtime")
+    ctx = PipelineContext(tape=tape, session_id="session-runtime")
+    ctx.runtime_messages.append(
+        SequencedRuntimeMessage(
+            sequence=1,
+            message=RuntimeMessage(
+                message_id="msg-runtime-prompt",
+                kind=RuntimeMessageKind.USER_STEER,
+                payload={"text": "Which coding-agent image tag did o6n deploy?"},
+            ),
+        )
+    )
+
+    result = await plugin.build_context(tape=tape, ctx=ctx)
+
+    assert topic_store.loaded == ["topic-runtime"]
+    assert len(result) == 1
+    rendered = result[0]["content"]
+    assert "Cross-topic recall references" in rendered
+    assert "Authoritative runtime prompt summary says image tag 085c82f." in rendered
+    assert "runtime prompt image tag backend sentinel must never render" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_build_context_runtime_prompt_takes_precedence_over_stale_tape_user() -> (
+    None
+):
+    runtime_topic = _topic(
+        "topic-runtime",
+        title="Runtime prompt recall",
+        summary="Runtime prompt summary says image tag 085c82f.",
+    )
+    stale_tape_topic = _topic(
+        "topic-stale-tape",
+        title="Stale tape recall",
+        summary="Stale tape summary should not be recalled.",
+    )
+    index = SafeSemanticMemoryIndex(FakeSemanticMemoryBackend())
+    for topic, text in (
+        (runtime_topic, "image tag runtime prompt"),
+        (stale_tape_topic, "stale tape decoy"),
+    ):
+        await index.upsert(
+            SemanticMemoryDocument(
+                memory_id=SemanticDocId.for_topic(topic),
+                text=text,
+                metadata={"kind": "topic_summary"},
+                source_refs=(SemanticSourceRef.for_topic(topic),),
+            )
+        )
+    plugin = SemanticMemoryPlugin(
+        semantic_index=index,
+        memory_review_store=MemoryReviewStore(),
+        read_enabled=True,
+        topic_store=FakeTopicStore((runtime_topic, stale_tape_topic)),
+        limit=1,
+    )
+    tape = _tape("stale tape decoy", tape_id="tape-runtime")
+    ctx = PipelineContext(tape=tape, session_id="session-runtime")
+    ctx.runtime_messages.append(
+        SequencedRuntimeMessage(
+            sequence=1,
+            message=RuntimeMessage(
+                message_id="msg-runtime-prompt",
+                kind=RuntimeMessageKind.USER_STEER,
+                payload={"text": "Which coding-agent image tag did o6n deploy?"},
+            ),
+        )
+    )
+
+    result = await plugin.build_context(tape=tape, ctx=ctx)
+
+    rendered = "\n".join(str(item["content"]) for item in result)
+    assert "Runtime prompt summary says image tag 085c82f." in rendered
+    assert "Stale tape summary should not be recalled." not in rendered
+
+
+@pytest.mark.asyncio
+async def test_build_context_runtime_prompt_ignores_later_system_notice() -> None:
+    user_topic = _topic(
+        "topic-user-steer",
+        title="User steer recall",
+        summary="User steer summary says image tag 085c82f.",
+    )
+    notice_topic = _topic(
+        "topic-system-notice",
+        title="System notice recall",
+        summary="System notice summary says checkpoint restored.",
+    )
+    index = SafeSemanticMemoryIndex(FakeSemanticMemoryBackend())
+    for topic, text in (
+        (user_topic, "image tag user steer"),
+        (notice_topic, "checkpoint restored system notice"),
+    ):
+        await index.upsert(
+            SemanticMemoryDocument(
+                memory_id=SemanticDocId.for_topic(topic),
+                text=text,
+                metadata={"kind": "topic_summary"},
+                source_refs=(SemanticSourceRef.for_topic(topic),),
+            )
+        )
+    plugin = SemanticMemoryPlugin(
+        semantic_index=index,
+        memory_review_store=MemoryReviewStore(),
+        read_enabled=True,
+        topic_store=FakeTopicStore((user_topic, notice_topic)),
+        limit=1,
+    )
+    tape = Tape(tape_id="tape-runtime")
+    ctx = PipelineContext(tape=tape, session_id="session-runtime")
+    ctx.runtime_messages.extend(
+        [
+            SequencedRuntimeMessage(
+                sequence=1,
+                message=RuntimeMessage(
+                    message_id="msg-user-steer",
+                    kind=RuntimeMessageKind.USER_STEER,
+                    payload={"text": "Which coding-agent image tag did o6n deploy?"},
+                ),
+            ),
+            SequencedRuntimeMessage(
+                sequence=2,
+                message=RuntimeMessage(
+                    message_id="msg-system-notice",
+                    kind=RuntimeMessageKind.SYSTEM_NOTICE,
+                    payload={"text": "Checkpoint restored"},
+                ),
+            ),
+        ]
+    )
+
+    result = await plugin.build_context(tape=tape, ctx=ctx)
+
+    rendered = "\n".join(str(item["content"]) for item in result)
+    assert "User steer summary says image tag 085c82f." in rendered
+    assert "System notice summary says checkpoint restored." not in rendered
+
+
+@pytest.mark.parametrize(
+    "ignored_kind",
+    [
+        RuntimeMessageKind.SYSTEM_NOTICE,
+        RuntimeMessageKind.APPROVAL_DECISION,
+        RuntimeMessageKind.INTERRUPT,
+    ],
+)
+@pytest.mark.asyncio
+async def test_build_context_subagent_prompt_ignores_later_non_query_runtime_messages(
+    ignored_kind: RuntimeMessageKind,
+) -> None:
+    subagent_topic = _topic(
+        "topic-subagent",
+        title="Subagent recall",
+        summary="Subagent message summary says shard placement is node-a.",
+    )
+    ignored_topic = _topic(
+        "topic-ignored-runtime",
+        title="Ignored runtime recall",
+        summary="Ignored runtime summary should not be recalled.",
+    )
+    index = SafeSemanticMemoryIndex(FakeSemanticMemoryBackend())
+    for topic, text in (
+        (subagent_topic, "subagent shard placement node-a"),
+        (ignored_topic, "override stronger keyword"),
+    ):
+        await index.upsert(
+            SemanticMemoryDocument(
+                memory_id=SemanticDocId.for_topic(topic),
+                text=text,
+                metadata={"kind": "topic_summary"},
+                source_refs=(SemanticSourceRef.for_topic(topic),),
+            )
+        )
+    plugin = SemanticMemoryPlugin(
+        semantic_index=index,
+        memory_review_store=MemoryReviewStore(),
+        read_enabled=True,
+        topic_store=FakeTopicStore((subagent_topic, ignored_topic)),
+        limit=1,
+    )
+    tape = Tape(tape_id="tape-runtime")
+    ctx = PipelineContext(tape=tape, session_id="session-runtime")
+    ctx.runtime_messages.extend(
+        [
+            SequencedRuntimeMessage(
+                sequence=1,
+                message=RuntimeMessage(
+                    message_id="msg-subagent",
+                    kind=RuntimeMessageKind.SUBAGENT_MESSAGE,
+                    payload={"text": "Where is the subagent shard placement?"},
+                ),
+            ),
+            SequencedRuntimeMessage(
+                sequence=2,
+                message=RuntimeMessage(
+                    message_id="msg-ignored-runtime",
+                    kind=ignored_kind,
+                    payload={"text": "override stronger keyword"},
+                ),
+            ),
+        ]
+    )
+
+    result = await plugin.build_context(tape=tape, ctx=ctx)
+
+    rendered = "\n".join(str(item["content"]) for item in result)
+    assert "Subagent message summary says shard placement is node-a." in rendered
+    assert "Ignored runtime summary should not be recalled." not in rendered
 
 
 @pytest.mark.asyncio
