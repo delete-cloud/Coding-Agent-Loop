@@ -660,6 +660,67 @@ def test_remote_semantic_memory_client_helpers_use_admin_token_when_configured(
     ]
 
 
+def test_remote_memory_reviews_use_admin_token_when_user_token_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from coding_agent.remote.client import (
+        RemoteEndpoint,
+        list_remote_memory_reviews,
+    )
+
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    class FakeClient:
+        def __init__(
+            self,
+            *,
+            base_url: str,
+            headers: dict[str, str] | None = None,
+            timeout: float,
+        ) -> None:
+            assert base_url == "http://agent.example"
+            assert timeout == 30.0
+            self.headers = headers or {}
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def get(self, path: str) -> _RemoteFakeResponse:
+            calls.append((path, self.headers))
+            return _RemoteFakeResponse(
+                [
+                    {
+                        "candidate_id": "memory-1",
+                        "status": "candidate",
+                    }
+                ]
+            )
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+
+    reviews = list_remote_memory_reviews(
+        RemoteEndpoint(
+            name="dev",
+            url="http://agent.example",
+            token=None,
+            admin_token="admin-token",
+        ),
+        "sess-1",
+        status="candidate",
+    )
+
+    assert reviews == [{"candidate_id": "memory-1", "status": "candidate"}]
+    assert calls == [
+        (
+            "/sessions/sess-1/memory/reviews?status=candidate",
+            {"Authorization": "Bearer admin-token"},
+        )
+    ]
+
+
 def test_remote_semantic_memory_admin_token_env_resolves_from_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

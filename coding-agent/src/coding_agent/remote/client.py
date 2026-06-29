@@ -393,7 +393,12 @@ def list_remote_memory_reviews(
     path = f"/sessions/{session_id}/memory/reviews"
     if status is not None:
         path = f"{path}?{urlencode([('status', status)])}"
-    data = _get_remote_json_list(endpoint, path, "list remote memory reviews")
+    headers = auth_headers(endpoint)
+    if not headers:
+        headers = admin_auth_headers(endpoint)
+    data = _get_remote_json_list(
+        endpoint, path, "list remote memory reviews", headers=headers
+    )
     return [dict(_expect_mapping(item, "Remote memory review entry")) for item in data]
 
 

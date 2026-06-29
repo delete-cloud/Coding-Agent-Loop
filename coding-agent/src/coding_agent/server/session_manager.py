@@ -1488,19 +1488,18 @@ class SessionManager:
             if finalized is None:
                 raise RuntimeError("semantic dogfood topic seed did not finalize topic")
             if memory_write_enabled and review_store.candidate_writes_enabled:
-                candidate = propose_memory_candidate_from_topic(finalized)
-                if candidate is not None:
-                    try:
+                try:
+                    candidate = propose_memory_candidate_from_topic(finalized)
+                    if candidate is not None:
                         stored_candidate = review_store.add_candidate(candidate)
-                    except Exception as exc:
-                        warning = f"memory review candidate write failed: {exc}"
-                        logger.warning(
-                            "Semantic dogfood topic review candidate write failed",
-                            exc_info=True,
-                        )
-                        warnings.append(warning)
-                    else:
                         stored_candidate_id = stored_candidate.candidate.candidate_id
+                except Exception as exc:
+                    warning = f"memory review candidate write failed: {exc}"
+                    logger.warning(
+                        "Semantic dogfood topic review candidate write failed",
+                        exc_info=True,
+                    )
+                    warnings.append(warning)
             if semantic_syncer is not None:
                 try:
                     await semantic_syncer.sync_topic(finalized)

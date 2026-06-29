@@ -67,6 +67,7 @@ from coding_agent.runs import (
 )
 from coding_agent.wire.local import LocalWire
 from coding_agent.server.session_manager import Session, SessionManager
+import coding_agent.server.session_manager as session_manager_module
 from coding_agent.server.auth import AuthContext
 from coding_agent.server.stores.workspace_store import JSONValue, WorkspaceRecord
 from coding_agent.server.stores.session_owner_store import SessionOwnerRecord
@@ -326,7 +327,8 @@ def _runtime_ctx(
     tape: Tape | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
-        config=config, tape=tape or Tape(tape_id="memory-review-tape")
+        config=config,
+        tape=tape if tape is not None else Tape(tape_id="memory-review-tape"),
     )
 
 
@@ -1238,6 +1240,72 @@ class TestSemanticMemoryMaintenance:
         assert len(syncer.synced) == 1
         assert tape_store.truncated == []
         assert ctx.tape.tape_id == "dogfood-review-failure-tape"
+        assert len(ctx.tape) == 3
+
+    async def test_semantic_dogfood_topic_review_proposal_failure_warns_without_core_rollback(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        register_session("semantic-dogfood-proposal-failure-session")
+        review_store = MemoryReviewStore()
+        syncer = _RecordingTopicSyncer()
+        topic_store = _MemoryMaintenanceTopicStore()
+        tape_store = _MemoryMaintenanceTapeStore()
+        tape = Tape(tape_id="dogfood-proposal-failure-tape")
+        tape.append(Entry(kind="message", payload={"content": "base entry"}))
+        ctx = _runtime_ctx(
+            {
+                "memory_review_store": review_store,
+                "memory": {"effective_write_enabled": True},
+                "semantic_memory_syncer": syncer,
+            },
+            tape=tape,
+        )
+
+        def fail_proposal(record: TopicRecord) -> TopicDerivedMemoryCandidate | None:
+            del record
+            raise RuntimeError("proposal failed")
+
+        async def fake_ensure_session_runtime(session_id: str) -> object:
+            assert session_id == "semantic-dogfood-proposal-failure-session"
+            return ctx
+
+        monkeypatch.setattr(
+            session_manager_module,
+            "propose_memory_candidate_from_topic",
+            fail_proposal,
+        )
+        monkeypatch.setattr(
+            session_manager, "selected_topic_store", lambda: topic_store
+        )
+        monkeypatch.setattr(session_manager, "_tape_store", tape_store)
+        monkeypatch.setattr(
+            session_manager,
+            "ensure_session_runtime",
+            fake_ensure_session_runtime,
+        )
+
+        response = await client.post(
+            "/sessions/semantic-dogfood-proposal-failure-session/memory/semantic/dogfood-topic",
+            json={
+                "title": "Dogfood semantic memory",
+                "summary": "Seed one durable finalized topic for memory dogfood.",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["candidate_id"] is None
+        assert response.json()["warnings"] == [
+            "memory review candidate write failed: proposal failed"
+        ]
+        assert len(topic_store.topics) == 1
+        assert topic_store.deleted == []
+        assert topic_store.anchors != []
+        assert review_store.list_memories(status="candidate") == ()
+        assert len(syncer.synced) == 1
+        assert tape_store.truncated == []
+        assert ctx.tape.tape_id == "dogfood-proposal-failure-tape"
         assert len(ctx.tape) == 3
 
     async def test_semantic_dogfood_topic_semantic_sync_failure_warns_without_core_rollback(
