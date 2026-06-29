@@ -3,11 +3,14 @@ from __future__ import annotations
 import shlex
 import subprocess
 from pathlib import Path
-from typing import NoReturn, cast
+from typing import TYPE_CHECKING, NoReturn, cast
 
 import click
 
 from coding_agent.remote.approval import APPROVAL_POLICIES
+
+if TYPE_CHECKING:
+    from coding_agent.remote.client import RemoteEndpoint
 
 REMOTE_APPROVAL_CHOICES = click.Choice(APPROVAL_POLICIES)
 
@@ -21,11 +24,44 @@ def remote() -> None:
 @click.argument("name")
 @click.argument("url")
 @click.option("--token", default=None, help="Bearer token for the remote server")
-def remote_add(name: str, url: str, token: str | None) -> None:
+@click.option(
+    "--admin-token",
+    default=None,
+    help="Bearer token for admin-only remote server endpoints",
+)
+@click.option(
+    "--admin-token-env",
+    default=None,
+    help="Environment variable containing the bearer token for admin-only endpoints",
+)
+def remote_add(
+    name: str,
+    url: str,
+    token: str | None,
+    admin_token: str | None,
+    admin_token_env: str | None,
+) -> None:
     """Add or update a named remote endpoint."""
     from coding_agent.remote.client import add_remote
 
-    endpoint = add_remote(name, url, token)
+    normalized_admin_token = admin_token.strip() if admin_token is not None else None
+    normalized_admin_token_env = (
+        admin_token_env.strip() if admin_token_env is not None else None
+    )
+    if admin_token is not None and not normalized_admin_token:
+        raise click.ClickException("Admin token must not be blank.")
+    if admin_token_env is not None and not normalized_admin_token_env:
+        raise click.ClickException(
+            "Admin token environment variable must not be blank."
+        )
+
+    endpoint = add_remote(
+        name,
+        url,
+        token,
+        admin_token=normalized_admin_token,
+        admin_token_env=normalized_admin_token_env,
+    )
     click.echo(f"Added remote {endpoint.name}: {endpoint.url}")
 
 
@@ -39,8 +75,22 @@ def remote_list() -> None:
         click.echo("No remotes configured.")
         return
     for endpoint in remotes.values():
-        auth = "token" if endpoint.token is not None else "no-token"
-        click.echo(f"{endpoint.name}\t{endpoint.url}\t{auth}")
+        user_auth = "token" if endpoint.token is not None else "no-token"
+        admin_auth = _remote_admin_auth_label(endpoint)
+        click.echo(
+            f"{endpoint.name}\t{endpoint.url}\t"
+            f"user-auth={user_auth}\tadmin-auth={admin_auth}"
+        )
+
+
+def _remote_admin_auth_label(endpoint: RemoteEndpoint) -> str:
+    if endpoint.admin_token is not None:
+        return "admin-token"
+    if endpoint.admin_token_env is not None:
+        return "admin-token-env"
+    if endpoint.token is not None:
+        return "token-fallback"
+    return "no-token"
 
 
 @remote.command("remove")

@@ -42,6 +42,8 @@ class RemoteEndpoint:
     name: str
     url: str
     token: str | None = None
+    admin_token: str | None = None
+    admin_token_env: str | None = None
 
 
 def remotes_file_path() -> Path:
@@ -73,11 +75,24 @@ def load_remotes() -> dict[str, RemoteEndpoint]:
         value = cast(Mapping[str, object], value)
         url = value.get("url")
         token = value.get("token")
+        admin_token = value.get("admin_token")
+        admin_token_env = value.get("admin_token_env")
         if not isinstance(url, str) or not url.strip():
             raise click.ClickException(f"Remote {name} is missing url")
         if token is not None and not isinstance(token, str):
             raise click.ClickException(f"Remote {name} has invalid token")
-        loaded[name] = RemoteEndpoint(name=name, url=url, token=token)
+        if admin_token is not None and not isinstance(admin_token, str):
+            raise click.ClickException(f"Remote {name} has invalid admin_token")
+        if admin_token_env is not None and not isinstance(admin_token_env, str):
+            raise click.ClickException(f"Remote {name} has invalid admin_token_env")
+        _validate_admin_credential_choice(admin_token, admin_token_env)
+        loaded[name] = RemoteEndpoint(
+            name=name,
+            url=url,
+            token=token,
+            admin_token=admin_token,
+            admin_token_env=admin_token_env,
+        )
     return loaded
 
 
@@ -109,12 +124,28 @@ def save_remotes(remotes: dict[str, RemoteEndpoint]) -> None:
             temp_path.unlink()
 
 
-def add_remote(name: str, url: str, token: str | None) -> RemoteEndpoint:
+def add_remote(
+    name: str,
+    url: str,
+    token: str | None,
+    *,
+    admin_token: str | None = None,
+    admin_token_env: str | None = None,
+) -> RemoteEndpoint:
     normalized_url = url.rstrip("/")
     if not normalized_url:
         raise click.ClickException("Remote URL must not be empty")
+    admin_token, admin_token_env = _normalize_admin_credentials(
+        admin_token, admin_token_env
+    )
     remotes = load_remotes()
-    endpoint = RemoteEndpoint(name=name, url=normalized_url, token=token)
+    endpoint = RemoteEndpoint(
+        name=name,
+        url=normalized_url,
+        token=token,
+        admin_token=admin_token,
+        admin_token_env=admin_token_env,
+    )
     remotes[name] = endpoint
     save_remotes(remotes)
     return endpoint
@@ -140,6 +171,72 @@ def auth_headers(endpoint: RemoteEndpoint) -> dict[str, str]:
     if endpoint.token is None:
         return {}
     return {"Authorization": f"Bearer {endpoint.token}"}
+
+
+def admin_auth_headers(endpoint: RemoteEndpoint) -> dict[str, str]:
+    admin_token = _resolve_admin_token(endpoint)
+    if admin_token is None:
+        return auth_headers(endpoint)
+    return {"Authorization": f"Bearer {admin_token}"}
+
+
+def _resolve_admin_token(endpoint: RemoteEndpoint) -> str | None:
+    _validate_admin_credential_choice(endpoint.admin_token, endpoint.admin_token_env)
+    if endpoint.admin_token is not None:
+        admin_token = endpoint.admin_token.strip()
+        if not admin_token:
+            raise click.ClickException(f"Remote {endpoint.name} has blank admin_token")
+        return admin_token
+    if endpoint.admin_token_env is not None:
+        admin_token_env = endpoint.admin_token_env.strip()
+        if not admin_token_env:
+            raise click.ClickException(
+                f"Remote {endpoint.name} has blank admin_token_env"
+            )
+        value = os.environ.get(admin_token_env)
+        admin_token = value.strip() if value is not None else None
+        if not admin_token:
+            raise click.ClickException(
+                "Admin token environment variable is not set or is blank: "
+                f"{admin_token_env}"
+            )
+        return admin_token
+    return None
+
+
+def _normalize_admin_credentials(
+    admin_token: str | None, admin_token_env: str | None
+) -> tuple[str | None, str | None]:
+    normalized_admin_token = _normalize_admin_credential(
+        admin_token,
+        blank_message="Admin token must not be blank.",
+    )
+    normalized_admin_token_env = _normalize_admin_credential(
+        admin_token_env,
+        blank_message="Admin token environment variable must not be blank.",
+    )
+    _validate_admin_credential_choice(
+        normalized_admin_token, normalized_admin_token_env
+    )
+    return normalized_admin_token, normalized_admin_token_env
+
+
+def _normalize_admin_credential(value: str | None, *, blank_message: str) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        raise click.ClickException(blank_message)
+    return normalized
+
+
+def _validate_admin_credential_choice(
+    admin_token: str | None, admin_token_env: str | None
+) -> None:
+    if admin_token is not None and admin_token_env is not None:
+        raise click.ClickException(
+            "Pass either --admin-token or --admin-token-env, not both."
+        )
 
 
 def create_remote_session(
@@ -283,6 +380,7 @@ def get_remote_semantic_memory_status(
         endpoint,
         f"/sessions/{session_id}/memory/semantic/status",
         "get remote semantic memory status",
+        headers=admin_auth_headers(endpoint),
     )
 
 
@@ -297,6 +395,7 @@ def rebuild_remote_semantic_memory(
         f"/sessions/{session_id}/memory/semantic/rebuild",
         "rebuild remote semantic memory",
         json={"batch_size": batch_size, "allow_rebuild": allow_rebuild},
+        headers=admin_auth_headers(endpoint),
     )
 
 
@@ -765,6 +864,7 @@ def _get_remote_json(
     path: str,
     action: str,
     *,
+    headers: dict[str, str] | None = None,
     observation_sink: ObservationSink | None = None,
     span_name: str = "remote.request",
     span_attributes: dict[str, object] | None = None,
@@ -777,7 +877,7 @@ def _get_remote_json(
         try:
             with httpx.Client(
                 base_url=endpoint.url,
-                headers=auth_headers(endpoint),
+                headers=headers if headers is not None else auth_headers(endpoint),
                 timeout=30.0,
             ) as client:
                 response = client.get(path)
@@ -797,6 +897,7 @@ def _post_remote_json(
     action: str,
     *,
     json: dict[str, object] | None = None,
+    headers: dict[str, str] | None = None,
     observation_sink: ObservationSink | None = None,
     span_name: str = "remote.request",
     span_attributes: dict[str, object] | None = None,
@@ -809,7 +910,7 @@ def _post_remote_json(
         try:
             with httpx.Client(
                 base_url=endpoint.url,
-                headers=auth_headers(endpoint),
+                headers=headers if headers is not None else auth_headers(endpoint),
                 timeout=30.0,
             ) as client:
                 response = (
@@ -1550,4 +1651,8 @@ def _remote_payload(endpoint: RemoteEndpoint) -> dict[str, str]:
     payload = {"url": endpoint.url}
     if endpoint.token is not None:
         payload["token"] = endpoint.token
+    if endpoint.admin_token is not None:
+        payload["admin_token"] = endpoint.admin_token
+    if endpoint.admin_token_env is not None:
+        payload["admin_token_env"] = endpoint.admin_token_env
     return payload

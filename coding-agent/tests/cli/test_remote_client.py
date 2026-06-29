@@ -523,6 +523,217 @@ def test_remote_semantic_memory_client_helpers_call_exact_endpoints(
     ]
 
 
+def test_remote_semantic_memory_client_helpers_use_admin_token_when_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from coding_agent.remote.client import (
+        RemoteEndpoint,
+        get_remote_semantic_memory_status,
+        rebuild_remote_semantic_memory,
+    )
+
+    calls: list[tuple[str, str, dict[str, object] | None, dict[str, str]]] = []
+
+    class FakeClient:
+        def __init__(
+            self,
+            *,
+            base_url: str,
+            headers: dict[str, str] | None = None,
+            timeout: float,
+        ) -> None:
+            assert base_url == "http://agent.example"
+            assert timeout == 30.0
+            self.headers = headers or {}
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def get(self, path: str) -> _RemoteFakeResponse:
+            calls.append(("get", path, None, self.headers))
+            return _RemoteFakeResponse({"document_count": 0})
+
+        def post(
+            self, path: str, json: dict[str, object] | None = None
+        ) -> _RemoteFakeResponse:
+            calls.append(("post", path, json, self.headers))
+            return _RemoteFakeResponse({"indexed_count": 0})
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+    endpoint = RemoteEndpoint(
+        name="dev",
+        url="http://agent.example",
+        token="user-token",
+        admin_token="admin-token",
+    )
+
+    _ = get_remote_semantic_memory_status(endpoint, "sess-1")
+    _ = rebuild_remote_semantic_memory(endpoint, "sess-1", 25, True)
+
+    assert calls == [
+        (
+            "get",
+            "/sessions/sess-1/memory/semantic/status",
+            None,
+            {"Authorization": "Bearer admin-token"},
+        ),
+        (
+            "post",
+            "/sessions/sess-1/memory/semantic/rebuild",
+            {"batch_size": 25, "allow_rebuild": True},
+            {"Authorization": "Bearer admin-token"},
+        ),
+    ]
+
+
+def test_remote_semantic_memory_admin_token_env_resolves_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from coding_agent.remote.client import (
+        RemoteEndpoint,
+        get_remote_semantic_memory_status,
+    )
+
+    calls: list[dict[str, str]] = []
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            headers = kwargs.get("headers")
+            calls.append(headers if isinstance(headers, dict) else {})
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def get(self, path: str) -> _RemoteFakeResponse:
+            assert path == "/sessions/sess-1/memory/semantic/status"
+            return _RemoteFakeResponse({"document_count": 0})
+
+    monkeypatch.setenv("REMOTE_ADMIN_TOKEN", "env-admin-token")
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+
+    _ = get_remote_semantic_memory_status(
+        RemoteEndpoint(
+            name="dev",
+            url="http://agent.example",
+            token="user-token",
+            admin_token_env="REMOTE_ADMIN_TOKEN",
+        ),
+        "sess-1",
+    )
+
+    assert calls == [{"Authorization": "Bearer env-admin-token"}]
+
+
+def test_remote_admin_auth_headers_strip_direct_and_env_admin_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from coding_agent.remote.client import RemoteEndpoint, admin_auth_headers
+
+    monkeypatch.setenv("REMOTE_ADMIN_TOKEN", " env-admin-token ")
+
+    direct_headers = admin_auth_headers(
+        RemoteEndpoint(
+            name="direct",
+            url="http://agent.example",
+            token="user-token",
+            admin_token=" admin-token ",
+        )
+    )
+    env_headers = admin_auth_headers(
+        RemoteEndpoint(
+            name="env",
+            url="http://agent-env.example",
+            token="user-token",
+            admin_token_env="REMOTE_ADMIN_TOKEN",
+        )
+    )
+
+    assert direct_headers == {"Authorization": "Bearer admin-token"}
+    assert env_headers == {"Authorization": "Bearer env-admin-token"}
+
+
+@pytest.mark.parametrize("env_value", [None, "", "   "])
+def test_remote_semantic_memory_admin_token_env_missing_or_blank_fails_fast(
+    monkeypatch: pytest.MonkeyPatch,
+    env_value: str | None,
+) -> None:
+    from coding_agent.remote.client import (
+        RemoteEndpoint,
+        get_remote_semantic_memory_status,
+    )
+
+    if env_value is None:
+        monkeypatch.delenv("REMOTE_ADMIN_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("REMOTE_ADMIN_TOKEN", env_value)
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+            raise AssertionError("admin token env failure must happen before HTTP")
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+
+    with pytest.raises(click.ClickException) as exc_info:
+        get_remote_semantic_memory_status(
+            RemoteEndpoint(
+                name="dev",
+                url="http://agent.example",
+                token="user-token",
+                admin_token_env="REMOTE_ADMIN_TOKEN",
+            ),
+            "sess-1",
+        )
+
+    assert "Admin token environment variable is not set or is blank" in str(
+        exc_info.value
+    )
+    assert "REMOTE_ADMIN_TOKEN" in str(exc_info.value)
+
+
+def test_remote_client_normal_endpoints_keep_using_user_token_with_admin_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from coding_agent.remote.client import RemoteEndpoint, list_remote_sessions
+
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            headers = kwargs.get("headers")
+            self.headers = headers if isinstance(headers, dict) else {}
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def get(self, path: str) -> _RemoteFakeResponse:
+            calls.append((path, self.headers))
+            return _RemoteFakeResponse({"sessions": []})
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+
+    sessions = list_remote_sessions(
+        RemoteEndpoint(
+            name="dev",
+            url="http://agent.example",
+            token="user-token",
+            admin_token="admin-token",
+        )
+    )
+
+    assert sessions == []
+    assert calls == [("/sessions", {"Authorization": "Bearer user-token"})]
+
+
 def test_serve_config_sets_explicit_server_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1421,6 +1632,228 @@ def test_remote_add_list_remove_manage_named_endpoint(
     assert removed.exit_code == 0
     assert "Removed remote dev" in removed.output
     assert json.loads(config_path.read_text(encoding="utf-8")) == {"remotes": {}}
+
+
+def test_remote_add_persists_admin_token_options_and_list_redacts_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "remotes.json"
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    runner = CliRunner()
+
+    direct = runner.invoke(
+        main,
+        [
+            "remote",
+            "add",
+            "direct",
+            "http://agent.example",
+            "--token",
+            "user-token",
+            "--admin-token",
+            " admin-secret ",
+        ],
+        catch_exceptions=False,
+    )
+    env = runner.invoke(
+        main,
+        [
+            "remote",
+            "add",
+            "env",
+            "http://agent-env.example",
+            "--admin-token-env",
+            " REMOTE_ADMIN_TOKEN ",
+        ],
+        catch_exceptions=False,
+    )
+
+    assert direct.exit_code == 0
+    assert env.exit_code == 0
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    assert saved == {
+        "remotes": {
+            "direct": {
+                "url": "http://agent.example",
+                "token": "user-token",
+                "admin_token": "admin-secret",
+            },
+            "env": {
+                "url": "http://agent-env.example",
+                "admin_token_env": "REMOTE_ADMIN_TOKEN",
+            },
+        }
+    }
+
+    listed = runner.invoke(main, ["remote", "list"], catch_exceptions=False)
+
+    assert listed.exit_code == 0
+    rows: dict[str, list[str]] = {}
+    for line in listed.output.splitlines():
+        parts = line.split("\t")
+        assert len(parts) == 4
+        rows[parts[0]] = parts
+    assert rows == {
+        "direct": [
+            "direct",
+            "http://agent.example",
+            "user-auth=token",
+            "admin-auth=admin-token",
+        ],
+        "env": [
+            "env",
+            "http://agent-env.example",
+            "user-auth=no-token",
+            "admin-auth=admin-token-env",
+        ],
+    }
+    assert "user-token" not in listed.output
+    assert "admin-secret" not in listed.output
+    assert "REMOTE_ADMIN_TOKEN" not in listed.output
+
+
+def test_add_remote_normalizes_admin_token_credentials_for_direct_callers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from coding_agent.remote.client import add_remote
+
+    config_path = tmp_path / "remotes.json"
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+
+    direct = add_remote(
+        "direct",
+        "http://agent.example/",
+        "user-token",
+        admin_token=" admin-secret ",
+    )
+    env = add_remote(
+        "env",
+        "http://agent-env.example",
+        None,
+        admin_token_env=" REMOTE_ADMIN_TOKEN ",
+    )
+
+    assert direct.admin_token == "admin-secret"
+    assert direct.admin_token_env is None
+    assert env.admin_token is None
+    assert env.admin_token_env == "REMOTE_ADMIN_TOKEN"
+    assert json.loads(config_path.read_text(encoding="utf-8")) == {
+        "remotes": {
+            "direct": {
+                "url": "http://agent.example",
+                "token": "user-token",
+                "admin_token": "admin-secret",
+            },
+            "env": {
+                "url": "http://agent-env.example",
+                "admin_token_env": "REMOTE_ADMIN_TOKEN",
+            },
+        }
+    }
+
+
+def test_remote_add_rejects_conflicting_admin_token_options(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "remotes.json"
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    runner = CliRunner()
+
+    result = runner.invoke(
+        main,
+        [
+            "remote",
+            "add",
+            "dev",
+            "http://agent.example",
+            "--admin-token",
+            "admin-secret",
+            "--admin-token-env",
+            "REMOTE_ADMIN_TOKEN",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "Pass either --admin-token or --admin-token-env, not both." in result.output
+    assert not config_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("option", "value", "message"),
+    [
+        ("--admin-token", "", "Admin token must not be blank."),
+        ("--admin-token", "   ", "Admin token must not be blank."),
+        (
+            "--admin-token-env",
+            "",
+            "Admin token environment variable must not be blank.",
+        ),
+        (
+            "--admin-token-env",
+            "   ",
+            "Admin token environment variable must not be blank.",
+        ),
+    ],
+)
+def test_remote_add_rejects_blank_admin_token_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    option: str,
+    value: str,
+    message: str,
+) -> None:
+    config_path = tmp_path / "remotes.json"
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    runner = CliRunner()
+
+    result = runner.invoke(
+        main,
+        [
+            "remote",
+            "add",
+            "dev",
+            "http://agent.example",
+            option,
+            value,
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert message in result.output
+    assert not config_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"admin_token": ""}, "Admin token must not be blank."),
+        ({"admin_token": "   "}, "Admin token must not be blank."),
+        (
+            {"admin_token_env": ""},
+            "Admin token environment variable must not be blank.",
+        ),
+        (
+            {"admin_token_env": "   "},
+            "Admin token environment variable must not be blank.",
+        ),
+    ],
+)
+def test_add_remote_rejects_blank_admin_token_credentials_for_direct_callers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kwargs: dict[str, str],
+    message: str,
+) -> None:
+    from coding_agent.remote.client import add_remote
+
+    config_path = tmp_path / "remotes.json"
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+
+    with pytest.raises(click.ClickException) as exc_info:
+        add_remote("dev", "http://agent.example", None, **kwargs)
+
+    assert message in str(exc_info.value)
+    assert not config_path.exists()
 
 
 def test_remote_local_run_uses_external_worker_binding(
@@ -2831,7 +3264,14 @@ def test_remote_memory_status_prints_semantic_memory_status(
     runner = CliRunner()
     runner.invoke(
         main,
-        ["remote", "add", "dev", "http://agent.example", "--token", "secret-token"],
+        [
+            "remote",
+            "add",
+            "dev",
+            "http://agent.example",
+            "--token",
+            "user-token",
+        ],
         catch_exceptions=False,
     )
     calls: list[tuple[str, str, dict[str, str]]] = []
@@ -2876,7 +3316,7 @@ def test_remote_memory_status_prints_semantic_memory_status(
         (
             "get",
             "/sessions/sess-1/memory/semantic/status",
-            {"Authorization": "Bearer secret-token"},
+            {"Authorization": "Bearer user-token"},
         )
     ]
 
@@ -2930,10 +3370,20 @@ def test_remote_memory_rebuild_posts_confirmed_payload_and_prints_result(
 ) -> None:
     config_path = tmp_path / "remotes.json"
     monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    monkeypatch.setenv("REMOTE_ADMIN_TOKEN", "env-admin-token")
     runner = CliRunner()
     runner.invoke(
         main,
-        ["remote", "add", "dev", "http://agent.example", "--token", "secret-token"],
+        [
+            "remote",
+            "add",
+            "dev",
+            "http://agent.example",
+            "--token",
+            "user-token",
+            "--admin-token-env",
+            "REMOTE_ADMIN_TOKEN",
+        ],
         catch_exceptions=False,
     )
     calls: list[tuple[str, dict[str, object] | None, dict[str, str]]] = []
@@ -3008,12 +3458,12 @@ def test_remote_memory_rebuild_posts_confirmed_payload_and_prints_result(
         (
             "/sessions/sess-1/memory/semantic/rebuild",
             {"batch_size": 10, "allow_rebuild": False},
-            {"Authorization": "Bearer secret-token"},
+            {"Authorization": "Bearer env-admin-token"},
         ),
         (
             "/sessions/sess-1/memory/semantic/rebuild",
             {"batch_size": 25, "allow_rebuild": True},
-            {"Authorization": "Bearer secret-token"},
+            {"Authorization": "Bearer env-admin-token"},
         ),
     ]
 
@@ -5610,6 +6060,33 @@ def test_remote_add_reports_invalid_remotes_json(tmp_path: Path, monkeypatch) ->
 
     assert result.exit_code != 0
     assert f"Invalid remotes file: {config_path}" in result.output
+
+
+@pytest.mark.parametrize("field", ["admin_token", "admin_token_env"])
+def test_remote_list_rejects_invalid_admin_token_field_types(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    config_path = tmp_path / "remotes.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "remotes": {
+                    "dev": {
+                        "url": "http://agent.example",
+                        field: True,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    runner = CliRunner()
+
+    result = runner.invoke(main, ["remote", "list"])
+
+    assert result.exit_code != 0
+    assert f"Remote dev has invalid {field}" in result.output
 
 
 def test_save_remotes_does_not_chmod_existing_override_parent(
