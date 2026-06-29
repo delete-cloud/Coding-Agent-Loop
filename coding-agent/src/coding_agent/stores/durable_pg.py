@@ -840,6 +840,24 @@ class PGDurableStore:
 
         return cast(TopicRecord, await self._with_transaction(body))
 
+    async def delete_topic(
+        self,
+        authority: OwnerAuthority,
+        topic_id: str,
+    ) -> None:
+        async def body(connection: Any) -> None:
+            await self._require_owner(connection, authority)
+            _ = await self._lock_topic_targets(connection, authority, [topic_id])
+            await connection.execute(
+                PGTopicStore._DELETE_TOPIC_RECALL_LINKS_SQL,
+                topic_id,
+            )
+            await connection.execute(PGTopicStore._DELETE_TOPIC_COST_SQL, topic_id)
+            await connection.execute(PGTopicStore._DELETE_TOPIC_ANCHORS_SQL, topic_id)
+            await connection.execute(PGTopicStore._DELETE_TOPIC_SQL, topic_id)
+
+        await self._with_transaction(body)
+
     async def record_topic_anchor(
         self,
         authority: OwnerAuthority,
@@ -1240,6 +1258,13 @@ class FencedPGTopicStore(PGTopicStore):
             topic_finalized_seq=topic_finalized_seq,
             finalized_at=finalized_at,
             metadata=metadata,
+        )
+
+    async def delete_topic(self, topic_id: str) -> None:
+        session_id = await self._require_session_id_for_topic(topic_id)
+        await self._durable_store.delete_topic(
+            self._authority_for_session(session_id),
+            topic_id,
         )
 
     async def load_topic(self, topic_id: str) -> TopicRecord | None:

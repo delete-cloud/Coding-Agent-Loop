@@ -176,7 +176,12 @@ the backend untouched. Missing selected durable `TopicStore` and disabled
 semantic memory also return conflict-style operational errors before any clear
 or upsert. The `allow_rebuild` request field controls backend schema rebuild
 permission; it is not a confirmation flag for ordinary destructive document
-clearing.
+clearing. Because rebuild clears the selected semantic backend from global
+authoritative topic/review sources, callers must also send an explicit global
+confirmation (`confirm_global: true`) and CLI callers must use
+`--confirm-global`. Responses identify the rebuild `scope` as `global` so
+operators do not confuse the session path parameter with a session-local
+reindex.
 
 Reviewed-memory transition APIs are session-scoped product APIs. The HTTP
 surface is `POST /sessions/{session_id}/memory/reviews/{candidate_id}` with a
@@ -194,6 +199,29 @@ are idempotent repair requests: they must not mutate the review store or
 overwrite the original review reason, but may rerun semantic sync to repair a
 stale derived index. Terminal records with a different target status still
 return 400. There is no global review-store mutation endpoint.
+
+The stable read surface for reviewed-memory candidates is
+`GET /sessions/{session_id}/memory/reviews`. It uses normal visible-session
+authorization rather than admin authorization, reads the current session
+runtime config's `MemoryReviewStore`, and returns only records scoped to that
+session plus legacy records with no session provenance. The optional `status`
+filter accepts `candidate`, `accepted`, `rejected`, or `archived`. This is a
+read API only; state transitions remain on the candidate-specific POST API.
+
+Ordinary remote execution paths are not guaranteed to create durable finalized
+topics. For dogfood and recovery, the product exposes an admin-only maintenance
+seed API at `POST /sessions/{session_id}/memory/semantic/dogfood-topic`. The
+route verifies admin auth and visible-session access, then delegates to
+`SessionManager`; route code must not write topic, review, semantic, or tape
+stores directly. The manager method runs through
+`RuntimeMaintenanceAdmissionService.run_exclusive()`, resolves the current
+runtime tape/config, selected durable `TopicStore`, runtime `MemoryReviewStore`,
+effective memory write flag, and configured semantic syncer, then creates and
+finalizes one topic through `TopicLifecycle`. Tape anchors are committed by a
+`ForkTapeStore` delta commit to the existing tape store; append-only stores must
+not receive a full tape snapshot for this maintenance seed. After commit, the
+live runtime context's tape is updated to the committed stable tape so later
+turns see the anchors.
 
 PR2 must create a reusable backend contract test suite against a fake or
 in-memory semantic backend. LanceDB, Chroma, Milvus, pgvector, or any later

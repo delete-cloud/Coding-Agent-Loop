@@ -423,13 +423,13 @@ def _init_clean_git_repo_with_origin(tmp_path: Path) -> tuple[Path, str]:
 
 
 class _RemoteFakeResponse:
-    def __init__(self, payload: dict[str, object]) -> None:
+    def __init__(self, payload: object) -> None:
         self._payload = payload
 
     def raise_for_status(self) -> None:
         return None
 
-    def json(self) -> dict[str, object]:
+    def json(self) -> object:
         return self._payload
 
 
@@ -439,7 +439,9 @@ def test_remote_semantic_memory_client_helpers_call_exact_endpoints(
     from coding_agent.remote.client import (
         RemoteEndpoint,
         get_remote_semantic_memory_status,
+        list_remote_memory_reviews,
         rebuild_remote_semantic_memory,
+        seed_remote_semantic_dogfood_topic,
     )
 
     calls: list[tuple[str, str, dict[str, object] | None, dict[str, str]]] = []
@@ -464,6 +466,16 @@ def test_remote_semantic_memory_client_helpers_call_exact_endpoints(
 
         def get(self, path: str) -> _RemoteFakeResponse:
             calls.append(("get", path, None, self.headers))
+            if path == "/sessions/sess-1/memory/reviews?status=candidate":
+                return _RemoteFakeResponse(
+                    [
+                        {
+                            "candidate_id": "memory-1",
+                            "status": "candidate",
+                            "title": "Memory",
+                        }
+                    ]
+                )
             return _RemoteFakeResponse(
                 {
                     "document_count": 3,
@@ -477,8 +489,17 @@ def test_remote_semantic_memory_client_helpers_call_exact_endpoints(
             self, path: str, json: dict[str, object] | None = None
         ) -> _RemoteFakeResponse:
             calls.append(("post", path, json, self.headers))
+            if path == "/sessions/sess-1/memory/semantic/dogfood-topic":
+                return _RemoteFakeResponse(
+                    {
+                        "topic_id": "topic-1",
+                        "candidate_id": "memory-1",
+                        "warnings": [],
+                    }
+                )
             return _RemoteFakeResponse(
                 {
+                    "scope": "global",
                     "topic_count": 5,
                     "reviewed_memory_count": 2,
                     "indexed_count": 6,
@@ -493,11 +514,19 @@ def test_remote_semantic_memory_client_helpers_call_exact_endpoints(
     endpoint = RemoteEndpoint("dev", "http://agent.example", "secret-token")
 
     status = get_remote_semantic_memory_status(endpoint, "sess-1")
+    reviews = list_remote_memory_reviews(endpoint, "sess-1", status="candidate")
     rebuild = rebuild_remote_semantic_memory(
         endpoint,
         "sess-1",
         25,
         True,
+        True,
+    )
+    dogfood = seed_remote_semantic_dogfood_topic(
+        endpoint,
+        "sess-1",
+        title="Dogfood topic",
+        summary="Seed durable topic",
     )
 
     assert status == {
@@ -506,7 +535,15 @@ def test_remote_semantic_memory_client_helpers_call_exact_endpoints(
         "accepted_reviewed_memory_count": 2,
         "topic_store_available": True,
     }
+    assert reviews == [
+        {"candidate_id": "memory-1", "status": "candidate", "title": "Memory"}
+    ]
     assert rebuild["indexed_ids"] == ["topic:1", "memory:1"]
+    assert dogfood == {
+        "topic_id": "topic-1",
+        "candidate_id": "memory-1",
+        "warnings": [],
+    }
     assert calls == [
         (
             "get",
@@ -515,9 +552,25 @@ def test_remote_semantic_memory_client_helpers_call_exact_endpoints(
             {"Authorization": "Bearer secret-token"},
         ),
         (
+            "get",
+            "/sessions/sess-1/memory/reviews?status=candidate",
+            None,
+            {"Authorization": "Bearer secret-token"},
+        ),
+        (
             "post",
             "/sessions/sess-1/memory/semantic/rebuild",
-            {"batch_size": 25, "allow_rebuild": True},
+            {"batch_size": 25, "allow_rebuild": True, "confirm_global": True},
+            {"Authorization": "Bearer secret-token"},
+        ),
+        (
+            "post",
+            "/sessions/sess-1/memory/semantic/dogfood-topic",
+            {
+                "title": "Dogfood topic",
+                "summary": "Seed durable topic",
+                "kind": "coding",
+            },
             {"Authorization": "Bearer secret-token"},
         ),
     ]
@@ -530,6 +583,7 @@ def test_remote_semantic_memory_client_helpers_use_admin_token_when_configured(
         RemoteEndpoint,
         get_remote_semantic_memory_status,
         rebuild_remote_semantic_memory,
+        seed_remote_semantic_dogfood_topic,
     )
 
     calls: list[tuple[str, str, dict[str, object] | None, dict[str, str]]] = []
@@ -571,7 +625,14 @@ def test_remote_semantic_memory_client_helpers_use_admin_token_when_configured(
     )
 
     _ = get_remote_semantic_memory_status(endpoint, "sess-1")
-    _ = rebuild_remote_semantic_memory(endpoint, "sess-1", 25, True)
+    _ = rebuild_remote_semantic_memory(endpoint, "sess-1", 25, True, True)
+    _ = seed_remote_semantic_dogfood_topic(
+        endpoint,
+        "sess-1",
+        title="Dogfood topic",
+        summary="Seed durable topic",
+        kind="coding",
+    )
 
     assert calls == [
         (
@@ -583,7 +644,17 @@ def test_remote_semantic_memory_client_helpers_use_admin_token_when_configured(
         (
             "post",
             "/sessions/sess-1/memory/semantic/rebuild",
-            {"batch_size": 25, "allow_rebuild": True},
+            {"batch_size": 25, "allow_rebuild": True, "confirm_global": True},
+            {"Authorization": "Bearer admin-token"},
+        ),
+        (
+            "post",
+            "/sessions/sess-1/memory/semantic/dogfood-topic",
+            {
+                "title": "Dogfood topic",
+                "summary": "Seed durable topic",
+                "kind": "coding",
+            },
             {"Authorization": "Bearer admin-token"},
         ),
     ]
@@ -3321,7 +3392,73 @@ def test_remote_memory_status_prints_semantic_memory_status(
     ]
 
 
-def test_remote_memory_rebuild_requires_confirm_before_http_call(
+def test_remote_memory_reviews_prints_session_review_candidates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "remotes.json"
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        ["remote", "add", "dev", "http://agent.example", "--token", "user-token"],
+        catch_exceptions=False,
+    )
+    calls: list[tuple[str, str, dict[str, str]]] = []
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            headers = kwargs.get("headers")
+            self.headers = headers if isinstance(headers, dict) else {}
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def get(self, path: str) -> _RemoteFakeResponse:
+            calls.append(("get", path, self.headers))
+            assert path == "/sessions/sess-1/memory/reviews?status=candidate"
+            return _RemoteFakeResponse(
+                [
+                    {
+                        "candidate_id": "memory-1",
+                        "status": "candidate",
+                        "title": "Auth memory",
+                    }
+                ]
+            )
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+
+    result = runner.invoke(
+        main,
+        [
+            "remote",
+            "memory",
+            "reviews",
+            "dev",
+            "--session",
+            "sess-1",
+            "--status",
+            "candidate",
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert '"candidate_id": "memory-1"' in result.output
+    assert '"status": "candidate"' in result.output
+    assert calls == [
+        (
+            "get",
+            "/sessions/sess-1/memory/reviews?status=candidate",
+            {"Authorization": "Bearer user-token"},
+        )
+    ]
+
+
+def test_remote_memory_rebuild_requires_confirm_global_before_http_call(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config_path = tmp_path / "remotes.json"
@@ -3359,9 +3496,12 @@ def test_remote_memory_rebuild_requires_confirm_before_http_call(
     )
 
     assert result.exit_code != 0
-    assert "Pass --confirm to rebuild semantic memory." in result.output
+    assert "Pass --confirm-global to rebuild global semantic memory." in result.output
     assert allow_rebuild_result.exit_code != 0
-    assert "Pass --confirm to rebuild semantic memory." in allow_rebuild_result.output
+    assert (
+        "Pass --confirm-global to rebuild global semantic memory."
+        in allow_rebuild_result.output
+    )
     assert calls == []
 
 
@@ -3406,6 +3546,7 @@ def test_remote_memory_rebuild_posts_confirmed_payload_and_prints_result(
             assert path == "/sessions/sess-1/memory/semantic/rebuild"
             return _RemoteFakeResponse(
                 {
+                    "scope": "global",
                     "topic_count": 5,
                     "reviewed_memory_count": 2,
                     "indexed_count": 6,
@@ -3427,7 +3568,7 @@ def test_remote_memory_rebuild_posts_confirmed_payload_and_prints_result(
             "dev",
             "--session",
             "sess-1",
-            "--confirm",
+            "--confirm-global",
         ],
         catch_exceptions=False,
     )
@@ -3440,7 +3581,7 @@ def test_remote_memory_rebuild_posts_confirmed_payload_and_prints_result(
             "dev",
             "--session",
             "sess-1",
-            "--confirm",
+            "--confirm-global",
             "--batch-size",
             "25",
             "--allow-rebuild",
@@ -3451,20 +3592,106 @@ def test_remote_memory_rebuild_posts_confirmed_payload_and_prints_result(
     assert default_result.exit_code == 0
     assert custom_result.exit_code == 0
     assert "indexed_count: 6" in custom_result.output
+    assert "scope: global" in custom_result.output
     assert "deleted_count: 1" in custom_result.output
     assert '"topic:1"' in custom_result.output
     assert '"stale:1"' in custom_result.output
     assert calls == [
         (
             "/sessions/sess-1/memory/semantic/rebuild",
-            {"batch_size": 10, "allow_rebuild": False},
+            {"batch_size": 10, "allow_rebuild": False, "confirm_global": True},
             {"Authorization": "Bearer env-admin-token"},
         ),
         (
             "/sessions/sess-1/memory/semantic/rebuild",
-            {"batch_size": 25, "allow_rebuild": True},
+            {"batch_size": 25, "allow_rebuild": True, "confirm_global": True},
             {"Authorization": "Bearer env-admin-token"},
         ),
+    ]
+
+
+def test_remote_memory_dogfood_topic_posts_admin_payload_and_prints_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "remotes.json"
+    monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
+    monkeypatch.setenv("REMOTE_ADMIN_TOKEN", "env-admin-token")
+    runner = CliRunner()
+    runner.invoke(
+        main,
+        [
+            "remote",
+            "add",
+            "dev",
+            "http://agent.example",
+            "--token",
+            "user-token",
+            "--admin-token-env",
+            "REMOTE_ADMIN_TOKEN",
+        ],
+        catch_exceptions=False,
+    )
+    calls: list[tuple[str, dict[str, object] | None, dict[str, str]]] = []
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            headers = kwargs.get("headers")
+            self.headers = headers if isinstance(headers, dict) else {}
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def post(
+            self, path: str, json: dict[str, object] | None = None
+        ) -> _RemoteFakeResponse:
+            calls.append((path, json, self.headers))
+            assert path == "/sessions/sess-1/memory/semantic/dogfood-topic"
+            return _RemoteFakeResponse(
+                {
+                    "topic_id": "topic-1",
+                    "candidate_id": "memory-1",
+                    "warnings": [],
+                }
+            )
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+
+    result = runner.invoke(
+        main,
+        [
+            "remote",
+            "memory",
+            "dogfood-topic",
+            "dev",
+            "--session",
+            "sess-1",
+            "--title",
+            "Dogfood topic",
+            "--summary",
+            "Seed durable topic",
+            "--kind",
+            "coding",
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "topic_id: topic-1" in result.output
+    assert "candidate_id: memory-1" in result.output
+    assert "warnings:" in result.output
+    assert calls == [
+        (
+            "/sessions/sess-1/memory/semantic/dogfood-topic",
+            {
+                "title": "Dogfood topic",
+                "summary": "Seed durable topic",
+                "kind": "coding",
+            },
+            {"Authorization": "Bearer env-admin-token"},
+        )
     ]
 
 

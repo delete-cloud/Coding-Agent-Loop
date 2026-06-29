@@ -301,6 +301,22 @@ class PGTopicStore:
     _SELECT_TOPIC_TAPE_SQL: Final[str] = (
         "SELECT tape_id FROM topics WHERE topic_id = $1"
     )
+    _DELETE_TOPIC_RECALL_LINKS_SQL: Final[str] = """
+    DELETE FROM topic_recall_links
+    WHERE source_topic_id = $1 OR recalled_topic_id = $1
+    """
+    _DELETE_TOPIC_COST_SQL: Final[str] = """
+    DELETE FROM topic_costs
+    WHERE topic_id = $1
+    """
+    _DELETE_TOPIC_ANCHORS_SQL: Final[str] = """
+    DELETE FROM topic_anchors
+    WHERE topic_id = $1
+    """
+    _DELETE_TOPIC_SQL: Final[str] = """
+    DELETE FROM topics
+    WHERE topic_id = $1
+    """
     _LIST_TOPICS_SQL: Final[str] = """
     SELECT * FROM topics
     WHERE ($1::text IS NULL OR session_id = $1)
@@ -504,6 +520,24 @@ class PGTopicStore:
         if row is None:
             return None
         return _topic_from_row(row)
+
+    async def delete_topic(self, topic_id: str) -> None:
+        _require_non_empty("topic_id", topic_id)
+        pool = await self._ensure_schema()
+        async with pool.acquire() as connection:
+            try:
+                _ = await connection.execute("BEGIN")
+                await connection.execute(self._DELETE_TOPIC_RECALL_LINKS_SQL, topic_id)
+                await connection.execute(self._DELETE_TOPIC_COST_SQL, topic_id)
+                await connection.execute(self._DELETE_TOPIC_ANCHORS_SQL, topic_id)
+                await connection.execute(self._DELETE_TOPIC_SQL, topic_id)
+                _ = await connection.execute("COMMIT")
+            except BaseException:
+                try:
+                    _ = await connection.execute("ROLLBACK")
+                except Exception:
+                    pass
+                raise
 
     async def list_topics(
         self,
@@ -905,6 +939,33 @@ class SQLiteTopicStore:
             return _topic_from_sqlite_row(row)
 
         return await asyncio.to_thread(read)
+
+    async def delete_topic(self, topic_id: str) -> None:
+        _require_non_empty("topic_id", topic_id)
+
+        def delete() -> None:
+            with self._lock, self._connect() as connection:
+                connection.execute(
+                    """
+                    DELETE FROM topic_recall_links
+                    WHERE source_topic_id = ? OR recalled_topic_id = ?
+                    """,
+                    (topic_id, topic_id),
+                )
+                connection.execute(
+                    "DELETE FROM topic_costs WHERE topic_id = ?",
+                    (topic_id,),
+                )
+                connection.execute(
+                    "DELETE FROM topic_anchors WHERE topic_id = ?",
+                    (topic_id,),
+                )
+                connection.execute(
+                    "DELETE FROM topics WHERE topic_id = ?",
+                    (topic_id,),
+                )
+
+        await asyncio.to_thread(delete)
 
     async def list_topics(
         self,

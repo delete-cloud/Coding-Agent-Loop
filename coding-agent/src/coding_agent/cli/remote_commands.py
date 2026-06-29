@@ -587,13 +587,38 @@ def remote_memory_status(name: str, session_id: str) -> None:
     _print_mapping(get_remote_semantic_memory_status(endpoint, session_id))
 
 
+@remote_memory.command("reviews")
+@click.argument("name")
+@click.option("--session", "session_id", required=True, help="Remote session ID.")
+@click.option(
+    "--status",
+    type=click.Choice(["candidate", "accepted", "rejected", "archived"]),
+    default=None,
+    help="Filter reviewed-memory candidates by status.",
+)
+def remote_memory_reviews(
+    name: str,
+    session_id: str,
+    status: str | None,
+) -> None:
+    """List reviewed-memory candidates for a session."""
+    from coding_agent.remote.client import get_remote, list_remote_memory_reviews
+
+    endpoint = get_remote(name)
+    click.echo(
+        _json_dumps_pretty(
+            list_remote_memory_reviews(endpoint, session_id, status=status)
+        )
+    )
+
+
 @remote_memory.command("rebuild")
 @click.argument("name")
 @click.option("--session", "session_id", required=True, help="Remote session ID.")
 @click.option(
-    "--confirm",
+    "--confirm-global",
     is_flag=True,
-    help="Confirm destructive semantic memory rebuild.",
+    help="Confirm destructive global semantic memory rebuild.",
 )
 @click.option(
     "--batch-size",
@@ -610,13 +635,15 @@ def remote_memory_status(name: str, session_id: str) -> None:
 def remote_memory_rebuild(
     name: str,
     session_id: str,
-    confirm: bool,
+    confirm_global: bool,
     batch_size: int,
     allow_rebuild: bool,
 ) -> None:
     """Rebuild the derived semantic memory index."""
-    if not confirm:
-        raise click.ClickException("Pass --confirm to rebuild semantic memory.")
+    if not confirm_global:
+        raise click.ClickException(
+            "Pass --confirm-global to rebuild global semantic memory."
+        )
     from coding_agent.remote.client import get_remote, rebuild_remote_semantic_memory
 
     endpoint = get_remote(name)
@@ -626,6 +653,38 @@ def remote_memory_rebuild(
             session_id,
             batch_size,
             allow_rebuild,
+            confirm_global,
+        )
+    )
+
+
+@remote_memory.command("dogfood-topic")
+@click.argument("name")
+@click.option("--session", "session_id", required=True, help="Remote session ID.")
+@click.option("--title", required=True, help="Topic title.")
+@click.option("--summary", required=True, help="Topic summary.")
+@click.option("--kind", default="coding", show_default=True, help="Topic kind.")
+def remote_memory_dogfood_topic(
+    name: str,
+    session_id: str,
+    title: str,
+    summary: str,
+    kind: str,
+) -> None:
+    """Seed one durable semantic dogfood topic."""
+    from coding_agent.remote.client import (
+        get_remote,
+        seed_remote_semantic_dogfood_topic,
+    )
+
+    endpoint = get_remote(name)
+    _print_mapping(
+        seed_remote_semantic_dogfood_topic(
+            endpoint,
+            session_id,
+            title=title,
+            summary=summary,
+            kind=kind,
         )
     )
 

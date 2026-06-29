@@ -79,6 +79,7 @@ from coding_agent.topics.memory import (
     ReviewedMemoryRecord,
     TopicDerivedMemoryCandidate,
 )
+from coding_agent.topics.store import TopicAnchorRecord, TopicRecord
 from coding_agent.topics.semantic_backends import (
     FAKE_SEMANTIC_INDEX_SCHEMA,
     FakeSemanticMemoryBackend,
@@ -319,8 +320,129 @@ def _direct_review_runtime_config() -> tuple[dict[str, object], MemoryReviewStor
     return {"memory_review_store": review_store}, review_store
 
 
-def _runtime_ctx(config: dict[str, object]) -> SimpleNamespace:
-    return SimpleNamespace(config=config, tape=Tape(tape_id="memory-review-tape"))
+def _runtime_ctx(
+    config: dict[str, object],
+    *,
+    tape: Tape | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        config=config, tape=tape or Tape(tape_id="memory-review-tape")
+    )
+
+
+class _MemoryMaintenanceTopicStore:
+    def __init__(
+        self,
+        *,
+        create_exc: Exception | None = None,
+        finalize_exc: Exception | None = None,
+    ) -> None:
+        self.topics: dict[str, TopicRecord] = {}
+        self.anchors: list[TopicAnchorRecord] = []
+        self.deleted: list[str] = []
+        self._create_exc = create_exc
+        self._finalize_exc = finalize_exc
+
+    async def create_topic(self, record: TopicRecord) -> TopicRecord:
+        if self._create_exc is not None:
+            raise self._create_exc
+        self.topics[record.topic_id] = record
+        return record
+
+    async def finalize_topic(
+        self,
+        topic_id: str,
+        *,
+        summary: str | None,
+        topic_finalized_seq: int,
+        finalized_at: datetime,
+        metadata: dict[str, object],
+    ) -> TopicRecord:
+        if self._finalize_exc is not None:
+            raise self._finalize_exc
+        topic = self.topics[topic_id]
+        finalized = replace(
+            topic,
+            status="finalized",
+            summary=summary,
+            topic_finalized_seq=topic_finalized_seq,
+            finalized_at=finalized_at,
+            metadata=cast(dict[str, object], metadata),
+        )
+        self.topics[topic_id] = finalized
+        return finalized
+
+    async def abort_topic(
+        self,
+        topic_id: str,
+        *,
+        summary: str | None,
+        topic_finalized_seq: int | None,
+        finalized_at: datetime,
+        metadata: dict[str, object],
+    ) -> TopicRecord:
+        topic = self.topics[topic_id]
+        aborted = replace(
+            topic,
+            status="aborted",
+            summary=summary,
+            topic_finalized_seq=topic_finalized_seq,
+            finalized_at=finalized_at,
+            metadata=cast(dict[str, object], metadata),
+        )
+        self.topics[topic_id] = aborted
+        return aborted
+
+    async def record_topic_anchor(
+        self,
+        record: TopicAnchorRecord,
+    ) -> TopicAnchorRecord:
+        self.anchors.append(record)
+        return record
+
+    async def delete_topic(self, topic_id: str) -> None:
+        self.deleted.append(topic_id)
+        self.topics.pop(topic_id, None)
+        self.anchors = [
+            anchor for anchor in self.anchors if anchor.topic_id != topic_id
+        ]
+
+
+class _MemoryMaintenanceTapeStore:
+    def __init__(self, *, save_exc: Exception | None = None) -> None:
+        self.saved: list[tuple[str, list[dict[str, object]]]] = []
+        self.truncated: list[tuple[str, int]] = []
+        self._save_exc = save_exc
+
+    async def save(self, tape_id: str, entries: list[dict[str, object]]) -> None:
+        if self._save_exc is not None:
+            raise self._save_exc
+        self.saved.append((tape_id, entries))
+
+    async def load(self, tape_id: str) -> list[dict[str, object]]:
+        del tape_id
+        return []
+
+    async def list_ids(self) -> list[str]:
+        return []
+
+    async def truncate(self, tape_id: str, keep: int) -> None:
+        self.truncated.append((tape_id, keep))
+
+
+class _RecordingTopicSyncer:
+    def __init__(self) -> None:
+        self.synced: list[TopicRecord] = []
+
+    async def sync_topic(self, topic: TopicRecord) -> object:
+        self.synced.append(topic)
+        return object()
+
+
+class _FailingTopicSyncer(_RecordingTopicSyncer):
+    async def sync_topic(self, topic: TopicRecord) -> object:
+        self.synced.append(topic)
+        raise RuntimeError("semantic sync failed")
 
 
 def _install_memory_review_runtime(
@@ -482,7 +604,7 @@ class TestSemanticMemoryMaintenance:
         response = await client.post(
             "/sessions/semantic-rebuild-admin-session/memory/semantic/rebuild",
             headers={"Authorization": "Bearer user-token-a"},
-            json={"batch_size": 10, "allow_rebuild": True},
+            json={"batch_size": 10, "allow_rebuild": True, "confirm_global": True},
         )
 
         assert response.status_code == 403
@@ -530,13 +652,14 @@ class TestSemanticMemoryMaintenance:
 
         response = await client.post(
             "/sessions/semantic-rebuild-session/memory/semantic/rebuild",
-            json={"batch_size": 25, "allow_rebuild": False},
+            json={"batch_size": 25, "allow_rebuild": False, "confirm_global": True},
         )
 
         assert response.status_code == 200
         assert rebuild_calls == [("semantic-rebuild-session", 25, False)]
         assert response.json() == {
             "topic_count": 2,
+            "scope": "global",
             "reviewed_memory_count": 1,
             "indexed_count": 3,
             "skipped_count": 0,
@@ -576,7 +699,7 @@ class TestSemanticMemoryMaintenance:
 
         response = await client.post(
             "/sessions/semantic-active-session/memory/semantic/rebuild",
-            json={"batch_size": 10, "allow_rebuild": True},
+            json={"batch_size": 10, "allow_rebuild": True, "confirm_global": True},
         )
 
         assert response.status_code == 409
@@ -616,7 +739,7 @@ class TestSemanticMemoryMaintenance:
 
         response = await client.post(
             "/sessions/semantic-missing-topic-store-session/memory/semantic/rebuild",
-            json={"batch_size": 10, "allow_rebuild": True},
+            json={"batch_size": 10, "allow_rebuild": True, "confirm_global": True},
         )
 
         assert response.status_code == 409
@@ -652,13 +775,13 @@ class TestSemanticMemoryMaintenance:
 
         response = await client.post(
             "/sessions/semantic-owner-conflict-session/memory/semantic/rebuild",
-            json={"batch_size": 10, "allow_rebuild": True},
+            json={"batch_size": 10, "allow_rebuild": True, "confirm_global": True},
         )
 
         assert response.status_code == 409
         assert response.json()["detail"] == "stale owner or fencing token rejected"
 
-    async def test_semantic_rebuild_request_validates_batch_size_and_explicit_allow_rebuild(
+    async def test_semantic_rebuild_request_validates_batch_size_and_explicit_confirmations(
         self,
         client: AsyncClient,
     ) -> None:
@@ -666,20 +789,513 @@ class TestSemanticMemoryMaintenance:
 
         zero = await client.post(
             "/sessions/semantic-schema-session/memory/semantic/rebuild",
-            json={"batch_size": 0, "allow_rebuild": True},
+            json={"batch_size": 0, "allow_rebuild": True, "confirm_global": True},
         )
         too_large = await client.post(
             "/sessions/semantic-schema-session/memory/semantic/rebuild",
-            json={"batch_size": 1001, "allow_rebuild": True},
+            json={"batch_size": 1001, "allow_rebuild": True, "confirm_global": True},
         )
         missing_allow_rebuild = await client.post(
             "/sessions/semantic-schema-session/memory/semantic/rebuild",
             json={"batch_size": 10},
         )
+        missing_confirm_global = await client.post(
+            "/sessions/semantic-schema-session/memory/semantic/rebuild",
+            json={"batch_size": 10, "allow_rebuild": True},
+        )
+        false_confirm_global = await client.post(
+            "/sessions/semantic-schema-session/memory/semantic/rebuild",
+            json={
+                "batch_size": 10,
+                "allow_rebuild": True,
+                "confirm_global": False,
+            },
+        )
 
         assert zero.status_code == 422
         assert too_large.status_code == 422
         assert missing_allow_rebuild.status_code == 422
+        assert missing_confirm_global.status_code == 422
+        assert false_confirm_global.status_code == 422
+
+    async def test_semantic_dogfood_topic_requires_admin(
+        self,
+        client: AsyncClient,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv(
+            "CODING_AGENT_SERVER_CONFIG", str(_write_auth_config(tmp_path))
+        )
+        monkeypatch.setattr(settings, "http_api_key", None)
+        register_session("semantic-dogfood-admin-session")
+
+        response = await client.post(
+            "/sessions/semantic-dogfood-admin-session/memory/semantic/dogfood-topic",
+            headers={"Authorization": "Bearer user-token-a"},
+            json={"title": "Dogfood topic", "summary": "Seed durable anchors"},
+        )
+
+        assert response.status_code == 403
+        assert response.json()["detail"] == "Admin token required"
+
+    async def test_semantic_dogfood_topic_active_turn_returns_409_without_writes(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        session = register_session("semantic-dogfood-active-session")
+        session.turn_in_progress = True
+        topic_store = _MemoryMaintenanceTopicStore()
+        tape_store = _MemoryMaintenanceTapeStore()
+
+        async def fail_ensure_session_runtime(session_id: str) -> object:
+            del session_id
+            raise AssertionError("dogfood topic body was reached")
+
+        monkeypatch.setattr(
+            session_manager, "selected_topic_store", lambda: topic_store
+        )
+        monkeypatch.setattr(session_manager, "_tape_store", tape_store)
+        monkeypatch.setattr(
+            session_manager,
+            "ensure_session_runtime",
+            fail_ensure_session_runtime,
+        )
+
+        response = await client.post(
+            "/sessions/semantic-dogfood-active-session/memory/semantic/dogfood-topic",
+            json={"title": "Dogfood topic", "summary": "Seed durable anchors"},
+        )
+
+        assert response.status_code == 409
+        assert response.json()["detail"] == "Turn already in progress"
+        assert topic_store.topics == {}
+        assert topic_store.anchors == []
+        assert tape_store.saved == []
+
+    async def test_semantic_dogfood_topic_creates_topic_candidate_and_delta_tape(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        register_session("semantic-dogfood-session")
+        review_store = MemoryReviewStore()
+        syncer = _RecordingTopicSyncer()
+        topic_store = _MemoryMaintenanceTopicStore()
+        tape_store = _MemoryMaintenanceTapeStore()
+        tape = Tape(tape_id="dogfood-tape")
+        tape.append(Entry(kind="message", payload={"content": "base entry"}))
+        ctx = _runtime_ctx(
+            {
+                "memory_review_store": review_store,
+                "memory": {"effective_write_enabled": True},
+                "semantic_memory_syncer": syncer,
+            },
+            tape=tape,
+        )
+
+        async def fake_ensure_session_runtime(session_id: str) -> object:
+            assert session_id == "semantic-dogfood-session"
+            return ctx
+
+        monkeypatch.setattr(
+            session_manager, "selected_topic_store", lambda: topic_store
+        )
+        monkeypatch.setattr(session_manager, "_tape_store", tape_store)
+        monkeypatch.setattr(
+            session_manager,
+            "ensure_session_runtime",
+            fake_ensure_session_runtime,
+        )
+
+        response = await client.post(
+            "/sessions/semantic-dogfood-session/memory/semantic/dogfood-topic",
+            json={
+                "title": "Dogfood semantic memory",
+                "summary": "Seed one durable finalized topic for memory dogfood.",
+            },
+        )
+
+        assert response.status_code == 200
+        stored_records = review_store.list_memories(status="candidate")
+        assert len(stored_records) == 1
+        stored = stored_records[0]
+        assert response.json() == {
+            "topic_id": stored.candidate.provenance["topic_id"],
+            "candidate_id": stored.candidate.candidate_id,
+            "warnings": [],
+        }
+        assert stored.candidate.title == "Dogfood semantic memory"
+        assert (
+            stored.candidate.summary
+            == "Seed one durable finalized topic for memory dogfood."
+        )
+        assert stored.candidate.provenance["session_id"] == "semantic-dogfood-session"
+        assert stored.candidate.provenance["tape_id"] == "dogfood-tape"
+        assert [anchor.anchor_type for anchor in topic_store.anchors] == [
+            "topic_initial",
+            "topic_finalized",
+        ]
+        assert len(syncer.synced) == 1
+        assert syncer.synced[0].status == "finalized"
+        assert len(tape_store.saved) == 1
+        saved_tape_id, saved_entries = tape_store.saved[0]
+        assert saved_tape_id == "dogfood-tape"
+        assert len(saved_entries) == 2
+        assert [entry["kind"] for entry in saved_entries] == ["anchor", "anchor"]
+        assert all(entry["payload"]["label"] != "base entry" for entry in saved_entries)
+        assert ctx.tape.tape_id == "dogfood-tape"
+        assert len(ctx.tape) == 3
+
+    async def test_semantic_dogfood_topic_tape_commit_failure_leaves_no_derived_writes(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        register_session("semantic-dogfood-commit-failure-session")
+        review_store = MemoryReviewStore()
+        syncer = _RecordingTopicSyncer()
+        topic_store = _MemoryMaintenanceTopicStore()
+        tape_store = _MemoryMaintenanceTapeStore(
+            save_exc=RuntimeError("tape save failed")
+        )
+        tape = Tape(tape_id="dogfood-commit-failure-tape")
+        tape.append(Entry(kind="message", payload={"content": "base entry"}))
+        ctx = _runtime_ctx(
+            {
+                "memory_review_store": review_store,
+                "memory": {"effective_write_enabled": True},
+                "semantic_memory_syncer": syncer,
+            },
+            tape=tape,
+        )
+
+        async def fake_ensure_session_runtime(session_id: str) -> object:
+            assert session_id == "semantic-dogfood-commit-failure-session"
+            return ctx
+
+        monkeypatch.setattr(
+            session_manager, "selected_topic_store", lambda: topic_store
+        )
+        monkeypatch.setattr(session_manager, "_tape_store", tape_store)
+        monkeypatch.setattr(
+            session_manager,
+            "ensure_session_runtime",
+            fake_ensure_session_runtime,
+        )
+
+        response = await client.post(
+            "/sessions/semantic-dogfood-commit-failure-session/memory/semantic/dogfood-topic",
+            json={
+                "title": "Dogfood semantic memory",
+                "summary": "Seed one durable finalized topic for memory dogfood.",
+            },
+        )
+
+        assert response.status_code == 500
+        assert response.json()["detail"] == "tape save failed"
+        assert topic_store.topics == {}
+        assert topic_store.anchors == []
+        assert review_store.list_memories(status="candidate") == ()
+        assert syncer.synced == []
+        assert tape_store.truncated == []
+        assert ctx.tape is tape
+        assert len(ctx.tape) == 1
+
+    @pytest.mark.parametrize(
+        ("memory_write_enabled", "candidate_writes_enabled"),
+        [(False, True), (True, False)],
+    )
+    async def test_semantic_dogfood_topic_disabled_candidate_writes_returns_no_candidate(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+        memory_write_enabled: bool,
+        candidate_writes_enabled: bool,
+    ) -> None:
+        register_session("semantic-dogfood-no-candidate-session")
+        review_store = MemoryReviewStore(
+            candidate_writes_enabled=candidate_writes_enabled
+        )
+        syncer = _RecordingTopicSyncer()
+        topic_store = _MemoryMaintenanceTopicStore()
+        tape_store = _MemoryMaintenanceTapeStore()
+        tape = Tape(tape_id="dogfood-no-candidate-tape")
+        tape.append(Entry(kind="message", payload={"content": "base entry"}))
+        ctx = _runtime_ctx(
+            {
+                "memory_review_store": review_store,
+                "memory": {"effective_write_enabled": memory_write_enabled},
+                "semantic_memory_syncer": syncer,
+            },
+            tape=tape,
+        )
+
+        async def fake_ensure_session_runtime(session_id: str) -> object:
+            assert session_id == "semantic-dogfood-no-candidate-session"
+            return ctx
+
+        monkeypatch.setattr(
+            session_manager, "selected_topic_store", lambda: topic_store
+        )
+        monkeypatch.setattr(session_manager, "_tape_store", tape_store)
+        monkeypatch.setattr(
+            session_manager,
+            "ensure_session_runtime",
+            fake_ensure_session_runtime,
+        )
+
+        response = await client.post(
+            "/sessions/semantic-dogfood-no-candidate-session/memory/semantic/dogfood-topic",
+            json={
+                "title": "Dogfood semantic memory",
+                "summary": "Seed one durable finalized topic for memory dogfood.",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["candidate_id"] is None
+        assert response.json()["warnings"] == []
+        assert len(topic_store.topics) == 1
+        assert topic_store.anchors != []
+        assert review_store.list_memories(status="candidate") == ()
+        assert len(syncer.synced) == 1
+        assert len(tape_store.saved) == 1
+        assert ctx.tape.tape_id == "dogfood-no-candidate-tape"
+        assert len(ctx.tape) == 3
+
+    async def test_semantic_dogfood_topic_topic_store_failure_truncates_committed_tape(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        register_session("semantic-dogfood-topic-failure-session")
+        review_store = MemoryReviewStore()
+        syncer = _RecordingTopicSyncer()
+        topic_store = _MemoryMaintenanceTopicStore(
+            create_exc=RuntimeError("topic store failed")
+        )
+        tape_store = _MemoryMaintenanceTapeStore()
+        tape = Tape(tape_id="dogfood-topic-failure-tape")
+        tape.append(Entry(kind="message", payload={"content": "base entry"}))
+        ctx = _runtime_ctx(
+            {
+                "memory_review_store": review_store,
+                "memory": {"effective_write_enabled": True},
+                "semantic_memory_syncer": syncer,
+            },
+            tape=tape,
+        )
+
+        async def fake_ensure_session_runtime(session_id: str) -> object:
+            assert session_id == "semantic-dogfood-topic-failure-session"
+            return ctx
+
+        monkeypatch.setattr(
+            session_manager, "selected_topic_store", lambda: topic_store
+        )
+        monkeypatch.setattr(session_manager, "_tape_store", tape_store)
+        monkeypatch.setattr(
+            session_manager,
+            "ensure_session_runtime",
+            fake_ensure_session_runtime,
+        )
+
+        response = await client.post(
+            "/sessions/semantic-dogfood-topic-failure-session/memory/semantic/dogfood-topic",
+            json={
+                "title": "Dogfood semantic memory",
+                "summary": "Seed one durable finalized topic for memory dogfood.",
+            },
+        )
+
+        assert response.status_code == 500
+        assert response.json()["detail"] == "topic store failed"
+        assert topic_store.topics == {}
+        assert topic_store.anchors == []
+        assert review_store.list_memories(status="candidate") == ()
+        assert syncer.synced == []
+        assert len(tape_store.saved) == 1
+        assert tape_store.truncated == [("dogfood-topic-failure-tape", 1)]
+        assert ctx.tape is tape
+        assert len(ctx.tape) == 1
+
+    async def test_semantic_dogfood_topic_final_write_failure_cleans_topic_before_truncating_tape(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        register_session("semantic-dogfood-final-write-failure-session")
+        review_store = MemoryReviewStore()
+        syncer = _RecordingTopicSyncer()
+        topic_store = _MemoryMaintenanceTopicStore(
+            finalize_exc=RuntimeError("topic finalize failed")
+        )
+        tape_store = _MemoryMaintenanceTapeStore()
+        tape = Tape(tape_id="dogfood-final-write-failure-tape")
+        tape.append(Entry(kind="message", payload={"content": "base entry"}))
+        ctx = _runtime_ctx(
+            {
+                "memory_review_store": review_store,
+                "memory": {"effective_write_enabled": True},
+                "semantic_memory_syncer": syncer,
+            },
+            tape=tape,
+        )
+
+        async def fake_ensure_session_runtime(session_id: str) -> object:
+            assert session_id == "semantic-dogfood-final-write-failure-session"
+            return ctx
+
+        monkeypatch.setattr(
+            session_manager, "selected_topic_store", lambda: topic_store
+        )
+        monkeypatch.setattr(session_manager, "_tape_store", tape_store)
+        monkeypatch.setattr(
+            session_manager,
+            "ensure_session_runtime",
+            fake_ensure_session_runtime,
+        )
+
+        response = await client.post(
+            "/sessions/semantic-dogfood-final-write-failure-session/memory/semantic/dogfood-topic",
+            json={
+                "title": "Dogfood semantic memory",
+                "summary": "Seed one durable finalized topic for memory dogfood.",
+            },
+        )
+
+        assert response.status_code == 500
+        assert response.json()["detail"] == "topic finalize failed"
+        assert len(topic_store.deleted) == 1
+        assert topic_store.topics == {}
+        assert topic_store.anchors == []
+        assert review_store.list_memories(status="candidate") == ()
+        assert syncer.synced == []
+        assert len(tape_store.saved) == 1
+        assert tape_store.truncated == [("dogfood-final-write-failure-tape", 1)]
+        assert ctx.tape is tape
+        assert len(ctx.tape) == 1
+
+    async def test_semantic_dogfood_topic_review_failure_warns_without_core_rollback(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        register_session("semantic-dogfood-review-failure-session")
+        review_store = MemoryReviewStore()
+        syncer = _RecordingTopicSyncer()
+        topic_store = _MemoryMaintenanceTopicStore()
+        tape_store = _MemoryMaintenanceTapeStore()
+        tape = Tape(tape_id="dogfood-review-failure-tape")
+        tape.append(Entry(kind="message", payload={"content": "base entry"}))
+        ctx = _runtime_ctx(
+            {
+                "memory_review_store": review_store,
+                "memory": {"effective_write_enabled": True},
+                "semantic_memory_syncer": syncer,
+            },
+            tape=tape,
+        )
+
+        def fail_add_candidate(candidate: TopicDerivedMemoryCandidate) -> object:
+            del candidate
+            raise RuntimeError("review store failed")
+
+        async def fake_ensure_session_runtime(session_id: str) -> object:
+            assert session_id == "semantic-dogfood-review-failure-session"
+            return ctx
+
+        monkeypatch.setattr(review_store, "add_candidate", fail_add_candidate)
+        monkeypatch.setattr(
+            session_manager, "selected_topic_store", lambda: topic_store
+        )
+        monkeypatch.setattr(session_manager, "_tape_store", tape_store)
+        monkeypatch.setattr(
+            session_manager,
+            "ensure_session_runtime",
+            fake_ensure_session_runtime,
+        )
+
+        response = await client.post(
+            "/sessions/semantic-dogfood-review-failure-session/memory/semantic/dogfood-topic",
+            json={
+                "title": "Dogfood semantic memory",
+                "summary": "Seed one durable finalized topic for memory dogfood.",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["candidate_id"] is None
+        assert response.json()["warnings"] == [
+            "memory review candidate write failed: review store failed"
+        ]
+        assert len(topic_store.topics) == 1
+        assert topic_store.deleted == []
+        assert topic_store.anchors != []
+        assert review_store.list_memories(status="candidate") == ()
+        assert len(syncer.synced) == 1
+        assert tape_store.truncated == []
+        assert ctx.tape.tape_id == "dogfood-review-failure-tape"
+        assert len(ctx.tape) == 3
+
+    async def test_semantic_dogfood_topic_semantic_sync_failure_warns_without_core_rollback(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        register_session("semantic-dogfood-sync-failure-session")
+        review_store = MemoryReviewStore()
+        syncer = _FailingTopicSyncer()
+        topic_store = _MemoryMaintenanceTopicStore()
+        tape_store = _MemoryMaintenanceTapeStore()
+        tape = Tape(tape_id="dogfood-sync-failure-tape")
+        tape.append(Entry(kind="message", payload={"content": "base entry"}))
+        ctx = _runtime_ctx(
+            {
+                "memory_review_store": review_store,
+                "memory": {"effective_write_enabled": True},
+                "semantic_memory_syncer": syncer,
+            },
+            tape=tape,
+        )
+
+        async def fake_ensure_session_runtime(session_id: str) -> object:
+            assert session_id == "semantic-dogfood-sync-failure-session"
+            return ctx
+
+        monkeypatch.setattr(
+            session_manager, "selected_topic_store", lambda: topic_store
+        )
+        monkeypatch.setattr(session_manager, "_tape_store", tape_store)
+        monkeypatch.setattr(
+            session_manager,
+            "ensure_session_runtime",
+            fake_ensure_session_runtime,
+        )
+
+        response = await client.post(
+            "/sessions/semantic-dogfood-sync-failure-session/memory/semantic/dogfood-topic",
+            json={
+                "title": "Dogfood semantic memory",
+                "summary": "Seed one durable finalized topic for memory dogfood.",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["candidate_id"] is not None
+        assert response.json()["warnings"] == [
+            "semantic topic sync failed: semantic sync failed"
+        ]
+        assert len(topic_store.topics) == 1
+        assert topic_store.deleted == []
+        assert topic_store.anchors != []
+        assert len(review_store.list_memories(status="candidate")) == 1
+        assert len(syncer.synced) == 1
+        assert tape_store.truncated == []
+        assert ctx.tape.tape_id == "dogfood-sync-failure-tape"
+        assert len(ctx.tape) == 3
 
 
 def test_http_server_uses_canonical_rate_limiter_module():
@@ -3034,6 +3650,104 @@ class TestRuntimeConfigUpdate:
 
 
 class TestMemoryReviewTransitions:
+    async def test_list_reviews_returns_session_candidates_by_status_without_legacy(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config, review_store = _direct_review_runtime_config()
+        current = _review_candidate(
+            "memory-current",
+            title="Current auth memory",
+            summary="Current JWT middleware convention",
+        )
+        accepted = _review_candidate(
+            "memory-accepted",
+            title="Accepted auth memory",
+            summary="Accepted JWT middleware convention",
+        )
+        other = _review_candidate(
+            "memory-other",
+            session_id="other-session",
+            tape_id="other-tape",
+        )
+        legacy = _review_candidate(
+            "memory-legacy",
+            title="Legacy auth memory",
+            summary="Legacy JWT middleware convention",
+            session_id=None,
+            tape_id=None,
+            profile=None,
+        )
+        review_store.add_candidate(current)
+        review_store.add_candidate(accepted)
+        review_store.add_candidate(other)
+        review_store.add_candidate(legacy)
+        review_store.accept_candidate_for_session(
+            "memory-review-session",
+            "memory-accepted",
+            reason="Already reviewed",
+        )
+        ensure_calls = _install_memory_review_runtime(
+            monkeypatch,
+            "memory-review-session",
+            _runtime_ctx(config),
+        )
+
+        response = await client.get(
+            "/sessions/memory-review-session/memory/reviews?status=candidate"
+        )
+
+        assert response.status_code == 200
+        assert ensure_calls == ["memory-review-session"]
+        assert response.json() == [
+            {
+                "candidate_id": "memory-current",
+                "status": "candidate",
+                "review_reason": None,
+                "kind": "fact",
+                "title": "Current auth memory",
+                "summary": "Current JWT middleware convention",
+                "scope": "topic:topic-auth",
+                "tags": ["auth", "jwt"],
+                "confidence": 0.8,
+                "topic_id": "topic-auth",
+                "session_id": "memory-review-session",
+                "tape_id": "memory-review-tape",
+            },
+        ]
+
+    async def test_list_reviews_uses_visible_session_auth_before_runtime(
+        self,
+        client: AsyncClient,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv(
+            "CODING_AGENT_SERVER_CONFIG", str(_write_auth_config(tmp_path))
+        )
+        monkeypatch.setattr(settings, "http_api_key", None)
+        session = register_session("memory-review-private-session")
+        session.origin = {"owner_label": "owner:other"}
+
+        async def fail_ensure_session_runtime(session_id: str) -> object:
+            del session_id
+            raise AssertionError("invisible session runtime was reached")
+
+        monkeypatch.setattr(
+            session_manager,
+            "ensure_session_runtime",
+            fail_ensure_session_runtime,
+        )
+
+        response = await client.get(
+            "/sessions/memory-review-private-session/memory/reviews",
+            headers={"Authorization": "Bearer user-token-a"},
+        )
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Session not found"
+
     async def test_accept_candidate_updates_semantic_index(
         self,
         client: AsyncClient,

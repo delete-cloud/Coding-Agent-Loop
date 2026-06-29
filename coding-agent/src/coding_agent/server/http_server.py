@@ -113,6 +113,7 @@ from coding_agent.topics.memory import (
     ReviewedMemoryRecord,
     memory_candidate_belongs_to_session,
     memory_candidate_session_id,
+    memory_candidate_tape_id,
 )
 from coding_agent.topics.range_index import require_recall_safe_text
 from coding_agent.topics.semantic_maintenance import SemanticMemoryStatus
@@ -218,6 +219,7 @@ from coding_agent.server.schemas import (
     DisplayEventResponse,
     DisplayEventsResponse,
     HealthResponse,
+    MemoryReviewRecordResponse,
     MemoryReviewTransitionRequest,
     MemoryReviewTransitionResponse,
     PromptRequest,
@@ -235,6 +237,8 @@ from coding_agent.server.schemas import (
     RuntimeMessageSnapshotResponse,
     RuntimeRunListResponse,
     RuntimeRunResponse,
+    SemanticDogfoodTopicRequest,
+    SemanticDogfoodTopicResponse,
     SemanticMemoryRebuildRequest,
     SemanticMemoryRebuildResponse,
     SemanticMemoryStatusResponse,
@@ -2769,6 +2773,49 @@ def _memory_review_transition_response(
     )
 
 
+def _memory_review_record_response(
+    record: ReviewedMemoryRecord,
+) -> MemoryReviewRecordResponse:
+    candidate = record.candidate
+    candidate_id = candidate.candidate_id
+    if candidate_id is None:
+        raise RuntimeError("reviewed memory candidate is missing candidate_id")
+    if record.status not in {"candidate", "accepted", "rejected", "archived"}:
+        raise RuntimeError(f"unexpected reviewed memory status: {record.status}")
+    topic_id = candidate.provenance.get("topic_id")
+    return MemoryReviewRecordResponse(
+        candidate_id=candidate_id,
+        status=cast(
+            Literal["candidate", "accepted", "rejected", "archived"],
+            record.status,
+        ),
+        review_reason=record.review_reason,
+        kind=candidate.kind,
+        title=candidate.title,
+        summary=candidate.summary,
+        scope=candidate.scope,
+        tags=list(candidate.tags),
+        confidence=candidate.confidence,
+        topic_id=topic_id if isinstance(topic_id, str) else None,
+        session_id=memory_candidate_session_id(candidate),
+        tape_id=memory_candidate_tape_id(candidate),
+    )
+
+
+def _memory_review_record_visible_for_session(
+    record: ReviewedMemoryRecord,
+    *,
+    session_id: str,
+) -> bool:
+    record_session_id = memory_candidate_session_id(record.candidate)
+    if record_session_id is None:
+        return False
+    return memory_candidate_belongs_to_session(
+        record.candidate,
+        session_id=session_id,
+    )
+
+
 def _semantic_memory_status_response(
     status: SemanticMemoryStatus,
 ) -> SemanticMemoryStatusResponse:
@@ -2794,11 +2841,33 @@ def _semantic_memory_rebuild_response(
     )
 
 
+def _semantic_dogfood_topic_response(
+    result: object,
+) -> SemanticDogfoodTopicResponse:
+    topic_id = getattr(result, "topic_id", None)
+    candidate_id = getattr(result, "candidate_id", None)
+    warnings = getattr(result, "warnings", ())
+    if not isinstance(topic_id, str):
+        raise RuntimeError("dogfood topic result is missing topic_id")
+    if candidate_id is not None and not isinstance(candidate_id, str):
+        raise RuntimeError("dogfood topic result has invalid candidate_id")
+    if not isinstance(warnings, tuple | list) or not all(
+        isinstance(warning, str) for warning in warnings
+    ):
+        raise RuntimeError("dogfood topic result has invalid warnings")
+    return SemanticDogfoodTopicResponse(
+        topic_id=topic_id,
+        candidate_id=candidate_id,
+        warnings=list(warnings),
+    )
+
+
 def _semantic_memory_runtime_exception(exc: RuntimeError) -> HTTPException:
     detail = _http_exception_detail(exc)
     if detail in {
         "semantic memory is disabled",
         "topic_store is required for semantic memory rebuild",
+        "topic_store is required for semantic dogfood topic seed",
     }:
         return HTTPException(status_code=409, detail=detail)
     if detail == "turn already in progress":
@@ -2861,6 +2930,81 @@ async def rebuild_semantic_memory(
     except RuntimeError as exc:
         raise _semantic_memory_runtime_exception(exc) from exc
     return _semantic_memory_rebuild_response(report)
+
+
+@app.get(
+    "/sessions/{session_id}/memory/reviews",
+    response_model=list[MemoryReviewRecordResponse],
+)
+@limiter.limit(RateLimits.GET_SESSION)
+async def list_memory_reviews(
+    request: Request,
+    session_id: str,
+    status: Literal["candidate", "accepted", "rejected", "archived"] | None = Query(
+        None
+    ),
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> list[MemoryReviewRecordResponse]:
+    del request
+    _ = await _get_visible_session(session_id, auth_context)
+    try:
+        runtime_ctx = await session_manager.ensure_session_runtime(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
+    except SessionOwnershipConflictError as exc:
+        raise _owner_conflict_http_exception(exc, session_id=session_id) from exc
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=_http_exception_detail(exc),
+        ) from exc
+
+    config = getattr(runtime_ctx, "config", None)
+    if not isinstance(config, Mapping):
+        raise HTTPException(
+            status_code=500,
+            detail="Session runtime context is missing config",
+        )
+    review_store = _memory_review_store_from_runtime_config(config)
+    records = [
+        record
+        for record in review_store.list_memories(status=status)
+        if _memory_review_record_visible_for_session(record, session_id=session_id)
+    ]
+    return [_memory_review_record_response(record) for record in records]
+
+
+@app.post(
+    "/sessions/{session_id}/memory/semantic/dogfood-topic",
+    response_model=SemanticDogfoodTopicResponse,
+)
+@limiter.limit(RateLimits.CLOSE_SESSION)
+async def seed_semantic_dogfood_topic(
+    request: Request,
+    session_id: str,
+    body: SemanticDogfoodTopicRequest,
+    auth_context: AuthContext | None = Depends(auth_context_from_headers),
+) -> SemanticDogfoodTopicResponse:
+    del request
+    auth_context = _normalize_direct_auth_context(auth_context)
+    _require_admin_context(auth_context)
+    _ = await _get_visible_session(session_id, auth_context)
+    try:
+        result = await session_manager.seed_semantic_dogfood_topic(
+            session_id,
+            title=body.title,
+            summary=body.summary,
+            kind=body.kind,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
+    except SessionOwnershipConflictError as exc:
+        raise _owner_conflict_http_exception(exc, session_id=session_id) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise _semantic_memory_runtime_exception(exc) from exc
+    return _semantic_dogfood_topic_response(result)
 
 
 @app.post(
