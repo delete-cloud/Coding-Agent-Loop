@@ -499,6 +499,36 @@ class SQLiteLocalDurableStore:
             raise KeyError(f"open topic not found for {operation}: {topic_id}")
         return _topic_from_sqlite_row(row)
 
+    async def delete_topic(
+        self,
+        authority: OwnerAuthority,
+        topic_id: str,
+    ) -> None:
+        _topic_require_non_empty("topic_id", topic_id)
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._assert_authority(connection, authority)
+            self._assert_topic_belongs_to_authority(connection, authority, topic_id)
+            connection.execute(
+                """
+                DELETE FROM topic_recall_links
+                WHERE source_topic_id = ? OR recalled_topic_id = ?
+                """,
+                (topic_id, topic_id),
+            )
+            connection.execute(
+                "DELETE FROM topic_costs WHERE topic_id = ?",
+                (topic_id,),
+            )
+            connection.execute(
+                "DELETE FROM topic_anchors WHERE topic_id = ?",
+                (topic_id,),
+            )
+            connection.execute(
+                "DELETE FROM topics WHERE topic_id = ?",
+                (topic_id,),
+            )
+
     async def record_topic_anchor(
         self,
         authority: OwnerAuthority,
@@ -1636,6 +1666,13 @@ class FencedSQLiteTopicStore(SQLiteTopicStore):
             topic_finalized_seq=topic_finalized_seq,
             finalized_at=finalized_at,
             metadata=metadata,
+        )
+
+    async def delete_topic(self, topic_id: str) -> None:
+        session_id = self._require_session_id_for_topic(topic_id)
+        await self._durable_store.delete_topic(
+            self._authority_for_session(session_id),
+            topic_id,
         )
 
     async def record_topic_anchor(

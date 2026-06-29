@@ -384,17 +384,57 @@ def get_remote_semantic_memory_status(
     )
 
 
+def list_remote_memory_reviews(
+    endpoint: RemoteEndpoint,
+    session_id: str,
+    *,
+    status: str | None = None,
+) -> list[dict[str, object]]:
+    path = f"/sessions/{session_id}/memory/reviews"
+    if status is not None:
+        path = f"{path}?{urlencode([('status', status)])}"
+    headers = auth_headers(endpoint)
+    if not headers:
+        headers = admin_auth_headers(endpoint)
+    data = _get_remote_json_list(
+        endpoint, path, "list remote memory reviews", headers=headers
+    )
+    return [dict(_expect_mapping(item, "Remote memory review entry")) for item in data]
+
+
 def rebuild_remote_semantic_memory(
     endpoint: RemoteEndpoint,
     session_id: str,
     batch_size: int,
     allow_rebuild: bool,
+    confirm_global: bool,
 ) -> dict[str, object]:
     return _post_remote_json(
         endpoint,
         f"/sessions/{session_id}/memory/semantic/rebuild",
         "rebuild remote semantic memory",
-        json={"batch_size": batch_size, "allow_rebuild": allow_rebuild},
+        json={
+            "batch_size": batch_size,
+            "allow_rebuild": allow_rebuild,
+            "confirm_global": confirm_global,
+        },
+        headers=admin_auth_headers(endpoint),
+    )
+
+
+def seed_remote_semantic_dogfood_topic(
+    endpoint: RemoteEndpoint,
+    session_id: str,
+    *,
+    title: str,
+    summary: str,
+    kind: str = "coding",
+) -> dict[str, object]:
+    return _post_remote_json(
+        endpoint,
+        f"/sessions/{session_id}/memory/semantic/dogfood-topic",
+        "seed remote semantic dogfood topic",
+        json={"title": title, "summary": summary, "kind": kind},
         headers=admin_auth_headers(endpoint),
     )
 
@@ -889,6 +929,39 @@ def _get_remote_json(
         data = dict(_expect_mapping(data, f"Remote {action} response"))
         span.set_attribute("remote_status", "completed")
         return data
+
+
+def _get_remote_json_list(
+    endpoint: RemoteEndpoint,
+    path: str,
+    action: str,
+    *,
+    headers: dict[str, str] | None = None,
+    observation_sink: ObservationSink | None = None,
+    span_name: str = "remote.request",
+    span_attributes: dict[str, object] | None = None,
+) -> list[object]:
+    with record_span(
+        span_name,
+        sink=observation_sink,
+        attributes={**(span_attributes or {}), "remote_status": "started"},
+    ) as span:
+        try:
+            with httpx.Client(
+                base_url=endpoint.url,
+                headers=headers if headers is not None else auth_headers(endpoint),
+                timeout=30.0,
+            ) as client:
+                response = client.get(path)
+                _raise_remote_http_error(response, action)
+                data = _response_json(response, action)
+        except httpx.RequestError as exc:
+            span.set_attribute("remote_status", "failed")
+            raise click.ClickException(f"Failed to {action}: {exc}") from exc
+        if not isinstance(data, list):
+            raise click.ClickException(f"Remote {action} response must be a list")
+        span.set_attribute("remote_status", "completed")
+        return list(data)
 
 
 def _post_remote_json(

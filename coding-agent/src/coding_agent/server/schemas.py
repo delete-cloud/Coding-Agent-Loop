@@ -134,6 +134,23 @@ class MemoryReviewTransitionResponse(BaseModel):
     confidence: float
 
 
+class MemoryReviewRecordResponse(BaseModel):
+    """Response schema for listing reviewed-memory candidates."""
+
+    candidate_id: str
+    status: Literal["candidate", "accepted", "rejected", "archived"]
+    review_reason: str | None = None
+    kind: str
+    title: str
+    summary: str
+    scope: str
+    tags: list[str]
+    confidence: float
+    topic_id: str | None = None
+    session_id: str | None = None
+    tape_id: str | None = None
+
+
 class SemanticMemoryStatusResponse(BaseModel):
     """Response schema for semantic memory maintenance status."""
 
@@ -153,11 +170,25 @@ class SemanticMemoryRebuildRequest(BaseModel):
         ...,
         description="Allow semantic backend schema rebuild on schema mismatch.",
     )
+    confirm_global: StrictBool = Field(
+        ...,
+        description="Explicitly confirm this rebuild clears the global semantic backend.",
+    )
+
+    @field_validator("confirm_global")
+    @classmethod
+    def _require_global_confirmation(cls, value: bool) -> bool:
+        if value is not True:
+            raise ValueError(
+                "confirm_global must be true because semantic rebuild is global"
+            )
+        return value
 
 
 class SemanticMemoryRebuildResponse(BaseModel):
     """Response schema for semantic memory rebuild maintenance."""
 
+    scope: Literal["global"] = "global"
     topic_count: int = Field(..., ge=0)
     reviewed_memory_count: int = Field(..., ge=0)
     indexed_count: int = Field(..., ge=0)
@@ -165,6 +196,31 @@ class SemanticMemoryRebuildResponse(BaseModel):
     deleted_count: int = Field(..., ge=0)
     indexed_ids: list[str]
     deleted_ids: list[str]
+
+
+class SemanticDogfoodTopicRequest(BaseModel):
+    """Request schema for seeding one durable dogfood topic."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(..., min_length=1, max_length=256)
+    summary: str = Field(..., min_length=1, max_length=256)
+    kind: str = Field("coding", min_length=1, max_length=64)
+
+    @field_validator("title", "summary", "kind")
+    @classmethod
+    def _reject_blank_strings(cls, value: str, info: ValidationInfo) -> str:
+        if not value.strip():
+            raise ValueError(f"{info.field_name} must not be blank")
+        return value.strip()
+
+
+class SemanticDogfoodTopicResponse(BaseModel):
+    """Response schema for a seeded durable dogfood topic."""
+
+    topic_id: str
+    candidate_id: str | None = None
+    warnings: list[str] = Field(default_factory=list)
 
 
 class ApproveRequest(BaseModel):
