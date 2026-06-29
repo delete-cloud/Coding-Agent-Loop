@@ -178,6 +178,22 @@ def test_helm_default_runtime_contract_is_runnable() -> None:
     assert "--allow-unauthenticated" not in main["command"]
 
 
+def test_helm_default_system_prompt_respects_explicit_output_constraints() -> None:
+    docs = _render()
+    system_prompt = _agent_toml(docs)["agent"]["system_prompt"]
+    default_config = tomllib.loads(
+        (ROOT / "src/coding_agent/agent.toml").read_text(encoding="utf-8")
+    )
+
+    assert system_prompt == default_config["agent"]["system_prompt"]
+    assert "Always explain your reasoning" not in system_prompt
+    assert (
+        "Unless the user explicitly requests concise, answer-only, or "
+        "machine-readable output"
+    ) in system_prompt
+    assert "follow it exactly" in system_prompt
+
+
 def test_helm_default_config_derives_local_sqlite_topic_store_path() -> None:
     docs = _render()
     storage = _agent_toml(docs)["storage"]

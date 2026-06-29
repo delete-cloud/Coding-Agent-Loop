@@ -15,7 +15,8 @@ data:
     {{- end }}
     system_prompt = """You are a skilled coding assistant. You help users write, debug, and improve code.
     You have access to file operations, shell commands, and search tools.
-    Always explain your reasoning before making changes."""
+    Unless the user explicitly requests concise, answer-only, or machine-readable output, briefly state the decision and rationale before code changes or material decisions.
+    When the user gives an explicit output constraint, follow it exactly."""
     max_turns = {{ .Values.agent.config.maxTurns }}
 
     [server]
