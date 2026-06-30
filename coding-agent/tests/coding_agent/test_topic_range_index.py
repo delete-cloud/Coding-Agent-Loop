@@ -7,6 +7,7 @@ import pytest
 from coding_agent.topics.range_index import (
     TopicRangeIndex,
     TopicRangeSearchQuery,
+    topic_query_prefers_recent_results,
 )
 from coding_agent.topics.store import TopicRecord
 
@@ -148,6 +149,166 @@ def test_topic_range_index_indexes_bee_task_topic_metadata() -> None:
     assert results[0].evidence_refs == ("evidence/executor-run.md",)
 
 
+def test_topic_range_index_current_query_prefers_recent_near_top_topic() -> None:
+    index = TopicRangeIndex()
+    index.index_topic(
+        _topic(
+            "topic-a-old-deploy",
+            title="o6n coding-agent deploy 685d8ba",
+            summary=(
+                "The latest deployed immutable o6n Coding Agent image tag is "
+                "685d8ba56e0155a11ba3f10611e179bc0c64d561."
+            ),
+            created_at=_dt(10),
+            finalized_at=_dt(11),
+        )
+    )
+    index.index_topic(
+        _topic(
+            "topic-z-new-deploy",
+            title="o6n coding-agent deploy 0aea889",
+            summary=(
+                "The latest deployed immutable o6n Coding Agent chart revision "
+                "and image tag is "
+                "0aea88921b16759d9556881f646a69203770f374."
+            ),
+            created_at=_dt(20),
+            finalized_at=_dt(21),
+        )
+    )
+
+    results = index.search(
+        TopicRangeSearchQuery(
+            text="o6n 当前部署的 coding-agent immutable image tag 是什么"
+        )
+    )
+
+    assert [result.topic_id for result in results[:2]] == [
+        "topic-z-new-deploy",
+        "topic-a-old-deploy",
+    ]
+
+
+def test_topic_range_index_deployment_artifact_query_prefers_recent_topic() -> None:
+    index = TopicRangeIndex()
+    index.index_topic(
+        _topic(
+            "topic-a-old-deploy",
+            title="o6n coding-agent deploy 685d8ba",
+            summary=(
+                "The deployed immutable o6n Coding Agent image tag is "
+                "685d8ba56e0155a11ba3f10611e179bc0c64d561."
+            ),
+            created_at=_dt(10),
+            finalized_at=_dt(11),
+        )
+    )
+    index.index_topic(
+        _topic(
+            "topic-z-new-deploy",
+            title="o6n coding-agent deploy 0aea889",
+            summary=(
+                "The deployed immutable o6n Coding Agent chart revision "
+                "and image tag is "
+                "0aea88921b16759d9556881f646a69203770f374."
+            ),
+            created_at=_dt(20),
+            finalized_at=_dt(21),
+        )
+    )
+
+    results = index.search(TopicRangeSearchQuery(text="deployed image tag"))
+
+    assert [result.topic_id for result in results[:2]] == [
+        "topic-z-new-deploy",
+        "topic-a-old-deploy",
+    ]
+
+
+def test_topic_range_index_plain_version_query_keeps_stable_score_order() -> None:
+    index = TopicRangeIndex()
+    index.index_topic(
+        _topic(
+            "topic-a-old-version",
+            title="Package version policy",
+            summary="Documented compatibility policy for package version fields.",
+            created_at=_dt(10),
+            finalized_at=_dt(11),
+        )
+    )
+    index.index_topic(
+        _topic(
+            "topic-z-new-version",
+            title="Runtime version notes",
+            summary="Documented compatibility policy for runtime version fields.",
+            created_at=_dt(20),
+            finalized_at=_dt(21),
+        )
+    )
+
+    results = index.search(TopicRangeSearchQuery(text="version"))
+
+    assert [result.topic_id for result in results[:2]] == [
+        "topic-a-old-version",
+        "topic-z-new-version",
+    ]
+
+
+@pytest.mark.parametrize(
+    "query",
+    (
+        "unknown error",
+        "concurrent behavior",
+        "deployment stage failure",
+    ),
+)
+def test_topic_range_index_recency_marker_matching_uses_word_boundaries(
+    query: str,
+) -> None:
+    assert not topic_query_prefers_recent_results(query)
+
+
+def test_topic_range_index_recency_query_keeps_score_order_outside_window() -> None:
+    index = TopicRangeIndex()
+    index.index_topic(
+        _topic(
+            "topic-a-high",
+            title="Current deployed image tag alpha beta gamma delta",
+            summary="alpha beta gamma delta current deployed image tag",
+            created_at=_dt(10),
+            finalized_at=_dt(11),
+        )
+    )
+    index.index_topic(
+        _topic(
+            "topic-b-mid-old",
+            title="Alpha beta gamma delta notes",
+            summary="alpha beta gamma delta compatibility notes",
+            created_at=_dt(12),
+            finalized_at=_dt(13),
+        )
+    )
+    index.index_topic(
+        _topic(
+            "topic-z-low-new",
+            title="Current deployed image",
+            summary="current deployed image notes",
+            created_at=_dt(30),
+            finalized_at=_dt(31),
+        )
+    )
+
+    results = index.search(
+        TopicRangeSearchQuery(text="current deployed image tag alpha beta gamma delta")
+    )
+
+    assert [result.topic_id for result in results[:3]] == [
+        "topic-a-high",
+        "topic-b-mid-old",
+        "topic-z-low-new",
+    ]
+
+
 def test_topic_range_index_records_pack_template_metadata() -> None:
     index = TopicRangeIndex()
     index.index_topic(
@@ -230,6 +391,7 @@ def _topic(
     start: int = 2,
     end: int | None = 9,
     created_at: datetime | None = None,
+    finalized_at: datetime | None = None,
 ) -> TopicRecord:
     return TopicRecord(
         topic_id=topic_id,
@@ -243,7 +405,13 @@ def _topic(
         topic_initial_seq=start,
         topic_finalized_seq=end,
         created_at=created_at or _dt(1),
-        finalized_at=_dt(2) if status == "finalized" else None,
+        finalized_at=(
+            finalized_at
+            if finalized_at is not None
+            else _dt(2)
+            if status == "finalized"
+            else None
+        ),
         metadata={"profile": "local"},
     )
 

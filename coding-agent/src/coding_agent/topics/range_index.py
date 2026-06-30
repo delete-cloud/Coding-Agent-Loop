@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 
 from coding_agent.topics.provenance import TopicEntryRange, topic_entry_range
 from coding_agent.topics.store import TopicRecord
@@ -39,6 +39,36 @@ _FORBIDDEN_TEXT_MARKERS = (
     "token:",
     "token=",
 )
+
+_EXPLICIT_RECENCY_QUERY_TOKENS = (
+    "current",
+    "latest",
+    "now",
+)
+_EXPLICIT_RECENCY_QUERY_MARKERS = (
+    "当前",
+    "最新",
+    "现在",
+)
+_DEPLOYMENT_QUERY_TOKENS = (
+    "deployed",
+    "deployment",
+)
+_DEPLOYMENT_QUERY_MARKERS = ("部署",)
+_ARTIFACT_QUERY_TOKENS = (
+    "image",
+    "chart",
+    "revision",
+    "immutable",
+    "tag",
+    "sha",
+    "version",
+)
+_ARTIFACT_QUERY_MARKERS = (
+    "镜像",
+    "版本",
+)
+_RECENCY_SCORE_WINDOW = 0.15
 
 
 @dataclass(frozen=True)
@@ -257,8 +287,52 @@ class TopicRangeIndex:
                     tags=document.tags,
                 )
             )
-        results.sort(key=lambda item: (-item.score, item.topic_id))
+        results = rank_topic_results_for_query(results, query_text=query.text)
         return results[: query.limit]
+
+
+def rank_topic_results_for_query(
+    results: list[TopicRangeSearchResult],
+    *,
+    query_text: str | None,
+) -> list[TopicRangeSearchResult]:
+    if not topic_query_prefers_recent_results(query_text):
+        return sorted(results, key=lambda item: (-item.score, item.topic_id))
+    if not results:
+        return []
+    max_score = max(result.score for result in results)
+    return sorted(
+        results,
+        key=lambda item: _topic_result_recency_rank_key(item, max_score=max_score),
+    )
+
+
+def topic_query_prefers_recent_results(query_text: str | None) -> bool:
+    if query_text is None:
+        return False
+    normalized = query_text.lower()
+    if any(marker in normalized for marker in _EXPLICIT_RECENCY_QUERY_MARKERS):
+        return True
+    tokens = _tokens(normalized)
+    if any(token in tokens for token in _EXPLICIT_RECENCY_QUERY_TOKENS):
+        return True
+    has_deployment_marker = any(
+        marker in normalized for marker in _DEPLOYMENT_QUERY_MARKERS
+    ) or any(token in tokens for token in _DEPLOYMENT_QUERY_TOKENS)
+    has_artifact_marker = any(
+        marker in normalized for marker in _ARTIFACT_QUERY_MARKERS
+    ) or any(token in tokens for token in _ARTIFACT_QUERY_TOKENS)
+    return has_deployment_marker and has_artifact_marker
+
+
+def _topic_result_recency_rank_key(
+    item: TopicRangeSearchResult,
+    *,
+    max_score: float,
+) -> tuple[int, float, float, str]:
+    if item.score >= max_score - _RECENCY_SCORE_WINDOW:
+        return (0, -_freshness_timestamp(item), -item.score, item.topic_id)
+    return (1, -item.score, 0.0, item.topic_id)
 
 
 def _matches_filters(
@@ -307,6 +381,13 @@ def _score_document(
     if not overlap:
         return 0.0, "no_token_overlap"
     return round(len(overlap) / len(query_tokens), 4), "deterministic_token_overlap"
+
+
+def _freshness_timestamp(result: TopicRangeSearchResult) -> float:
+    value = result.finalized_at or result.created_at
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.timestamp()
 
 
 def _document_text(document: TopicRangeIndexDocument) -> str:
