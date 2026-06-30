@@ -231,6 +231,55 @@ async def test_local_daemon_session_runtime_provider_rebuilds_changed_workspace(
 
 
 @pytest.mark.asyncio
+async def test_local_daemon_session_runtime_provider_threads_semantic_topic_store(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    session = FakeRuntimeSession()
+    create_kwargs: dict[str, object] = {}
+    semantic_topic_store = object()
+    adapter = FakeRuntimeAdapter()
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda name: types.SimpleNamespace(name=name, _instance=None)
+        )
+    )
+    fake_ctx = types.SimpleNamespace(
+        config={}, tape=types.SimpleNamespace(tape_id="tape-new")
+    )
+
+    async def close_runtime(runtime_session) -> None:
+        del runtime_session
+        raise AssertionError("new runtime should not close cached runtime")
+
+    async def restore_tape(tape_id: str | None) -> object:
+        return types.SimpleNamespace(tape_id=tape_id)
+
+    async def persist_session(runtime_session) -> None:
+        del runtime_session
+
+    def create_agent_for_session(**kwargs):
+        create_kwargs.update(kwargs)
+        return fake_pipeline, fake_ctx
+
+    await LocalDaemonSessionRuntimeProvider(
+        session=session,
+        resolve_environment=lambda target: target,
+        workspace_root_for_environment=lambda environment: workspace.resolve(),
+        workspace_root_for_runtime=lambda ctx: workspace.resolve(),
+        close_runtime=close_runtime,
+        create_agent_for_session=create_agent_for_session,
+        restore_tape=restore_tape,
+        persist_session=persist_session,
+        adapter_factory=lambda pipeline, ctx: adapter,
+        semantic_topic_store_factory=lambda: semantic_topic_store,
+    ).prepare_runtime(_local_request_for_path(str(workspace)))
+
+    assert create_kwargs["semantic_topic_store"] is semantic_topic_store
+
+
+@pytest.mark.asyncio
 async def test_local_daemon_executor_accepts_local_daemon_target() -> None:
     request = _local_request()
 

@@ -106,6 +106,7 @@ class LocalDaemonRuntimePreparationService:
                 ctx,
                 consumer,
             ),
+            semantic_topic_store_factory=self.semantic_topic_store_factory,
         ).prepare_runtime(request)
 
     async def build_runtime(
