@@ -6,10 +6,20 @@ from pathlib import Path
 import pytest
 
 from agentkit.observability import SpanRecord
+from agentkit.runtime.messages import (
+    RuntimeMessage,
+    RuntimeMessageKind,
+    SequencedRuntimeMessage,
+)
+from agentkit.runtime.pipeline import PipelineContext
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
-from coding_agent.kb import DocumentChunk, KB, KBSearchResult
+from coding_agent.kb import KB, DocumentChunk, KBSearchResult
 from coding_agent.plugins.kb import KBPlugin
+from coding_agent.plugins.semantic_memory import (
+    SEMANTIC_MEMORY_GROUNDING_MARKER_KEY,
+    semantic_grounding_query_digest,
+)
 
 
 def _fake_embed(texts: list[str]) -> list[list[float]]:
@@ -229,6 +239,182 @@ class TestBuildContextSearch:
         assert calls == ["How does auth work?", "What API endpoints exist?"]
         assert indexed_plugin._snapshot is not None
         assert indexed_plugin._snapshot.last_user_msg == "What API endpoints exist?"
+
+    def test_runtime_prompt_takes_precedence_over_stale_tape_user(
+        self, indexed_plugin: KBPlugin
+    ):
+        tape = Tape()
+        tape.append(
+            Entry(
+                kind="message",
+                payload={"role": "user", "content": "stale README prompt"},
+            )
+        )
+        ctx = PipelineContext(tape=tape)
+        ctx.runtime_messages.append(
+            SequencedRuntimeMessage(
+                sequence=1,
+                message=RuntimeMessage(
+                    message_id="runtime-query",
+                    kind=RuntimeMessageKind.USER_STEER,
+                    payload={"text": "fresh runtime prompt"},
+                ),
+            )
+        )
+        assert indexed_plugin._kb is not None
+        captured: list[str] = []
+
+        def tracking_search(query: str, k: int = 5, *, corpora=None):
+            del k, corpora
+            captured.append(query)
+            return []
+
+        indexed_plugin._kb.search_sync = tracking_search
+
+        indexed_plugin.build_context(tape=tape, ctx=ctx)
+
+        assert captured == ["fresh runtime prompt"]
+
+    def test_runtime_prompt_ignores_later_system_notice(self, indexed_plugin: KBPlugin):
+        tape = Tape()
+        tape.append(
+            Entry(
+                kind="message",
+                payload={"role": "user", "content": "stale README prompt"},
+            )
+        )
+        ctx = PipelineContext(tape=tape)
+        ctx.runtime_messages.extend(
+            [
+                SequencedRuntimeMessage(
+                    sequence=1,
+                    message=RuntimeMessage(
+                        message_id="runtime-query",
+                        kind=RuntimeMessageKind.USER_STEER,
+                        payload={"text": "fresh runtime prompt"},
+                    ),
+                ),
+                SequencedRuntimeMessage(
+                    sequence=2,
+                    message=RuntimeMessage(
+                        message_id="system-notice",
+                        kind=RuntimeMessageKind.SYSTEM_NOTICE,
+                        payload={"text": "do not use as retrieval query"},
+                    ),
+                ),
+            ]
+        )
+        assert indexed_plugin._kb is not None
+        captured: list[str] = []
+
+        def tracking_search(query: str, k: int = 5, *, corpora=None):
+            del k, corpora
+            captured.append(query)
+            return []
+
+        indexed_plugin._kb.search_sync = tracking_search
+
+        indexed_plugin.build_context(tape=tape, ctx=ctx)
+
+        assert captured == ["fresh runtime prompt"]
+
+    def test_defers_when_semantic_memory_already_injected_context(
+        self, indexed_plugin: KBPlugin
+    ):
+        indexed_plugin._defer_when_semantic_memory_hits = True
+        tape = Tape()
+        tape.append(
+            Entry(
+                kind="message",
+                payload={"role": "user", "content": "How does auth work?"},
+            )
+        )
+        ctx = PipelineContext(tape=tape)
+        ctx.config[SEMANTIC_MEMORY_GROUNDING_MARKER_KEY] = {
+            "query_digest": semantic_grounding_query_digest("How does auth work?"),
+            "tape_entry_count": len(tape),
+            "hit_count": 1,
+        }
+        assert indexed_plugin._kb is not None
+
+        def fail_search(*args, **kwargs):
+            del args, kwargs
+            raise AssertionError("KB search should not run after semantic grounding")
+
+        indexed_plugin._kb.search_sync = fail_search
+
+        assert indexed_plugin.build_context(tape=tape, ctx=ctx) == []
+        assert SEMANTIC_MEMORY_GROUNDING_MARKER_KEY not in ctx.config
+
+    def test_defer_flag_does_not_skip_when_semantic_memory_has_no_hits(
+        self, indexed_plugin: KBPlugin
+    ):
+        indexed_plugin._defer_when_semantic_memory_hits = True
+        tape = Tape()
+        tape.append(
+            Entry(
+                kind="message",
+                payload={"role": "user", "content": "How does auth work?"},
+            )
+        )
+        ctx = PipelineContext(tape=tape)
+        ctx.config[SEMANTIC_MEMORY_GROUNDING_MARKER_KEY] = {
+            "query_digest": semantic_grounding_query_digest("How does auth work?"),
+            "tape_entry_count": len(tape),
+            "hit_count": 0,
+        }
+
+        result = indexed_plugin.build_context(tape=tape, ctx=ctx)
+
+        assert len(result) == 1
+        assert "## Repo references" in result[0]["content"]
+
+    def test_defer_flag_does_not_skip_on_stale_semantic_marker(
+        self, indexed_plugin: KBPlugin
+    ):
+        indexed_plugin._defer_when_semantic_memory_hits = True
+        tape = Tape()
+        tape.append(
+            Entry(
+                kind="message",
+                payload={"role": "user", "content": "How does auth work?"},
+            )
+        )
+        ctx = PipelineContext(tape=tape)
+        ctx.config[SEMANTIC_MEMORY_GROUNDING_MARKER_KEY] = {
+            "query_digest": semantic_grounding_query_digest("previous prompt"),
+            "tape_entry_count": len(tape),
+            "hit_count": 1,
+        }
+
+        result = indexed_plugin.build_context(tape=tape, ctx=ctx)
+
+        assert len(result) == 1
+        assert "## Repo references" in result[0]["content"]
+        assert SEMANTIC_MEMORY_GROUNDING_MARKER_KEY not in ctx.config
+
+    def test_defer_flag_does_not_skip_on_invalid_semantic_hit_count(
+        self, indexed_plugin: KBPlugin
+    ):
+        indexed_plugin._defer_when_semantic_memory_hits = True
+        tape = Tape()
+        tape.append(
+            Entry(
+                kind="message",
+                payload={"role": "user", "content": "How does auth work?"},
+            )
+        )
+        ctx = PipelineContext(tape=tape)
+        ctx.config[SEMANTIC_MEMORY_GROUNDING_MARKER_KEY] = {
+            "query_digest": semantic_grounding_query_digest("How does auth work?"),
+            "tape_entry_count": len(tape),
+            "hit_count": True,
+        }
+
+        result = indexed_plugin.build_context(tape=tape, ctx=ctx)
+
+        assert len(result) == 1
+        assert "## Repo references" in result[0]["content"]
 
     def test_search_corpora_passed_to_kb_search(self, tmp_path: Path):
         db_path = tmp_path / "kb_db"

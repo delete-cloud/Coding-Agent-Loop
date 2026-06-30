@@ -5,17 +5,20 @@ from datetime import UTC, datetime
 import pytest
 
 from agentkit.plugin.registry import PluginRegistry
+from agentkit.runtime.hook_runtime import HookRuntime
 from agentkit.runtime.messages import (
     RuntimeMessage,
     RuntimeMessageKind,
     SequencedRuntimeMessage,
 )
-from agentkit.runtime.pipeline import PipelineContext
-from agentkit.runtime.hook_runtime import HookRuntime
-from agentkit.runtime.pipeline import Pipeline
+from agentkit.runtime.pipeline import Pipeline, PipelineContext
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
-from coding_agent.plugins.semantic_memory import SemanticMemoryPlugin
+from coding_agent.plugins.semantic_memory import (
+    SEMANTIC_MEMORY_GROUNDING_MARKER_KEY,
+    SemanticMemoryPlugin,
+    semantic_grounding_query_digest,
+)
 from coding_agent.topics.memory import (
     MemoryReviewStore,
     TopicDerivedMemoryCandidate,
@@ -35,10 +38,19 @@ class FakeTopicStore:
     def __init__(self, topics: tuple[TopicRecord, ...]) -> None:
         self.topics = {topic.topic_id: topic for topic in topics}
         self.loaded: list[str] = []
+        self.listed: list[dict[str, object]] = []
 
     async def load_topic(self, topic_id: str) -> TopicRecord | None:
         self.loaded.append(topic_id)
         return self.topics.get(topic_id)
+
+    async def list_topics(self, **kwargs: object) -> tuple[TopicRecord, ...]:
+        self.listed.append(dict(kwargs))
+        return tuple(
+            topic
+            for topic in self.topics.values()
+            if topic.status == kwargs.get("status")
+        )
 
 
 @pytest.mark.asyncio
@@ -132,6 +144,123 @@ async def test_build_context_rehydrates_topic_hits_from_authoritative_store() ->
         rendered
     )
     assert "jwt middleware backend sentinel must never render" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_build_context_derives_topic_range_index_from_topic_store() -> None:
+    topic = _topic(
+        "topic-auth",
+        title="Auth gateway",
+        summary="Authoritative topic summary says JWT middleware lives in auth gateway.",
+    )
+    topic_store = FakeTopicStore((topic,))
+    index = SafeSemanticMemoryIndex(FakeSemanticMemoryBackend())
+    plugin = SemanticMemoryPlugin(
+        semantic_index=index,
+        memory_review_store=MemoryReviewStore(),
+        read_enabled=True,
+        topic_store=topic_store,
+    )
+
+    tape = _tape("jwt middleware")
+    result = await plugin.build_context(tape=tape)
+
+    assert topic_store.listed == [{"status": "finalized", "limit": 10001}]
+    assert result
+    rendered = result[0]["content"]
+    assert "Cross-topic recall references" in rendered
+    assert "Authoritative topic summary says JWT middleware lives in auth gateway." in (
+        rendered
+    )
+
+    second_result = await plugin.build_context(tape=tape)
+
+    assert second_result == result
+    assert topic_store.listed == [{"status": "finalized", "limit": 10001}]
+
+
+@pytest.mark.asyncio
+async def test_build_context_skips_recall_unsafe_topics_from_derived_index() -> None:
+    safe_topic = _topic(
+        "topic-auth",
+        title="Auth gateway",
+        summary="JWT middleware lives in auth gateway.",
+    )
+    unsafe_topic = _topic(
+        "topic-unsafe",
+        title="Unsafe topic",
+        summary="stdout: raw command output must not enter recall context",
+    )
+    topic_store = FakeTopicStore((unsafe_topic, safe_topic))
+    index = SafeSemanticMemoryIndex(FakeSemanticMemoryBackend())
+    plugin = SemanticMemoryPlugin(
+        semantic_index=index,
+        memory_review_store=MemoryReviewStore(),
+        read_enabled=True,
+        topic_store=topic_store,
+    )
+
+    result = await plugin.build_context(tape=_tape("jwt middleware"))
+
+    assert topic_store.listed == [{"status": "finalized", "limit": 10001}]
+    assert result
+    rendered = result[0]["content"]
+    assert "JWT middleware lives in auth gateway." in rendered
+    assert "stdout: raw command output" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_build_context_records_grounding_hit_count_in_pipeline_context() -> None:
+    topic = _topic(
+        "topic-auth",
+        title="Auth gateway",
+        summary="JWT middleware lives in auth gateway.",
+    )
+    index = SafeSemanticMemoryIndex(FakeSemanticMemoryBackend())
+    await index.upsert(
+        SemanticMemoryDocument(
+            memory_id=SemanticDocId.for_topic(topic),
+            text="jwt middleware",
+            metadata={"kind": "topic_summary"},
+            source_refs=(SemanticSourceRef.for_topic(topic),),
+        )
+    )
+    plugin = SemanticMemoryPlugin(
+        semantic_index=index,
+        memory_review_store=MemoryReviewStore(),
+        read_enabled=True,
+        topic_store=FakeTopicStore((topic,)),
+    )
+    tape = _tape("jwt middleware")
+    ctx = PipelineContext(tape=tape, session_id="session-runtime")
+
+    await plugin.build_context(tape=tape, ctx=ctx)
+
+    assert ctx.config[SEMANTIC_MEMORY_GROUNDING_MARKER_KEY] == {
+        "query_digest": semantic_grounding_query_digest("jwt middleware"),
+        "tape_entry_count": len(tape),
+        "hit_count": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_build_context_clears_stale_grounding_hit_count() -> None:
+    plugin = SemanticMemoryPlugin(
+        semantic_index=SafeSemanticMemoryIndex(FakeSemanticMemoryBackend()),
+        memory_review_store=MemoryReviewStore(),
+        read_enabled=True,
+    )
+    tape = Tape(tape_id="tape-semantic")
+    ctx = PipelineContext(tape=tape, session_id="session-runtime")
+    ctx.config[SEMANTIC_MEMORY_GROUNDING_MARKER_KEY] = {
+        "query_digest": "stale",
+        "tape_entry_count": 1,
+        "hit_count": 3,
+    }
+
+    await plugin.build_context(tape=tape, ctx=ctx)
+
+    assert SEMANTIC_MEMORY_GROUNDING_MARKER_KEY not in ctx.config
 
 
 @pytest.mark.asyncio

@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from agentkit.observability import ObservationSink, record_span
+from agentkit.runtime.messages import RuntimeMessageKind
+from agentkit.runtime.pipeline import PipelineContext
 from agentkit.tape.tape import Tape
-
+from coding_agent.kb import KB, KBSearchResult
+from coding_agent.plugins.semantic_memory import (
+    SEMANTIC_MEMORY_GROUNDING_MARKER_KEY,
+    semantic_grounding_query_digest,
+)
 from coding_agent.topics.context_pack import (
     ContextPack,
     ContextPackItem,
@@ -16,12 +22,17 @@ from coding_agent.topics.context_pack import (
     ContextPackSection,
     EvidenceRef,
 )
-from coding_agent.kb import KB, KBSearchResult
 
 logger = logging.getLogger(__name__)
 
 _CHUNK_TRUNCATE = 500
 _CONTEXT_PACK_RENDERER = ContextPackRenderer(max_item_chars=_CHUNK_TRUNCATE)
+_RUNTIME_QUERY_KINDS = frozenset(
+    {
+        RuntimeMessageKind.USER_STEER,
+        RuntimeMessageKind.SUBAGENT_MESSAGE,
+    }
+)
 
 
 @dataclass
@@ -50,6 +61,7 @@ class KBPlugin:
         text_extensions: list[str] | set[str] | None = None,
         corpus: str = "default",
         search_corpora: list[str] | tuple[str, ...] | None = None,
+        defer_when_semantic_memory_hits: bool = False,
         embedding_fn: Callable[[list[str]], list[list[float]]] | None = None,
     ) -> None:
         self._db_path = db_path
@@ -72,6 +84,9 @@ class KBPlugin:
         self._search_corpora = (
             tuple(search_corpora) if search_corpora is not None else None
         )
+        if not isinstance(defer_when_semantic_memory_hits, bool):
+            raise TypeError("defer_when_semantic_memory_hits must be a boolean")
+        self._defer_when_semantic_memory_hits = defer_when_semantic_memory_hits
         normalized_extensions = index_extensions
         if normalized_extensions is None and text_extensions is not None:
             normalized_extensions = list(text_extensions)
@@ -120,12 +135,19 @@ class KBPlugin:
     def build_context(
         self, tape: Tape | None = None, **kwargs: Any
     ) -> list[dict[str, Any]]:
-        del kwargs
         if tape is None or not self._has_table or self._kb is None:
             return []
 
-        user_message = _latest_user_message(tape)
+        user_message = _latest_runtime_prompt_message(kwargs.get("ctx"))
         if user_message is None:
+            user_message = _latest_user_message(tape)
+        if user_message is None:
+            return []
+        if self._defer_when_semantic_memory_hits and _take_semantic_memory_hit_count(
+            kwargs.get("ctx"),
+            tape=tape,
+            query=user_message,
+        ):
             return []
 
         if self._snapshot is not None and self._snapshot.last_user_msg == user_message:
@@ -180,6 +202,24 @@ class KBPlugin:
         return grounding
 
 
+def _take_semantic_memory_hit_count(ctx: Any, *, tape: Tape, query: str) -> int:
+    if not isinstance(ctx, PipelineContext):
+        return 0
+    marker = ctx.config.pop(SEMANTIC_MEMORY_GROUNDING_MARKER_KEY, None)
+    if not isinstance(marker, Mapping):
+        return 0
+    if marker.get("query_digest") != semantic_grounding_query_digest(query):
+        return 0
+    if marker.get("tape_entry_count") != len(tape):
+        return 0
+    hit_count = marker.get("hit_count", 0)
+    if isinstance(hit_count, bool):
+        return 0
+    if isinstance(hit_count, int):
+        return max(hit_count, 0)
+    return 0
+
+
 def _observation_sink_from_context(ctx: Any) -> ObservationSink | None:
     if ctx is None:
         return None
@@ -205,6 +245,28 @@ def _latest_user_message(tape: Tape) -> str | None:
         content = entry.payload.get("content")
         if role == "user" and isinstance(content, str) and content.strip():
             return content
+    return None
+
+
+def _latest_runtime_prompt_message(ctx: object) -> str | None:
+    if not isinstance(ctx, PipelineContext):
+        return None
+
+    for item in reversed(ctx.runtime_messages):
+        message = item.message
+        if message.kind not in _RUNTIME_QUERY_KINDS:
+            continue
+        text = _runtime_payload_text(message.payload)
+        if text is not None:
+            return text
+    return None
+
+
+def _runtime_payload_text(payload: Mapping[str, object]) -> str | None:
+    for key in ("text", "message", "content"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
     return None
 
 
