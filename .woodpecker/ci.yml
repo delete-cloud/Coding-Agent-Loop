@@ -5,7 +5,7 @@ when:
       - pull_request
 
 steps:
-  lint:
+  lint-and-smoke-tests:
     image: python:3.12-slim
     environment:
       PIP_DEFAULT_TIMEOUT: "120"
@@ -14,15 +14,6 @@ steps:
       - cd coding-agent
       - python -m pip install -e '.[dev,redis]' ruff
       - ruff check src/coding_agent/observability/ src/coding_agent/ui/http_server.py src/coding_agent/ui/session_manager.py tests/ui/test_server_compat_imports.py tests/coding_agent/test_agent_observability.py tests/coding_agent/test_bee_template_pack_smoke.py
-
-  smoke-tests:
-    image: python:3.12-slim
-    environment:
-      PIP_DEFAULT_TIMEOUT: "120"
-      PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple
-    commands:
-      - cd coding-agent
-      - python -m pip install -e '.[dev,redis]'
       - pytest tests/ui/test_server_compat_imports.py tests/coding_agent/test_agent_observability.py tests/coding_agent/test_bee_template_pack_smoke.py -q
 
   build-image:
