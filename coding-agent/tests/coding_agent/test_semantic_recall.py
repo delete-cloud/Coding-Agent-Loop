@@ -343,6 +343,112 @@ async def test_semantic_refill_does_not_expand_beyond_configured_limit() -> None
     assert [result.topic_id for result in plan.topic_results] == ["topic-deterministic"]
 
 
+@pytest.mark.asyncio
+async def test_current_query_prefers_recent_semantic_topic_over_stale_deterministic_topic() -> (
+    None
+):
+    stale_deterministic_topic = _topic(
+        "topic-old-deploy",
+        title="o6n coding-agent deploy 685d8ba",
+        summary=(
+            "The latest deployed immutable o6n Coding Agent image tag is "
+            "685d8ba56e0155a11ba3f10611e179bc0c64d561."
+        ),
+        finalized_at=datetime(2026, 6, 30, 5, 0, tzinfo=UTC),
+    )
+    recent_semantic_topic = _topic(
+        "topic-new-deploy",
+        title="o6n coding-agent deploy 0aea889",
+        summary=(
+            "The latest deployed immutable o6n Coding Agent chart revision and "
+            "image tag is 0aea88921b16759d9556881f646a69203770f374."
+        ),
+        finalized_at=datetime(2026, 6, 30, 6, 25, tzinfo=UTC),
+    )
+    topic_index = TopicRangeIndex()
+    topic_index.index_topic(stale_deterministic_topic, profile="local")
+    planner = _planner(
+        semantic_hits=(
+            _hit(
+                str(SemanticDocId.for_topic(recent_semantic_topic)),
+                source_refs=("topic:topic-new-deploy",),
+                score=0.64,
+            ),
+        ),
+        topics=(recent_semantic_topic,),
+        topic_index=topic_index,
+    )
+
+    plan = await planner.plan(
+        TopicRecallPlannerInput(
+            source_topic=_source_topic(),
+            text="o6n 当前部署的 coding-agent immutable image tag 是什么",
+            profile="local",
+            limit=2,
+        )
+    )
+
+    assert [result.topic_id for result in plan.topic_results] == [
+        "topic-new-deploy",
+        "topic-old-deploy",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_derived_current_query_prefers_recent_semantic_topic() -> None:
+    source_topic = _topic(
+        "topic-source",
+        title="o6n 当前部署的 coding-agent immutable image tag 是什么",
+        summary=None,
+        status="open",
+        end=None,
+    )
+    stale_deterministic_topic = _topic(
+        "topic-old-deploy",
+        title="o6n coding-agent deploy 685d8ba",
+        summary=(
+            "The latest deployed immutable o6n Coding Agent image tag is "
+            "685d8ba56e0155a11ba3f10611e179bc0c64d561."
+        ),
+        finalized_at=datetime(2026, 6, 30, 5, 0, tzinfo=UTC),
+    )
+    recent_semantic_topic = _topic(
+        "topic-new-deploy",
+        title="o6n coding-agent deploy 0aea889",
+        summary=(
+            "The latest deployed immutable o6n Coding Agent chart revision and "
+            "image tag is 0aea88921b16759d9556881f646a69203770f374."
+        ),
+        finalized_at=datetime(2026, 6, 30, 6, 25, tzinfo=UTC),
+    )
+    topic_index = TopicRangeIndex()
+    topic_index.index_topic(stale_deterministic_topic, profile="local")
+    planner = _planner(
+        semantic_hits=(
+            _hit(
+                str(SemanticDocId.for_topic(recent_semantic_topic)),
+                source_refs=("topic:topic-new-deploy",),
+                score=0.64,
+            ),
+        ),
+        topics=(recent_semantic_topic,),
+        topic_index=topic_index,
+    )
+
+    plan = await planner.plan(
+        TopicRecallPlannerInput(
+            source_topic=source_topic,
+            profile="local",
+            limit=2,
+        )
+    )
+
+    assert [result.topic_id for result in plan.topic_results] == [
+        "topic-new-deploy",
+        "topic-old-deploy",
+    ]
+
+
 def _planner(
     *,
     semantic_hits: tuple[MemoryHit, ...],
@@ -390,6 +496,7 @@ def _topic(
     status: str = "finalized",
     start: int = 2,
     end: int | None = 9,
+    finalized_at: datetime | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> TopicRecord:
     return TopicRecord(
@@ -404,9 +511,13 @@ def _topic(
         topic_initial_seq=start,
         topic_finalized_seq=end,
         created_at=datetime(2026, 6, 24, 9, 0, tzinfo=UTC),
-        finalized_at=datetime(2026, 6, 24, 9, 5, tzinfo=UTC)
-        if status == "finalized"
-        else None,
+        finalized_at=(
+            finalized_at
+            if finalized_at is not None
+            else datetime(2026, 6, 24, 9, 5, tzinfo=UTC)
+            if status == "finalized"
+            else None
+        ),
         metadata={"profile": "local"} if metadata is None else metadata,
     )
 

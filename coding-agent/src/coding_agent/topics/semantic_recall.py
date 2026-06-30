@@ -11,6 +11,8 @@ from coding_agent.topics.provenance import topic_entry_range
 from coding_agent.topics.range_index import (
     TopicRangeSearchQuery,
     TopicRangeSearchResult,
+    rank_topic_results_for_query,
+    topic_query_prefers_recent_results,
 )
 from coding_agent.topics.recall_context import (
     TopicRecallPlan,
@@ -91,6 +93,7 @@ class SemanticRecallPlanner:
         topic_results = self._merge_topic_results(
             deterministic_results=base_plan.topic_results,
             semantic_topics=rehydrated_topics,
+            query_text=query.text,
             limit=planner_input.limit,
         )
         accepted_memories = self._merge_accepted_memories(
@@ -160,22 +163,29 @@ class SemanticRecallPlanner:
         *,
         deterministic_results: tuple[TopicRangeSearchResult, ...],
         semantic_topics: tuple[_RehydratedTopicHit, ...],
+        query_text: str | None,
         limit: int,
     ) -> tuple[TopicRangeSearchResult, ...]:
         result_by_identity = {
             f"topic:{topic.result.topic_id}": topic.result for topic in semantic_topics
         }
+        prefers_recent = topic_query_prefers_recent_results(query_text)
         merged = merge_hybrid_recall_hits(
             deterministic_results,
             (topic.hit for topic in semantic_topics),
-            limit=limit,
+            limit=None if prefers_recent else limit,
         )
         results: list[TopicRangeSearchResult] = []
         for hybrid_hit in merged:
             result = _topic_result_from_hybrid_hit(hybrid_hit, result_by_identity)
             if result is not None:
                 results.append(result)
-        return tuple(results)
+        if prefers_recent:
+            results = rank_topic_results_for_query(
+                results,
+                query_text=query_text,
+            )
+        return tuple(results[:limit])
 
     def _merge_accepted_memories(
         self,
