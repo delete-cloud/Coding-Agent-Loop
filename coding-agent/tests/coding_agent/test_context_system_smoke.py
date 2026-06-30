@@ -40,6 +40,13 @@ class FakeTopicStore:
     async def load_topic(self, topic_id: str) -> TopicRecord | None:
         return self._topics.get(topic_id)
 
+    async def list_topics(self, **kwargs: object) -> tuple[TopicRecord, ...]:
+        return tuple(
+            topic
+            for topic in self._topics.values()
+            if topic.status == kwargs.get("status")
+        )
+
 
 @pytest.mark.asyncio
 async def test_context_system_smoke_combines_retrieval_failure_and_memory(
