@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import os
 import inspect
+import os
 import uuid
 from collections.abc import Mapping
 from contextlib import contextmanager
@@ -18,20 +18,19 @@ from agentkit.runtime.hook_runtime import HookRuntime
 from agentkit.runtime.hookspecs import HOOK_SPECS
 from agentkit.runtime.pipeline import Pipeline, PipelineContext
 from agentkit.tape.tape import Tape
-
-from coding_agent.core.agent_identity import legacy_agent_id_str
 from coding_agent.approval import ApprovalPolicy
+from coding_agent.core.agent_identity import legacy_agent_id_str
 from coding_agent.environment import LocalEnvironment
 from coding_agent.environment.additional_roots import with_additional_workspace_roots
+from coding_agent.observability import build_observation_sink
 from coding_agent.plugins.approval import ApprovalPlugin
 from coding_agent.plugins.core_tools import CoreToolsPlugin
 from coding_agent.plugins.doom_detector import DoomDetectorPlugin
+from coding_agent.plugins.kb import KBPlugin
 from coding_agent.plugins.llm_provider import LLMProviderPlugin
 from coding_agent.plugins.mcp import MCPPlugin
 from coding_agent.plugins.memory import MemoryPlugin
-from coding_agent.plugins.kb import KBPlugin
 from coding_agent.plugins.metrics import SessionMetricsPlugin
-from coding_agent.observability import build_observation_sink
 from coding_agent.plugins.parallel_executor import ParallelExecutorPlugin
 from coding_agent.plugins.semantic_memory import SemanticMemoryPlugin
 from coding_agent.plugins.shell_session import ShellSessionPlugin
@@ -39,6 +38,7 @@ from coding_agent.plugins.skills import SkillsPlugin
 from coding_agent.plugins.storage import StoragePlugin
 from coding_agent.plugins.summarizer import SummarizerPlugin
 from coding_agent.subagents.coordinator import ChildWorkerCoordinator
+from coding_agent.tools.web_search import create_web_search_backend
 from coding_agent.topics.memory import MemoryReviewStore
 from coding_agent.topics.range_index import TopicRangeIndex
 from coding_agent.topics.semantic_backends import (
@@ -53,7 +53,6 @@ from coding_agent.topics.semantic_sync import (
     SemanticMemoryReviewSyncService,
     SemanticMemorySyncer,
 )
-from coding_agent.tools.web_search import create_web_search_backend
 
 ToolFilter = Any
 
@@ -529,6 +528,11 @@ def create_child_pipeline(
     kb_db_path = kb_cfg.get("db_path", "kb")
     if not isinstance(kb_db_path, str):
         raise ValueError("[kb].db_path must be a string")
+    kb_defer_when_semantic_memory_hits = kb_cfg.get(
+        "defer_when_semantic_memory_hits", False
+    )
+    if not isinstance(kb_defer_when_semantic_memory_hits, bool):
+        raise TypeError("[kb].defer_when_semantic_memory_hits must be a boolean")
     memory_review_store = MemoryReviewStore(
         data_dir / kb_db_path / "reviewed_memory.jsonl",
         candidate_writes_enabled=memory_cfg.effective_write_enabled,
@@ -674,11 +678,16 @@ def create_child_pipeline(
                 ),
                 corpus=kb_corpus,
                 search_corpora=kb_search_corpora,
+                defer_when_semantic_memory_hits=kb_defer_when_semantic_memory_hits,
             ),
         }
     )
 
     enabled_plugins = cfg.plugins or list(plugin_factories.keys())
+    _validate_kb_semantic_plugin_order(
+        enabled_plugins,
+        kb_defer_when_semantic_memory_hits=kb_defer_when_semantic_memory_hits,
+    )
     for plugin_name in enabled_plugins:
         factory = plugin_factories.get(plugin_name)
         if factory is None:
@@ -796,6 +805,22 @@ def create_child_pipeline(
         ctx.config["mcp_plugin"] = registry.get("mcp")
 
     return pipeline, ctx
+
+
+def _validate_kb_semantic_plugin_order(
+    enabled_plugins: list[str],
+    *,
+    kb_defer_when_semantic_memory_hits: bool,
+) -> None:
+    if not kb_defer_when_semantic_memory_hits:
+        return
+    if "kb" not in enabled_plugins or "semantic_memory" not in enabled_plugins:
+        return
+    if enabled_plugins.index("semantic_memory") > enabled_plugins.index("kb"):
+        raise ValueError(
+            "[kb].defer_when_semantic_memory_hits requires semantic_memory "
+            "to run before kb in [agent.plugins].enabled"
+        )
 
 
 def create_agent(

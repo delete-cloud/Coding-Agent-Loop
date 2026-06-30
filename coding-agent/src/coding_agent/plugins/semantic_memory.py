@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from datetime import UTC, datetime
+import hashlib
 import inspect
-from typing import Any, Callable
+from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
+from typing import Any
 
 from agentkit.runtime.messages import RuntimeMessageKind
 from agentkit.runtime.pipeline import PipelineContext
@@ -16,6 +17,7 @@ from coding_agent.topics.memory import (
     memory_candidate_session_id,
 )
 from coding_agent.topics.range_index import TopicRangeIndex, require_recall_safe_text
+from coding_agent.topics.range_index_builder import build_topic_range_index_from_store
 from coding_agent.topics.recall_context import (
     TopicRecallPlanner,
     TopicRecallPlannerInput,
@@ -28,13 +30,13 @@ from coding_agent.topics.semantic_recall import (
 )
 from coding_agent.topics.store import TopicRecord
 
-
 _RUNTIME_QUERY_KINDS = frozenset(
     {
         RuntimeMessageKind.USER_STEER,
         RuntimeMessageKind.SUBAGENT_MESSAGE,
     }
 )
+SEMANTIC_MEMORY_GROUNDING_MARKER_KEY = "semantic_memory.grounding_marker"
 
 
 class _NoopTopicStore:
@@ -66,13 +68,25 @@ class SemanticMemoryPlugin:
         self._limit = limit
         self._topic_store = _validate_topic_store(topic_store)
         self._topic_index = _validate_topic_index(topic_index)
+        self._derived_topic_index: TopicRangeIndex | None = None
 
     def hooks(self) -> dict[str, Callable[..., Any]]:
         return {"build_context": self.build_context}
 
+    async def _topic_index_for_context(self) -> TopicRangeIndex:
+        if self._topic_index is not None:
+            return self._topic_index
+        if self._derived_topic_index is None:
+            derived = await build_topic_range_index_from_store(self._topic_store)
+            self._derived_topic_index = (
+                TopicRangeIndex() if derived is None else derived.index
+            )
+        return self._derived_topic_index
+
     async def build_context(
         self, tape: Tape | None = None, **kwargs: Any
     ) -> list[dict[str, object]]:
+        _clear_semantic_memory_grounding_marker(kwargs.get("ctx"))
         if not self._read_enabled:
             return []
         if tape is None:
@@ -87,9 +101,10 @@ class SemanticMemoryPlugin:
             return []
 
         session_id = _session_id_from_context(kwargs.get("ctx"))
+        topic_index = await self._topic_index_for_context()
         planner = SemanticRecallPlanner(
             topic_planner=TopicRecallPlanner(
-                topic_index=self._topic_index,
+                topic_index=topic_index,
                 accepted_memories=_accepted_memories_for_context(
                     self._memory_review_store,
                     session_id=session_id,
@@ -109,6 +124,12 @@ class SemanticMemoryPlugin:
                 limit=self._limit,
                 enabled=self._read_enabled,
             )
+        )
+        _set_semantic_memory_grounding_marker(
+            kwargs.get("ctx"),
+            tape=tape,
+            query=user_message,
+            hit_count=len(plan.topic_results) + len(plan.accepted_memories),
         )
         return recall_context_messages(plan, enabled=self._read_enabled)
 
@@ -168,9 +189,11 @@ def _validate_topic_store(
     return topic_store
 
 
-def _validate_topic_index(topic_index: TopicRangeIndex | None) -> TopicRangeIndex:
+def _validate_topic_index(
+    topic_index: TopicRangeIndex | None,
+) -> TopicRangeIndex | None:
     if topic_index is None:
-        return TopicRangeIndex()
+        return None
     if not isinstance(topic_index, TopicRangeIndex):
         raise TypeError("topic_index must be TopicRangeIndex")
     return topic_index
@@ -180,6 +203,30 @@ def _session_id_from_context(ctx: object) -> str | None:
     if isinstance(ctx, PipelineContext) and ctx.session_id:
         return ctx.session_id
     return None
+
+
+def _clear_semantic_memory_grounding_marker(ctx: object) -> None:
+    if isinstance(ctx, PipelineContext):
+        ctx.config.pop(SEMANTIC_MEMORY_GROUNDING_MARKER_KEY, None)
+
+
+def _set_semantic_memory_grounding_marker(
+    ctx: object,
+    *,
+    tape: Tape,
+    query: str,
+    hit_count: int,
+) -> None:
+    if isinstance(ctx, PipelineContext):
+        ctx.config[SEMANTIC_MEMORY_GROUNDING_MARKER_KEY] = {
+            "query_digest": semantic_grounding_query_digest(query),
+            "tape_entry_count": len(tape),
+            "hit_count": hit_count,
+        }
+
+
+def semantic_grounding_query_digest(query: str) -> str:
+    return hashlib.sha256(query.encode("utf-8")).hexdigest()
 
 
 def _accepted_memories_for_context(

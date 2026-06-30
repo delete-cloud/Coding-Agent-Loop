@@ -130,6 +130,7 @@ kb:
   embeddingBaseUrl: https://api.siliconflow.cn/v1
   embeddingDim: 1024
   maxDistance: null
+  deferWhenSemanticMemoryHits: false
   corpus: notes
   searchCorpora:
     - sre

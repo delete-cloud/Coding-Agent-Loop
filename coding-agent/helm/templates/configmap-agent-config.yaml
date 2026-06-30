@@ -87,6 +87,7 @@ data:
     {{- if ne .Values.kb.maxDistance nil }}
     max_distance = {{ .Values.kb.maxDistance }}
     {{- end }}
+    defer_when_semantic_memory_hits = {{ .Values.kb.deferWhenSemanticMemoryHits }}
     corpus = {{ .Values.kb.corpus | quote }}
     search_corpora = {{ .Values.kb.searchCorpora | toJson }}
     {{- end }}

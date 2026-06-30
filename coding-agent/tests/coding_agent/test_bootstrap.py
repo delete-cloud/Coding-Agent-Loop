@@ -2,12 +2,13 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+
 from agentkit.environment import WorkspaceSummary
 from agentkit.observability import NoopObservationSink
 from agentkit.runtime import AgentRunContext, ContextBudget
 from agentkit.runtime.pipeline import PipelineContext
-from agentkit.tools import tool
 from agentkit.tape.tape import Tape
+from agentkit.tools import tool
 from coding_agent.__main__ import create_agent, create_child_pipeline
 from coding_agent.environment import (
     CloudCommandResult,
@@ -245,6 +246,7 @@ max_distance = 0.8
 index_extensions = [".md"]
 corpus = "sre"
 search_corpora = ["sre", "notes"]
+defer_when_semantic_memory_hits = true
 """.strip()
         )
 
@@ -260,6 +262,7 @@ search_corpora = ["sre", "notes"]
         assert kb_plugin._max_distance == 0.8
         assert kb_plugin._corpus == "sre"
         assert kb_plugin._search_corpora == ("sre", "notes")
+        assert kb_plugin._defer_when_semantic_memory_hits is True
 
     def test_create_agent_installs_persistent_memory_review_store(self, tmp_path):
         config_path = tmp_path / "agent.toml"
@@ -445,6 +448,37 @@ enabled = ["storage", "core_tools"]
         )
 
         assert pipeline._registry.plugin_ids() == ["storage", "core_tools"]
+
+    def test_create_agent_rejects_kb_defer_before_semantic_memory(self, tmp_path):
+        config_path = tmp_path / "agent.toml"
+        config_path.write_text(
+            """
+[agent]
+name = "test-agent"
+model = "claude-sonnet-4-20250514"
+provider = "anthropic"
+
+[agent.plugins]
+enabled = ["kb", "semantic_memory"]
+
+[memory.semantic]
+enabled = true
+backend = "fake"
+
+[kb]
+defer_when_semantic_memory_hits = true
+""".strip()
+        )
+
+        with pytest.raises(
+            ValueError,
+            match="requires semantic_memory to run before kb",
+        ):
+            create_agent(
+                config_path=config_path,
+                data_dir=tmp_path / "data",
+                api_key="sk-test",
+            )
 
     def test_create_agent_uses_mcp_servers_override(self, tmp_path):
         config_path = tmp_path / "agent.toml"

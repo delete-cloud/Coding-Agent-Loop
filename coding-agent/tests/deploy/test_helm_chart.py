@@ -13,7 +13,6 @@ import yaml
 
 from coding_agent.__main__ import create_agent
 
-
 ROOT = Path(__file__).resolve().parents[2]
 CHART = ROOT / "helm"
 
@@ -245,6 +244,18 @@ def test_helm_semantic_memory_enabled_renders_config() -> None:
         "embedding_dim": 1024,
         "embedding_base_url": "https://api.siliconflow.cn/v1",
     }
+
+
+def test_helm_semantic_memory_runs_before_kb_when_both_enabled() -> None:
+    docs = _render(
+        "--set",
+        "memory.semantic.enabled=true",
+        "--set",
+        "kb.enabled=true",
+    )
+    plugins = _agent_toml(docs)["agent"]["plugins"]["enabled"]
+
+    assert plugins.index("semantic_memory") < plugins.index("kb")
 
 
 def test_helm_semantic_memory_enabled_bootstraps_runtime(tmp_path: Path) -> None:
@@ -894,6 +905,7 @@ def test_helm_kb_enabled_renders_config_and_plugin() -> None:
         "embedding_model": "BAAI/bge-m3",
         "embedding_base_url": "https://api.siliconflow.cn/v1",
         "embedding_dim": 1024,
+        "defer_when_semantic_memory_hits": False,
         "corpus": "notes",
         "search_corpora": ["sre", "notes"],
     }
@@ -903,6 +915,17 @@ def test_helm_kb_enabled_can_render_optional_max_distance() -> None:
     docs = _render("--set", "kb.enabled=true", "--set", "kb.maxDistance=0.42")
 
     assert _agent_toml(docs)["kb"]["max_distance"] == 0.42
+
+
+def test_helm_kb_enabled_can_defer_when_semantic_memory_hits() -> None:
+    docs = _render(
+        "--set",
+        "kb.enabled=true",
+        "--set",
+        "kb.deferWhenSemanticMemoryHits=true",
+    )
+
+    assert _agent_toml(docs)["kb"]["defer_when_semantic_memory_hits"] is True
 
 
 def test_helm_kb_index_disabled_does_not_render_cronjob() -> None:
