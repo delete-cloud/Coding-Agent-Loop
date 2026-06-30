@@ -271,6 +271,32 @@ async def test_runtime_preparation_threads_semantic_topic_store_to_create_agent(
 
 
 @pytest.mark.asyncio
+async def test_runtime_preparation_service_prepare_runtime_threads_semantic_topic_store(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    session = FakeRuntimeSession()
+    created: dict[str, object] = {}
+    semantic_topic_store = object()
+
+    await _service(
+        created=created,
+        persisted=[],
+        restored=[],
+        consumer=object(),
+        adapter=FakeRuntimeAdapter(),
+        semantic_topic_store=semantic_topic_store,
+    ).prepare_runtime(
+        session,
+        consumer=object(),
+        request=_request(workspace),
+    )
+
+    assert created["semantic_topic_store"] is semantic_topic_store
+
+
+@pytest.mark.asyncio
 async def test_runtime_preparation_service_passes_session_mcp_servers(
     tmp_path: Path,
 ) -> None:

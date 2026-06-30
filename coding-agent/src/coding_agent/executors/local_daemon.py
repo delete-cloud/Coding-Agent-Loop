@@ -69,6 +69,7 @@ RuntimePersistHook = Callable[[LocalDaemonRuntimeSession], Awaitable[None]]
 RuntimeTapeLoader = Callable[[str | None], Awaitable[object]]
 RuntimeFactory = Callable[..., tuple[object, object]]
 RuntimeAdapterFactory = Callable[[object, object], RuntimeTurnAdapter]
+SemanticTopicStoreFactory = Callable[[], object | None]
 
 
 RuntimePreparedHook = Callable[
@@ -118,6 +119,7 @@ class LocalDaemonSessionRuntimeProvider:
     restore_tape: RuntimeTapeLoader
     persist_session: RuntimePersistHook
     adapter_factory: RuntimeAdapterFactory
+    semantic_topic_store_factory: SemanticTopicStoreFactory = lambda: None
 
     async def prepare_runtime(self, request: RunRequest) -> LocalDaemonRuntimeBinding:
         session = self.session
@@ -158,6 +160,7 @@ class LocalDaemonSessionRuntimeProvider:
                 additional_workspace_roots_override=list(
                     getattr(session, "additional_directories", [])
                 ),
+                semantic_topic_store=self.semantic_topic_store_factory(),
                 tape=await self.restore_tape(session.tape_id),
             )
             session.tape_id = ctx.tape.tape_id
