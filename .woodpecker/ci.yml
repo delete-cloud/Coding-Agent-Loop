@@ -10,6 +10,9 @@ steps:
     environment:
       PIP_DEFAULT_TIMEOUT: "120"
       PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple
+      PIP_CACHE_DIR: /cache/pip/coding-agent-loop
+    volumes:
+      - woodpecker-runner-cache:/cache
     commands:
       - cd coding-agent
       - python -m pip install -e '.[dev,redis]' ruff
