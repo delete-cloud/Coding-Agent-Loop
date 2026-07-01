@@ -15,6 +15,7 @@ steps:
       - woodpecker-runner-cache:/cache
     commands:
       - cd coding-agent
+      - mkdir -p "$PIP_CACHE_DIR"
       - python -m pip install -e '.[dev,redis]' ruff
       - ruff check src/coding_agent/observability/ src/coding_agent/ui/http_server.py src/coding_agent/ui/session_manager.py tests/ui/test_server_compat_imports.py tests/coding_agent/test_agent_observability.py tests/coding_agent/test_bee_template_pack_smoke.py
       - pytest tests/ui/test_server_compat_imports.py tests/coding_agent/test_agent_observability.py tests/coding_agent/test_bee_template_pack_smoke.py -q
