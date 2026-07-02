@@ -72,8 +72,11 @@ enabling semantic memory does not require a separate topic-store config, but
 operators still need to run an admin rebuild or dogfood topic flow before there
 is anything useful to recall.
 
-When KB/RAG and semantic memory are both enabled, semantic memory is registered
-before KB. KB can be configured with `defer_when_semantic_memory_hits = true` so
+When KB/RAG and semantic memory recall are both registered, semantic memory runs
+before KB. Semantic recall registration requires `[memory.semantic].enabled =
+true` and effective memory read to be enabled; if memory read is disabled, the
+semantic backend can still exist for write/maintenance paths, but recall is not
+injected. KB can be configured with `defer_when_semantic_memory_hits = true` so
 old KB context does not crowd out fresh topic-backed memory when semantic recall
 already found relevant durable memory. KB remains independent from the memory
 read/write switches.
