@@ -1,6 +1,6 @@
 # ADR-0070: Durable session retention and graceful drain
 
-**Status**: Proposed
+**Status**: Accepted
 **Date**: 2026-06-16
 
 ## Context
@@ -104,23 +104,27 @@ scope.
 
 ## Acceptance Criteria
 
-Implementation pending; landed as separate PRs (D1 then D2) after this docs PR.
-Intended tests and gating command:
+Implementation landed as separate PRs (D1 then D2) after this docs PR.
+Reconciled 2026-07-02 against the landed test names; for D1 ownership the
+implementation chose the "retain the owner lease across idle cleanup" option
+(the lease is preserved, not released — see
+`test_cleanup_idle_sessions_preserves_durable_session_and_history`).
 
-- [ ] `test_idle_cleanup_preserves_durable_session` — after idle cleanup, the
-  session row, tape, runs, and checkpoints still exist and `GET /sessions`
-  returns the session.
-- [ ] `test_idle_cleanup_shuts_down_runtime_and_releases_lease` — idle cleanup
-  frees the in-memory runtime and releases the owner lease.
-- [ ] `test_idle_cleaned_session_rebuilds_runtime_on_next_prompt` — a prompt
+- [x] `test_cleanup_idle_sessions_preserves_durable_session_and_history` —
+  after idle cleanup, the session row, tape, runs, and checkpoints still exist,
+  `GET /sessions` returns the session, and the owner lease is retained.
+- [x] `test_cleanup_idle_sessions_shuts_down_idle_runtimes_with_async_helpers`
+  — idle cleanup frees the in-memory runtime.
+- [x] `test_idle_cleaned_session_rebuilds_runtime_on_next_prompt` — a prompt
   after idle cleanup lazily rebuilds the runtime and proceeds.
-- [ ] `test_explicit_close_still_deletes_session` — explicit close/delete still
-  removes the durable row (D1 only changes the idle path).
-- [ ] `test_graceful_shutdown_drains_inflight_turn` — SIGTERM flushes/marks an
-  in-flight turn and releases leases within the grace period.
-- [ ] `test_helm_deployment_sets_graceful_drain` — chart renders a non-default
+- [x] `test_explicit_close_session_still_deletes_durable_session` — explicit
+  close/delete still removes the durable row (D1 only changes the idle path).
+- [x] `test_lifespan_shutdown_marks_active_turn_interrupted` — shutdown marks
+  an in-flight turn interrupted; lease release on shutdown is covered by
+  `test_release_owned_sessions_releases_current_owner_only`.
+- [x] `test_helm_deployment_sets_graceful_drain` — chart renders a non-default
   `terminationGracePeriodSeconds` and a `preStop`/SIGTERM drain path.
-- [ ] `uv run pytest tests/ui/test_http_server.py tests/ui/test_session_manager*.py tests/deploy/test_helm_chart.py -k "idle or drain or rehydrate" -q`
+- [x] `uv run pytest tests/ui/test_session_manager_public_api.py tests/ui/test_session_manager_owner_checks.py tests/ui/test_http_server.py tests/deploy/test_helm_chart.py -k "idle or drain or rehydrate or explicit_close or lifespan_shutdown or release_owned" -q` (17 passed, 2026-07-02)
 
 ## References
 

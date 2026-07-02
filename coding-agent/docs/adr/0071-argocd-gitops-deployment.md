@@ -1,6 +1,6 @@
 # ADR-0071: ArgoCD GitOps deployment for the o6n agent
 
-**Status**: Proposed
+**Status**: Accepted
 **Date**: 2026-06-16
 
 ## Context
@@ -84,19 +84,32 @@ o6n agent, replacing manual SSH `helm upgrade`.
 Deployment infrastructure; criteria are operational checks plus the existing
 chart/deploy guards that must keep passing.
 
-- [ ] Operational: an ArgoCD `Application` syncs the existing Helm release in the
-  o6n-prod namespace (`coding-agent-deepseek` — an environment-specific override;
-  the chart/deploy-script default is `coding-agent`) to Synced/Healthy from the
-  private values repo.
-- [ ] Operational: Image Updater promotes a new `:<sha>` by committing to the
-  private repo; ArgoCD sync rolls the Deployment to that exact tag.
-- [ ] Operational: ArgoCD rollback to the previous revision restores the prior
-  image and config.
-- [ ] `test_deploy_script_apply_mode_rejects_placeholder_image_repository` and
+Reconciled 2026-07-02. The `Application` and sync policy are owned by the
+private infra repo (`sre-infra:infra/k8s/o6n/argocd/apps/o6n-coding-agent.yaml`).
+Two landed details differ from the text below as written in June:
+promotion uses explicit `deploy(o6n): bump coding-agent image` commits pinning
+an exact `:<sha>` (not the argocd-image-updater component), and the "manual
+sync" clause has since graduated to `syncPolicy.automated` (prune/selfHeal off)
+per the planned manual→auto graduation — the auto-sync rejection above was
+explicitly conditioned on ADR-0070 D1/D2 not having landed, and both have
+landed. The sync-policy decision now lives with the infra repo, not this ADR.
+
+- [x] Operational: the ArgoCD `Application` `o6n-coding-agent` syncs the
+  existing Helm release in the o6n-prod namespace (`coding-agent-deepseek` — an
+  environment-specific override; the chart/deploy-script default is
+  `coding-agent`) to Synced/Healthy from the private values repo (verified live
+  2026-06-17).
+- [x] Operational: a new `:<sha>` is promoted by committing an image-tag bump
+  to the private repo; ArgoCD sync rolls the Deployment to that exact tag
+  (bump commits in continuous use since 2026-06).
+- [x] Operational: rollback to the previous revision restores the prior image
+  and config by reverting the bump commit in the private repo (Git is the
+  source of truth).
+- [x] `test_deploy_script_apply_mode_rejects_placeholder_image_repository` and
   `test_deploy_script_apply_mode_rejects_example_values_without_content` keep
   passing (no public-repo values regression, PR #600).
-- [ ] `test_helm_chart_lints` and the chart render contract tests keep passing.
-- [ ] Existing deploy-script and helm-chart guard tests pass: `uv run pytest tests/deploy/test_deploy_script.py tests/deploy/test_helm_chart.py -q`
+- [x] `test_helm_chart_lints` and the chart render contract tests keep passing.
+- [x] Existing deploy-script and helm-chart guard tests pass: `uv run pytest tests/deploy/test_deploy_script.py tests/deploy/test_helm_chart.py -q` (60 passed, 2026-07-02)
 
 ## References
 
