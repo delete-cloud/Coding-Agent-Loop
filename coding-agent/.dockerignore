@@ -1,0 +1,23 @@
+# Python/test/local generated artifacts
+__pycache__/
+**/__pycache__/
+*.py[cod]
+**/*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.DS_Store
+**/.DS_Store
+
+# Frontend generated/local artifacts
+webui/app/node_modules/
+webui/app/dist/
+webui/app/tsconfig.tsbuildinfo
+webui/app/.vite/
+webui/app/.vitest/
+webui/app/coverage/
