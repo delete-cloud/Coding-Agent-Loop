@@ -34,13 +34,15 @@ WORKDIR /app
 RUN PIP_INDEX_URL="${PIP_INDEX_URL}" pip install --no-cache-dir uv
 
 COPY pyproject.toml uv.lock README.md ./
-COPY src ./src
 
 RUN python -m venv /app/.venv \
     && UV_DEFAULT_INDEX="${UV_DEFAULT_INDEX}" uv export --frozen --no-dev --extra redis --no-emit-project --no-hashes --output-file /tmp/requirements.txt > /dev/null \
     && PIP_INDEX_URL="${PIP_INDEX_URL}" /app/.venv/bin/python -m pip install --upgrade pip \
-    && PIP_INDEX_URL="${PIP_INDEX_URL}" /app/.venv/bin/python -m pip install --no-cache-dir -r /tmp/requirements.txt \
-    && PIP_INDEX_URL="${PIP_INDEX_URL}" /app/.venv/bin/python -m pip install --no-cache-dir --no-deps .
+    && PIP_INDEX_URL="${PIP_INDEX_URL}" /app/.venv/bin/python -m pip install --no-cache-dir -r /tmp/requirements.txt
+
+COPY src ./src
+
+RUN PIP_INDEX_URL="${PIP_INDEX_URL}" /app/.venv/bin/python -m pip install --no-cache-dir --no-deps .
 
 
 FROM ${PYTHON_BASE_IMAGE} AS runtime
