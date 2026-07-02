@@ -1,6 +1,6 @@
 # ADR-0073: Add SQLite TopicStore parity for local durable storage
 
-**Status**: Proposed
+**Status**: Accepted
 **Date**: 2026-06-26
 
 ## Context
@@ -17,31 +17,29 @@ clearing the derived backend: durable finalized topics plus accepted reviewed
 memories. If no complete durable TopicStore authority is selected, destructive
 rebuild must fail before clearing semantic backend documents.
 
-The current durable TopicStore authority is PostgreSQL-only.
-`src/coding_agent/topics/store.py` provides `PGTopicStore`, and console topic
-helpers in `src/coding_agent/server/http_server.py` still construct that store
+At proposal time, the durable TopicStore authority was PostgreSQL-only.
+`src/coding_agent/topics/store.py` provided `PGTopicStore`, and console topic
+helpers in `src/coding_agent/server/http_server.py` constructed that store
 directly for PG-backed deployments. Local SQLite durable deployments already
-persist session, tape, checkpoint, and runtime state in `local.sqlite3`, but
-they do not have durable topic tables or a selected durable topic store.
+persisted session, tape, checkpoint, and runtime state in `local.sqlite3`, but
+they did not have durable topic tables or a selected durable topic store.
 
-That gap prevents topic-backed semantic rebuild from becoming complete on
+That gap prevented topic-backed semantic rebuild from becoming complete on
 SQLite, o6n, and local durable deployments. This ADR clarifies ADR-0072 by
 defining SQLite TopicStore parity and the product-layer selection boundary
 required before local/o6n semantic maintenance can rely on durable topics. It
-does not supersede ADR-0072 and does not mark ADR-0072 accepted.
+does not supersede ADR-0072.
 
 ## Decision
 
-No implementation starts until this ADR draft and the matching task packet pass
-P1/P2 review. This ADR may move from `Proposed` to `Accepted` only after the
-implementation PR proves the acceptance criteria below. The repository supports
-only `Proposed`, `Accepted`, and `Superseded` ADR statuses.
+The implementation has satisfied the acceptance criteria below. The repository
+supports only `Proposed`, `Accepted`, and `Superseded` ADR statuses.
 
-Add SQLite-backed TopicStore parity for the local SQLite durable path. The store
-and its selection are Coding Agent product-layer policy; TopicStore selection is
-not an AgentKit core primitive.
+SQLite-backed TopicStore parity exists for the local SQLite durable path. The
+store and its selection are Coding Agent product-layer policy; TopicStore
+selection is not an AgentKit core primitive.
 
-Add one product-layer selected store surface, such as
+The product-layer selected store surface is
 `SessionManager.selected_topic_store()`:
 
 - local SQLite durable bundle selects `SQLiteTopicStore` on the same normalized
@@ -57,8 +55,8 @@ destructive rebuild remains unavailable and must fail before clearing the
 semantic backend. Console helpers must use the product selected-store surface
 instead of constructing `PGTopicStore` directly.
 
-Add a lower-level `SQLiteTopicStore` in the Coding Agent topic layer with the
-same model and validation semantics as `PGTopicStore`. The SQLite schema owns:
+`SQLiteTopicStore` lives in the Coding Agent topic layer with the same model
+and validation semantics as `PGTopicStore`. The SQLite schema owns:
 
 - `topics`
 - `topic_anchors`
@@ -133,22 +131,20 @@ tape_id)`, FK-like parent existence for anchors, recall links, and costs, and
 cascade behavior where the contract depends on it. Adjust the existing cost
 aggregate test so it creates the parent topic first.
 
-Add an integration-style SQLite upgrade test through `SQLiteLocalDurableStore`
-or `SessionManager`: seed an existing local bundle with session, tape,
+The SQLite upgrade tests seed an existing local bundle with session, tape,
 checkpoint, runtime, and `session_tapes` data; initialize the upgraded bundle;
-assert existing data survives and topic tables/indexes exist.
+and assert existing data survives and topic tables/indexes exist.
 
 For Helm and o6n, the default chart with SQLite storage derives the selected
 TopicStore from the existing `[storage.paths].local` path. No new topic backend
 configuration is required. `[memory.semantic]` remains disabled by default and
 is rendered only when explicitly configured.
 
-The implementation PR must also update `docs/topic_layer/USAGE.md` and the
-architecture docs from PG-only topic storage to a SQLite/PG split before this
-ADR can be accepted. SQLite is the durable TopicStore for single-replica
-local/o6n usage; PG remains the durable TopicStore for multi-instance
-deployments. These docs are part of the acceptance gate, not a separate
-follow-up after the implementation is otherwise done.
+The implementation includes updates to `docs/topic_layer/USAGE.md` and the
+architecture docs that replace the old PG-only topic-storage model with the
+SQLite/PG split. SQLite is the durable TopicStore for single-replica local/o6n
+usage; PG remains the durable TopicStore for multi-instance deployments. These
+docs are part of the accepted decision, not a separate follow-up.
 
 No vector backend expansion is part of this decision. The semantic index remains
 a derived cache over the selected durable sources.
@@ -171,53 +167,60 @@ a derived cache over the selected durable sources.
 
 ## Acceptance Criteria
 
-Implementation is pending. These checks define the gate for accepting this ADR
-after the implementation PR lands.
+The implementation landed in product code and executable tests. These checks
+record the proof used to accept this ADR.
 
-- [ ] `tests/coding_agent/test_topic_store_contract.py::test_topic_store_contract_create_is_idempotent_by_topic_id`
-- [ ] `tests/coding_agent/test_topic_store_contract.py::test_topic_store_contract_rejects_duplicate_open_topic_for_session_tape`
-- [ ] `tests/coding_agent/test_topic_store_contract.py::test_topic_store_contract_rejects_orphan_anchor_recall_and_cost_records`
-- [ ] `tests/coding_agent/test_topic_store_contract.py::test_topic_store_contract_cascades_child_rows_with_parent_topic`
-- [ ] `tests/coding_agent/test_topic_store_contract.py::test_topic_store_contract_cursor_requires_created_at_and_topic_id_together`
-- [ ] `tests/coding_agent/test_topic_store_contract.py::test_topic_store_contract_cursor_paginates_by_created_at_topic_id_with_equal_timestamp_tiebreak`
-- [ ] `tests/coding_agent/test_topic_store_contract.py::test_topic_store_contract_finalize_and_abort_only_open_topics`
-- [ ] `tests/coding_agent/test_topic_store_contract.py::test_topic_store_contract_records_anchors_recall_links_and_cost_increments`
-- [ ] `tests/coding_agent/test_topic_store_contract.py::test_topic_store_contract_validation_parity_for_safe_fields_and_ranges`
-- [ ] `tests/coding_agent/test_topic_store.py::test_pg_topic_store_schema_has_required_topic_tables_indexes_and_constraints`
-- [ ] `tests/coding_agent/test_topic_store.py::test_pg_topic_store_cost_aggregate_requires_parent_topic`
-- [ ] `tests/coding_agent/test_sqlite_topic_store.py::test_sqlite_topic_store_enables_foreign_keys_on_each_connection`
-- [ ] `tests/coding_agent/test_sqlite_topic_store.py::test_sqlite_topic_store_stores_metadata_as_json_text_without_json_extension`
-- [ ] `tests/coding_agent/test_sqlite_topic_store.py::test_sqlite_topic_store_datetime_text_is_fixed_width_utc_and_round_trips_aware`
-- [ ] `tests/coding_agent/test_sqlite_topic_store.py::test_sqlite_topic_store_schema_is_idempotent`
-- [ ] `tests/coding_agent/test_sqlite_local_durable_fencing.py::test_fenced_sqlite_topic_mutations_reject_stale_owner_for_all_mutators`
-- [ ] `tests/coding_agent/test_sqlite_local_durable_fencing.py::test_fenced_sqlite_topic_mutations_reject_cross_session_targets_for_all_mutators`
-- [ ] `tests/coding_agent/test_sqlite_local_durable_fencing.py::test_sqlite_local_durable_upgrade_preserves_existing_bundle_and_adds_topic_schema`
-- [ ] `tests/ui/test_session_manager_runtime.py::test_selected_topic_store_returns_fenced_sqlite_store_for_local_durable_bundle`
-- [ ] `tests/ui/test_session_manager_runtime.py::test_selected_topic_store_returns_pg_topic_store_for_pg_durable_mode`
-- [ ] `tests/ui/test_session_manager_runtime.py::test_selected_topic_store_is_none_for_custom_or_mixed_storage`
-- [ ] `tests/ui/test_session_manager_runtime.py::test_ensure_session_runtime_threads_selected_sqlite_topic_store_to_create_agent`
-- [ ] `tests/ui/test_session_manager_runtime.py::test_ensure_session_runtime_threads_selected_pg_topic_store_to_create_agent`
-- [ ] `tests/coding_agent/test_runtime_preparation.py::test_local_daemon_runtime_preparation_threads_selected_topic_store_to_create_agent`
-- [ ] `tests/ui/test_session_manager_runtime.py::test_checkpoint_restore_threads_selected_topic_store_to_create_agent`
-- [ ] `tests/ui/test_http_server.py::test_console_topic_helpers_use_selected_topic_store`
-- [ ] `tests/ui/test_http_server.py::test_console_topic_helpers_fall_back_to_run_metadata_without_selected_topic_store`
-- [ ] `tests/coding_agent/test_semantic_maintenance.py::test_semantic_maintenance_factory_unavailable_when_semantic_disabled`
-- [ ] `tests/coding_agent/test_semantic_maintenance.py::test_semantic_maintenance_factory_reports_topic_store_available_when_selected`
-- [ ] `tests/coding_agent/test_semantic_maintenance.py::test_semantic_maintenance_product_rebuild_indexes_finalized_topics_and_accepted_memories`
-- [ ] `tests/coding_agent/test_semantic_maintenance.py::test_semantic_maintenance_product_rebuild_document_ids_are_stable_across_rebuild`
-- [ ] `tests/coding_agent/test_semantic_maintenance.py::test_semantic_maintenance_product_rebuild_without_selected_topic_store_fails_before_clear`
-- [ ] `tests/deploy/test_helm_chart.py::test_helm_default_config_derives_local_sqlite_topic_store_path`
-- [ ] `tests/deploy/test_helm_chart.py::test_helm_default_config_does_not_render_or_enable_memory_semantic`
-- [ ] `docs/topic_layer/USAGE.md` documents SQLite/PG TopicStore backend split after implementation.
-- [ ] `docs/AGENTKIT-ARCHITECTURE.md` and `docs/CODING-AGENT-ARCHITECTURE.md` preserve the AgentKit/Coding Agent boundary after implementation.
-- [ ] `uv run pytest tests/coding_agent/test_topic_store_contract.py tests/coding_agent/test_topic_store.py tests/coding_agent/test_sqlite_topic_store.py -v`
-- [ ] `uv run pytest tests/coding_agent/test_sqlite_local_durable_fencing.py -k "topic or upgrade" -v`
-- [ ] `uv run pytest tests/ui/test_session_manager_runtime.py -k "topic_store or semantic_topic_store or checkpoint_restore" -v`
-- [ ] `uv run pytest tests/coding_agent/test_runtime_preparation.py -k "semantic_topic_store or local_daemon" -v`
-- [ ] `uv run pytest tests/ui/test_http_server.py -k "console_topic" -v`
-- [ ] `uv run pytest tests/coding_agent/test_semantic_maintenance.py -k "factory or topic_store_available or rebuild" -v`
-- [ ] `uv run pytest tests/deploy/test_helm_chart.py -k "topic_store or memory_semantic or storage" -v`
-- [ ] `git diff --check -- docs/topic_layer/USAGE.md docs/AGENTKIT-ARCHITECTURE.md docs/CODING-AGENT-ARCHITECTURE.md`
+- [x] `tests/coding_agent/test_topic_store_contract.py::test_topic_store_contract_create_is_idempotent_by_topic_id[pg]`
+- [x] `tests/coding_agent/test_topic_store_contract.py::test_topic_store_contract_create_is_idempotent_by_topic_id[sqlite]`
+- [x] `tests/coding_agent/test_topic_store_contract.py::test_topic_store_contract_rejects_duplicate_open_topic_for_session_tape[pg]`
+- [x] `tests/coding_agent/test_topic_store_contract.py::test_topic_store_contract_rejects_duplicate_open_topic_for_session_tape[sqlite]`
+- [x] `tests/coding_agent/test_topic_store_contract.py::test_topic_store_contract_rejects_orphan_anchor_recall_and_cost_records[pg]`
+- [x] `tests/coding_agent/test_topic_store_contract.py::test_topic_store_contract_rejects_orphan_anchor_recall_and_cost_records[sqlite]`
+- [x] `tests/coding_agent/test_topic_store_contract.py::test_topic_store_contract_rejects_anchor_tape_mismatch[pg]`
+- [x] `tests/coding_agent/test_topic_store_contract.py::test_topic_store_contract_rejects_anchor_tape_mismatch[sqlite]`
+- [x] `tests/coding_agent/test_topic_store_contract.py::test_topic_store_contract_cursor_requires_created_at_and_topic_id_together[pg]`
+- [x] `tests/coding_agent/test_topic_store_contract.py::test_topic_store_contract_cursor_requires_created_at_and_topic_id_together[sqlite]`
+- [x] `tests/coding_agent/test_topic_store_contract.py::test_topic_store_contract_cursor_paginates_by_created_at_topic_id_with_equal_timestamp_tiebreak[pg]`
+- [x] `tests/coding_agent/test_topic_store_contract.py::test_topic_store_contract_cursor_paginates_by_created_at_topic_id_with_equal_timestamp_tiebreak[sqlite]`
+- [x] `tests/coding_agent/test_topic_store_contract.py::test_topic_store_contract_records_anchors_recall_links_and_cost_increments[pg]`
+- [x] `tests/coding_agent/test_topic_store_contract.py::test_topic_store_contract_records_anchors_recall_links_and_cost_increments[sqlite]`
+- [x] `tests/coding_agent/test_topic_store.py::test_pg_topic_store_fake_enforces_open_topic_uniqueness`
+- [x] `tests/coding_agent/test_topic_store.py::test_pg_topic_store_fake_rejects_orphan_child_rows`
+- [x] `tests/coding_agent/test_topic_store.py::test_create_topic_returns_existing_record_without_reopening_closed_topic`
+- [x] `tests/coding_agent/test_topic_store.py::test_finalize_rejects_range_before_topic_initial_without_mutating`
+- [x] `tests/coding_agent/test_sqlite_topic_store.py::test_sqlite_topic_store_create_finalize_abort_and_list`
+- [x] `tests/coding_agent/test_sqlite_topic_store.py::test_sqlite_topic_store_cursor_paginates_by_created_at_topic_id`
+- [x] `tests/coding_agent/test_sqlite_topic_store.py::test_sqlite_topic_store_enforces_open_topic_and_parent_constraints`
+- [x] `tests/coding_agent/test_sqlite_topic_store.py::test_sqlite_topic_store_records_children_and_costs`
+- [x] `tests/coding_agent/test_sqlite_topic_store.py::test_sqlite_topic_store_serializes_json_and_utc_datetimes_stably`
+- [x] `tests/coding_agent/test_sqlite_local_durable_fencing.py::test_session_manager_selects_sqlite_topic_store_for_local_durable_bundle`
+- [x] `tests/coding_agent/test_sqlite_local_durable_fencing.py::test_sqlite_local_durable_upgrade_preserves_existing_data_and_adds_topic_schema`
+- [x] `tests/coding_agent/test_sqlite_local_durable_fencing.py::test_fenced_sqlite_topic_mutations_reject_stale_owner_for_all_mutators`
+- [x] `tests/coding_agent/test_sqlite_local_durable_fencing.py::test_fenced_sqlite_topic_mutations_reject_cross_session_targets`
+- [x] `tests/ui/test_session_manager_runtime.py::test_selected_topic_store_returns_fenced_sqlite_store_for_local_durable_bundle`
+- [x] `tests/ui/test_session_manager_runtime.py::test_selected_topic_store_uses_normalized_local_bundle_path`
+- [x] `tests/ui/test_session_manager_runtime.py::test_selected_topic_store_returns_pg_topic_store_for_pg_durable_mode`
+- [x] `tests/ui/test_session_manager_runtime.py::test_selected_topic_store_is_none_for_custom_or_mixed_storage`
+- [x] `tests/ui/test_session_manager_runtime.py::test_sqlite_durable_semantic_rebuild_recalled_by_later_build_context_without_backend_hit_text`
+- [x] `tests/coding_agent/test_runtime_preparation.py::test_runtime_preparation_threads_semantic_topic_store_to_create_agent`
+- [x] `tests/coding_agent/test_runtime_preparation.py::test_runtime_preparation_service_prepare_runtime_threads_semantic_topic_store`
+- [x] `tests/ui/test_http_server.py::test_console_topic_store_uses_session_manager_selected_topic_store`
+- [x] `tests/coding_agent/test_semantic_maintenance.py::test_semantic_maintenance_factory_unavailable_when_semantic_disabled`
+- [x] `tests/coding_agent/test_semantic_maintenance.py::test_semantic_maintenance_factory_reports_topic_store_available_when_selected`
+- [x] `tests/coding_agent/test_semantic_maintenance.py::test_semantic_maintenance_rebuild_requires_topic_store_before_clearing`
+- [x] `tests/coding_agent/test_semantic_maintenance.py::test_semantic_maintenance_rebuild_scans_topic_store_in_pages`
+- [x] `tests/deploy/test_helm_chart.py::test_helm_default_config_derives_local_sqlite_topic_store_path`
+- [x] `tests/deploy/test_helm_chart.py::test_helm_default_config_does_not_render_or_enable_memory_semantic`
+- [x] `docs/topic_layer/USAGE.md` documents the SQLite/PG TopicStore backend split.
+- [x] `docs/AGENTKIT-ARCHITECTURE.md` and `docs/CODING-AGENT-ARCHITECTURE.md` preserve the AgentKit/Coding Agent boundary.
+- [x] `uv run pytest tests/coding_agent/test_topic_store_contract.py tests/coding_agent/test_topic_store.py tests/coding_agent/test_sqlite_topic_store.py -v`
+- [x] `uv run pytest tests/coding_agent/test_sqlite_local_durable_fencing.py -k "topic or upgrade" -v`
+- [x] `uv run pytest tests/ui/test_session_manager_runtime.py -k "topic_store or semantic_topic_store or checkpoint_restore" -v`
+- [x] `uv run pytest tests/coding_agent/test_runtime_preparation.py -k "semantic_topic_store or local_daemon" -v`
+- [x] `uv run pytest tests/ui/test_http_server.py -k "console_topic" -v`
+- [x] `uv run pytest tests/coding_agent/test_semantic_maintenance.py -k "factory or topic_store_available or rebuild" -v`
+- [x] `uv run pytest tests/deploy/test_helm_chart.py -k "topic_store or memory_semantic or storage" -v`
+- [x] `git diff --check -- docs/topic_layer/USAGE.md docs/AGENTKIT-ARCHITECTURE.md docs/CODING-AGENT-ARCHITECTURE.md`
 
 ## Non-Goals
 

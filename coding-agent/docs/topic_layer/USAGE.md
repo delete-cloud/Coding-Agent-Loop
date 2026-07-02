@@ -47,6 +47,37 @@ Topic-backed semantic full rebuild requires a selected durable `TopicStore` and
 must fail before clearing any derived semantic backend if no complete durable
 topic authority is available.
 
+## Semantic Memory
+
+Semantic memory is a derived index over finalized topic summaries and accepted
+reviewed memories. The durable topic/review stores remain authoritative; the
+semantic backend is only a rebuildable cache used for recall. Semantic recall
+rehydrates hits from the authoritative stores before rendering and drops stale,
+missing, unfinalized, rejected, or archived hits.
+
+Supported semantic memory backends today are:
+
+- `fake` for tests and local wiring checks;
+- `lancedb` for the product vector backend.
+
+Chroma, Milvus, pgvector, and other adapters are not implemented. Any new
+adapter must satisfy the semantic backend contract tests before it can be used
+by the product recall path.
+
+`[memory.semantic]` is disabled by default. Helm/o6n deployments must opt in
+explicitly with values such as `memory.semantic.enabled=true`, backend settings,
+embedding schema settings, and an embedding API key exposed to the pod. The
+default SQLite durable path already provides the selected `SQLiteTopicStore`;
+enabling semantic memory does not require a separate topic-store config, but
+operators still need to run an admin rebuild or dogfood topic flow before there
+is anything useful to recall.
+
+When KB/RAG and semantic memory are both enabled, semantic memory is registered
+before KB. KB can be configured with `defer_when_semantic_memory_hits = true` so
+old KB context does not crowd out fresh topic-backed memory when semantic recall
+already found relevant durable memory. KB remains independent from the memory
+read/write switches.
+
 ## Verification
 
 Focused smoke:
