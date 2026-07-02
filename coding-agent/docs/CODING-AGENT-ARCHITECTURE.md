@@ -951,14 +951,34 @@ records instead of inferring topic switches from raw tool-call file overlap.
 
 ### Memory Grounding
 
-`MemoryPlugin` operates in two modes:
+`MemoryPlugin` is the default non-semantic memory plugin. Its read and write
+halves are controlled by `[memory].enabled`, `[memory].read_enabled`, and
+`[memory].write_enabled`:
 
-1. **Grounding** (`build_context` hook): Injects top-N relevant memories as system messages before each LLM call. Filters by topic file overlap when available.
+1. **Grounding** (`build_context` hook): Injects relevant memory references as
+   system messages before each LLM call. Topic recall planning derives its
+   enablement from the effective memory read switch.
 
-2. **Extraction** (`on_turn_end` hook): Produces a `MemoryRecord` with:
-   - `summary`: Last 200 chars of assistant message
-   - `tags`: Tool names + file paths extracted from tape
-   - `importance`: Heuristic score (0-1) based on tool call count and message count
+2. **Extraction** (`on_turn_end` hook and topic/session events): Produces
+   `MemoryRecord` directives and topic-derived review candidates when effective
+   memory write is enabled. Disabling memory writes does not disable tape
+   persistence, topic anchors, checkpoints, or runtime replay.
+
+`SemanticMemoryPlugin` is optional and product-specific. It is registered for
+recall only when `[memory.semantic].enabled = true` and effective memory read is
+enabled. When semantic memory is enabled but memory read is disabled, Coding
+Agent may still construct the semantic backend for write/maintenance paths, but
+it does not register the recall plugin. The semantic backend is a derived index
+over finalized topic summaries and accepted reviewed memories; it is not tape
+authority. Recall uses the vector hit only as an identity hint, then rehydrates
+from the authoritative TopicStore or review store before rendering. The current
+backend adapters are `fake` and `lancedb`; Chroma, Milvus, and pgvector are not
+implemented.
+
+When semantic memory recall and KB are both registered, semantic memory runs
+before KB. KB can set `defer_when_semantic_memory_hits = true` so stale or broad
+KB context does not crowd out fresh topic-backed memory. KB remains independent
+from the memory privacy switches.
 
 ---
 

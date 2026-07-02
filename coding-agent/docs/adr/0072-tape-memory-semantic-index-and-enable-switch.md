@@ -1,6 +1,6 @@
 # ADR-0072: Tape-native memory — semantic index v0 and read/write enable switch
 
-**Status**: Proposed
+**Status**: Accepted
 **Date**: 2026-06-24
 
 ## Context
@@ -72,8 +72,8 @@ A small generic settings dataclass may live in AgentKit if hook plumbing needs
 one, but the `[memory]` entry, persistence of that choice, defaults, and any UI
 or CLI surface stay in `coding_agent`.
 
-Decision B: after the switch PR, add semantic tape index v0 as an optional,
-opt-in embedding/vector retrieval backend that coexists with `TopicRangeIndex`.
+Decision B: semantic tape index v0 is an optional, opt-in embedding/vector
+retrieval backend that coexists with `TopicRangeIndex`.
 Semantic retrieval is off by default until explicit product configuration
 enables it. Semantic retrieval is hybrid support, not substitution.
 Deterministic topic range search remains available without embedding
@@ -150,8 +150,8 @@ Destructive full rebuilds must be backed by the complete authoritative source
 set before they clear or replace the derived semantic backend. The required
 authorities are finalized topics from a durable `TopicStore` and accepted
 reviewed memories from the review store. A deployment path that does not expose
-a durable topic authority, including the current local SQLite durable bundle
-before a `SQLiteTopicStore` exists, must fail the rebuild loudly before
+a durable topic authority, such as custom, mixed, or non-durable storage modes
+with no selected durable `TopicStore`, must fail the rebuild loudly before
 clearing semantic documents. Read-only maintenance status may still report
 `topic_store_available = false`, but that status is not permission to rebuild
 from a partial source set.
@@ -223,9 +223,9 @@ not receive a full tape snapshot for this maintenance seed. After commit, the
 live runtime context's tape is updated to the committed stable tape so later
 turns see the anchors.
 
-PR2 must create a reusable backend contract test suite against a fake or
-in-memory semantic backend. LanceDB, Chroma, Milvus, pgvector, or any later
-adapter must run the same suite when added.
+The implementation includes a reusable backend contract test suite against the
+fake semantic backend and the LanceDB adapter. Chroma, Milvus, pgvector, or any
+later adapter must run the same suite when added.
 
 OpenDAL is out of scope for this decision. If it is introduced later, it can be
 a `BlobStore`, artifact, or archive layer, but not a `TapeStore` replacement:
@@ -249,11 +249,13 @@ blob abstraction does not provide.
 
 ## Acceptance Criteria
 
-Implementation is staged. The read/write switch, semantic backend contract,
-LanceDB backend, sync/review transition wiring, and maintenance rebuild guard
-have started landing across PRs. The checklist records the required proof for
-accepting this ADR; checked items have named executable coverage, while
-unchecked items remain required by the ADR.
+Implementation has landed across the read/write switch, semantic backend
+contract, LanceDB backend, sync/review transition wiring, maintenance rebuild
+guard, dogfood maintenance surface, Helm opt-in config, and semantic/KB recall
+ordering. The checklist records the executable proof used to accept this ADR.
+Production deployments, including o6n, still have to opt in explicitly through
+`[memory.semantic]`; acceptance of this ADR does not enable semantic memory by
+default or add vector adapters beyond the current fake and LanceDB backends.
 
 - [x] `tests/coding_agent/test_memory_switch.py::test_read_off_suppresses_grounding_injection`
 - [x] `tests/coding_agent/test_memory_switch.py::test_recall_planner_enabled_is_derived_from_effective_read`
@@ -307,6 +309,15 @@ unchecked items remain required by the ADR.
 - [x] `tests/ui/test_http_server.py::TestSemanticMemoryMaintenance::test_semantic_rebuild_owner_conflict_maps_to_http_conflict`
 - [x] `tests/coding_agent/test_memory_switch.py::test_semantic_enabled_fake_backend_registers_plugin_and_exposes_index_by_default`
 - [x] `tests/coding_agent/test_memory_switch.py::test_semantic_enabled_with_read_disabled_exposes_index_without_registering_plugin`
+- [x] `tests/coding_agent/test_memory_switch.py::test_semantic_enabled_lancedb_backend_uses_configured_local_path`
+- [x] `tests/coding_agent/test_memory_switch.py::test_semantic_enabled_lancedb_backend_uses_configured_embedding_schema`
+- [x] `tests/deploy/test_helm_chart.py::test_helm_default_config_does_not_render_or_enable_memory_semantic`
+- [x] `tests/deploy/test_helm_chart.py::test_helm_semantic_memory_enabled_renders_config`
+- [x] `tests/deploy/test_helm_chart.py::test_helm_semantic_memory_runs_before_kb_when_both_enabled`
+- [x] `tests/deploy/test_helm_chart.py::test_helm_semantic_memory_enabled_bootstraps_runtime`
+- [x] `tests/deploy/test_helm_chart.py::test_helm_kb_enabled_can_defer_when_semantic_memory_hits`
+- [x] `tests/coding_agent/test_semantic_recall.py::test_current_query_prefers_recent_semantic_topic_over_stale_deterministic_topic`
+- [x] `tests/coding_agent/test_semantic_recall.py::test_derived_current_query_prefers_recent_semantic_topic`
 - [x] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_accept_candidate_updates_semantic_index`
 - [x] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_reject_candidate_deletes_stale_semantic_index`
 - [x] `tests/ui/test_http_server.py::TestMemoryReviewTransitions::test_missing_candidate_returns_404_without_index_side_effects`
