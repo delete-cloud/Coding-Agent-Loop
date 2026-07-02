@@ -11,14 +11,18 @@ steps:
       PIP_DEFAULT_TIMEOUT: "120"
       PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple
       PIP_CACHE_DIR: /cache/pip/coding-agent-loop
+      UV_DEFAULT_INDEX: https://mirrors.aliyun.com/pypi/simple
+      UV_CACHE_DIR: /cache/uv/coding-agent-loop
+      UV_LINK_MODE: copy
     volumes:
       - woodpecker-runner-cache:/cache
     commands:
       - cd coding-agent
-      - mkdir -p "$PIP_CACHE_DIR"
-      - python -m pip install -e '.[dev,redis]' ruff
-      - ruff check src/coding_agent/observability/ src/coding_agent/ui/http_server.py src/coding_agent/ui/session_manager.py tests/ui/test_server_compat_imports.py tests/coding_agent/test_agent_observability.py tests/coding_agent/test_bee_template_pack_smoke.py
-      - pytest tests/ui/test_server_compat_imports.py tests/coding_agent/test_agent_observability.py tests/coding_agent/test_bee_template_pack_smoke.py -q
+      - mkdir -p "$PIP_CACHE_DIR" "$UV_CACHE_DIR"
+      - python -m pip install uv
+      - uv sync --frozen --extra redis --extra dev --no-group dev
+      - uv run --frozen --extra redis --extra dev --no-group dev --with ruff ruff check src/coding_agent/observability/ src/coding_agent/ui/http_server.py src/coding_agent/ui/session_manager.py tests/ui/test_server_compat_imports.py tests/coding_agent/test_agent_observability.py tests/coding_agent/test_bee_template_pack_smoke.py
+      - uv run --frozen --extra redis --extra dev --no-group dev pytest tests/ui/test_server_compat_imports.py tests/coding_agent/test_agent_observability.py tests/coding_agent/test_bee_template_pack_smoke.py -q
 
   build-image:
     image: gcr.io/kaniko-project/executor:v1.24.0-debug
