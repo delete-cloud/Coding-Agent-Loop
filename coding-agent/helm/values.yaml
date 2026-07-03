@@ -122,6 +122,8 @@ memory:
     embeddingModel: text-embedding-3-small
     embeddingDim: 1536
     embeddingBaseUrl: null
+    recallMinScore: null
+    recallMinOverlap: null
 
 kb:
   enabled: false

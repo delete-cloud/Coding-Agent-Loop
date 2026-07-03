@@ -73,6 +73,12 @@ data:
     {{- if .Values.memory.semantic.embeddingBaseUrl }}
     embedding_base_url = {{ .Values.memory.semantic.embeddingBaseUrl | quote }}
     {{- end }}
+    {{- if ne .Values.memory.semantic.recallMinScore nil }}
+    recall_min_score = {{ .Values.memory.semantic.recallMinScore }}
+    {{- end }}
+    {{- if ne .Values.memory.semantic.recallMinOverlap nil }}
+    recall_min_overlap = {{ .Values.memory.semantic.recallMinOverlap }}
+    {{- end }}
 
     {{- end }}
 

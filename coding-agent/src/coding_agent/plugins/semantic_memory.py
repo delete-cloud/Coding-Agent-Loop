@@ -23,6 +23,7 @@ from coding_agent.topics.recall_context import (
     TopicRecallPlannerInput,
     recall_context_messages,
 )
+from coding_agent.topics.recall_floor import validate_recall_floor
 from coding_agent.topics.semantic_index import SafeSemanticMemoryIndex
 from coding_agent.topics.semantic_recall import (
     SemanticRecallPlanner,
@@ -59,6 +60,8 @@ class SemanticMemoryPlugin:
         topic_store: SemanticTopicStore | None = None,
         topic_index: TopicRangeIndex | None = None,
         limit: int = 5,
+        recall_min_score: float | None = None,
+        recall_min_overlap: float | None = None,
     ) -> None:
         if limit <= 0:
             raise ValueError("limit must be positive")
@@ -66,6 +69,14 @@ class SemanticMemoryPlugin:
         self._memory_review_store = memory_review_store
         self._read_enabled = read_enabled
         self._limit = limit
+        self._recall_min_score = validate_recall_floor(
+            "recall_min_score",
+            recall_min_score,
+        )
+        self._recall_min_overlap = validate_recall_floor(
+            "recall_min_overlap",
+            recall_min_overlap,
+        )
         self._topic_store = _validate_topic_store(topic_store)
         self._topic_index = _validate_topic_index(topic_index)
         self._derived_topic_index: TopicRangeIndex | None = None
@@ -113,6 +124,8 @@ class SemanticMemoryPlugin:
             semantic_index=self._semantic_index,
             memory_review_store=self._memory_review_store,
             topic_store=self._topic_store,
+            recall_min_score=self._recall_min_score,
+            recall_min_overlap=self._recall_min_overlap,
         )
         source_session_id = session_id or "semantic-memory-legacy-context"
         plan = await planner.plan(

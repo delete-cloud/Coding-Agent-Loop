@@ -21,6 +21,7 @@ from coding_agent.plugins.semantic_memory import (
 )
 from coding_agent.topics.memory import (
     MemoryReviewStore,
+    ReviewedMemoryRecord,
     TopicDerivedMemoryCandidate,
 )
 from coding_agent.topics.range_index import TopicRangeIndex
@@ -51,6 +52,21 @@ class FakeTopicStore:
             for topic in self.topics.values()
             if topic.status == kwargs.get("status")
         )
+
+
+class SemanticOnlyReviewStore:
+    def __init__(self, records: tuple[ReviewedMemoryRecord, ...]) -> None:
+        self.records = {
+            record.candidate.candidate_id: record
+            for record in records
+            if record.candidate.candidate_id is not None
+        }
+
+    def accepted_memories(self) -> tuple[ReviewedMemoryRecord, ...]:
+        return ()
+
+    def load_memory(self, candidate_id: str) -> ReviewedMemoryRecord | None:
+        return self.records.get(candidate_id)
 
 
 @pytest.mark.asyncio
@@ -240,6 +256,56 @@ async def test_build_context_records_grounding_hit_count_in_pipeline_context() -
         "query_digest": semantic_grounding_query_digest("jwt middleware"),
         "tape_entry_count": len(tape),
         "hit_count": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_recall_min_score_filters_semantic_accepted_memory_hits() -> None:
+    accepted = ReviewedMemoryRecord(
+        candidate=TopicDerivedMemoryCandidate(
+            kind="fact",
+            title="Auth retry convention",
+            summary="Retry auth refresh once after a 401 before surfacing failure.",
+            scope="topic:topic-auth",
+            tags=("auth", "retry"),
+            confidence=0.8,
+            provenance={
+                "topic_id": "topic-auth",
+                "topic_status": "finalized",
+                "topic_kind": "coding",
+                "source_entry_ranges": [
+                    {"topic_id": "topic-auth", "start_seq": 2, "end_seq": 9}
+                ],
+            },
+            candidate_id="memory-low-score",
+        ),
+        status="accepted",
+    )
+    index = SafeSemanticMemoryIndex(FakeSemanticMemoryBackend())
+    await index.upsert(
+        SemanticMemoryDocument(
+            memory_id=SemanticDocId.for_reviewed_memory(accepted),
+            text="auth unrelated",
+            metadata={"kind": "accepted_reviewed_memory"},
+            source_refs=(SemanticSourceRef.for_reviewed_memory(accepted),),
+        )
+    )
+    plugin = SemanticMemoryPlugin(
+        semantic_index=index,
+        memory_review_store=SemanticOnlyReviewStore((accepted,)),
+        read_enabled=True,
+        recall_min_score=0.75,
+    )
+    tape = _tape("auth retry")
+    ctx = PipelineContext(tape=tape)
+
+    result = await plugin.build_context(tape=tape, ctx=ctx)
+
+    assert result == []
+    assert ctx.config[SEMANTIC_MEMORY_GROUNDING_MARKER_KEY] == {
+        "query_digest": semantic_grounding_query_digest("auth retry"),
+        "tape_entry_count": len(tape),
+        "hit_count": 0,
     }
 
 

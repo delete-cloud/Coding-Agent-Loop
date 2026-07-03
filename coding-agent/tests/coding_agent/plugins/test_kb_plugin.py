@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -18,8 +19,19 @@ from coding_agent.kb import KB, DocumentChunk, KBSearchResult
 from coding_agent.plugins.kb import KBPlugin
 from coding_agent.plugins.semantic_memory import (
     SEMANTIC_MEMORY_GROUNDING_MARKER_KEY,
+    SemanticMemoryPlugin,
     semantic_grounding_query_digest,
 )
+from coding_agent.topics.memory import MemoryReviewStore
+from coding_agent.topics.range_index import TopicRangeIndex
+from coding_agent.topics.semantic_backends import FakeSemanticMemoryBackend
+from coding_agent.topics.semantic_index import (
+    SafeSemanticMemoryIndex,
+    SemanticDocId,
+    SemanticMemoryDocument,
+    SemanticSourceRef,
+)
+from coding_agent.topics.store import TopicRecord
 
 
 def _fake_embed(texts: list[str]) -> list[list[float]]:
@@ -42,6 +54,14 @@ class _MountContext:
         self.config = {"observation_sink": sink}
 
 
+class _SemanticTopicStore:
+    def __init__(self, topics: tuple[TopicRecord, ...]) -> None:
+        self._topics = {topic.topic_id: topic for topic in topics}
+
+    async def load_topic(self, topic_id: str) -> TopicRecord | None:
+        return self._topics.get(topic_id)
+
+
 def _span_by_name(sink: RecordingObservationSink, name: str) -> SpanRecord:
     matches = [span for span in sink.spans if span.name == name]
     assert len(matches) == 1
@@ -50,6 +70,23 @@ def _span_by_name(sink: RecordingObservationSink, name: str) -> SpanRecord:
 
 def _serialized_attributes(span: SpanRecord) -> str:
     return repr(sorted(span.attributes.items()))
+
+
+def _semantic_topic(topic_id: str) -> TopicRecord:
+    return TopicRecord(
+        topic_id=topic_id,
+        tape_id="tape-semantic",
+        session_id="session-semantic",
+        kind="coding",
+        status="finalized",
+        title="Restic deploy note",
+        summary="Restic backup deploy note.",
+        owner=None,
+        topic_initial_seq=2,
+        topic_finalized_seq=9,
+        created_at=datetime(2026, 6, 24, 9, 0, tzinfo=UTC),
+        finalized_at=datetime(2026, 6, 24, 9, 5, tzinfo=UTC),
+    )
 
 
 class TestKBPluginInit:
@@ -368,6 +405,48 @@ class TestBuildContextSearch:
 
         assert len(result) == 1
         assert "## Repo references" in result[0]["content"]
+
+    @pytest.mark.asyncio
+    async def test_subfloor_hits_zero_grounding_marker_and_kb_runs(
+        self,
+        indexed_plugin: KBPlugin,
+    ):
+        indexed_plugin._defer_when_semantic_memory_hits = True
+        topic = _semantic_topic("topic-restic")
+        semantic_index = SafeSemanticMemoryIndex(FakeSemanticMemoryBackend())
+        await semantic_index.upsert(
+            SemanticMemoryDocument(
+                memory_id=SemanticDocId.for_topic(topic),
+                text="restic unrelated",
+                metadata={"kind": "topic_summary"},
+                source_refs=(SemanticSourceRef.for_topic(topic),),
+            )
+        )
+        semantic_plugin = SemanticMemoryPlugin(
+            semantic_index=semantic_index,
+            memory_review_store=MemoryReviewStore(),
+            read_enabled=True,
+            topic_store=_SemanticTopicStore((topic,)),
+            topic_index=TopicRangeIndex(),
+            recall_min_score=0.75,
+        )
+        tape = Tape()
+        tape.append(
+            Entry(
+                kind="message",
+                payload={"role": "user", "content": "restic backup"},
+            )
+        )
+        ctx = PipelineContext(tape=tape)
+
+        assert await semantic_plugin.build_context(tape=tape, ctx=ctx) == []
+        assert ctx.config[SEMANTIC_MEMORY_GROUNDING_MARKER_KEY]["hit_count"] == 0
+
+        result = indexed_plugin.build_context(tape=tape, ctx=ctx)
+
+        assert len(result) == 1
+        assert "## Repo references" in result[0]["content"]
+        assert SEMANTIC_MEMORY_GROUNDING_MARKER_KEY not in ctx.config
 
     def test_defer_flag_does_not_skip_on_stale_semantic_marker(
         self, indexed_plugin: KBPlugin
