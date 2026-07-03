@@ -5,7 +5,7 @@ It intentionally omits prompts, model output, command stdout/stderr, URLs, envir
 
 ## Summary
 
-- Records: 17
+- Records: 20
 - Sessions: 5
 - Runs: 7
 - Topics: 0
@@ -32,3 +32,6 @@ It intentionally omits prompts, model output, command stdout/stderr, URLs, envir
 | 15 | 2026-07-03T01:24:43Z | record-run | run | session_id=46f5ca31-c49b-44f6-a82a-db83f7831e00; run_id=8cfea4729c3f475f8f1f46e29a23d387; tape_id=41731d4b-bd27-4e15-83ba-65bc5d41924e |  | run=completed |  |  |
 | 16 | 2026-07-03T01:24:44Z | probe | negative | session_id=46f5ca31-c49b-44f6-a82a-db83f7831e00; run_id=8cfea4729c3f475f8f1f46e29a23d387; tape_id=41731d4b-bd27-4e15-83ba-65bc5d41924e |  | run=completed | pass | note=no fabricated memory of nonexistent Redis decision; honest no-record answer (F7 also present: no grounding injected) |
 | 17 | 2026-07-03T01:56:11Z | probe | topic | session_id=b3929ac9-4fd6-4cd3-a102-d3473c4c7864; run_id=e13684576fcd423592a0ee6c1525e9f6; tape_id=dc60ec03-2b76-4af5-a3dd-7ac9476f60ca |  | run=completed | pass | note=topic recall works; snapshots show irrelevant topics score 0.10-0.14 injected for ALL queries, zero KB sections: no semantic threshold (D7), defer kills KB (D8) |
+| 18 | 2026-07-03T02:28:15Z | phase0 | health |  |  | healthz=http_200; readyz=http_200 |  |  |
+| 19 | 2026-07-03T02:28:18Z | phase0 | baseline-status | session_id=b3929ac9-4fd6-4cd3-a102-d3473c4c7864 | accepted_reviewed_memory_count=0; document_count=6; reviewed_memory_count=6 | topic_store_available=true |  |  |
+| 20 | 2026-07-03T02:28:21Z | phase0 | baseline-review-summary | session_id=b3929ac9-4fd6-4cd3-a102-d3473c4c7864 | review_count=0 |  |  |  |

@@ -156,9 +156,13 @@ def load_remote_config(name: str = REMOTE_NAME) -> RemoteConfig:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
-        raise HarnessError("Remotes file is not valid JSON.", ExitCode.USAGE_ERROR) from exc
+        raise HarnessError(
+            "Remotes file is not valid JSON.", ExitCode.USAGE_ERROR
+        ) from exc
     if not isinstance(raw, dict):
-        raise HarnessError("Remotes file must contain a JSON object.", ExitCode.USAGE_ERROR)
+        raise HarnessError(
+            "Remotes file must contain a JSON object.", ExitCode.USAGE_ERROR
+        )
     remotes = raw.get("remotes")
     if not isinstance(remotes, dict):
         raise HarnessError(
@@ -177,7 +181,9 @@ def load_remote_config(name: str = REMOTE_NAME) -> RemoteConfig:
     if not isinstance(url, str) or not url.strip():
         raise HarnessError(f"Remote {name!r} is missing url.", ExitCode.USAGE_ERROR)
     if token is not None and not isinstance(token, str):
-        raise HarnessError(f"Remote {name!r} has invalid user token.", ExitCode.USAGE_ERROR)
+        raise HarnessError(
+            f"Remote {name!r} has invalid user token.", ExitCode.USAGE_ERROR
+        )
     if admin_token_env is not None and not isinstance(admin_token_env, str):
         raise HarnessError(
             f"Remote {name!r} has invalid admin token env.",
@@ -287,7 +293,9 @@ def post_review_transition(
         ) from exc
 
 
-def run_remote_cli(args: list[str], *, timeout: int = CLI_TIMEOUT_SECONDS) -> CommandResult:
+def run_remote_cli(
+    args: list[str], *, timeout: int = CLI_TIMEOUT_SECONDS
+) -> CommandResult:
     command = ("uv", "run", "python", "-m", "coding_agent", *args)
     try:
         completed = subprocess.run(
@@ -300,9 +308,13 @@ def run_remote_cli(args: list[str], *, timeout: int = CLI_TIMEOUT_SECONDS) -> Co
             check=False,
         )
     except FileNotFoundError as exc:
-        raise HarnessError("uv is not available in PATH.", ExitCode.LOCAL_ENV_MISSING) from exc
+        raise HarnessError(
+            "uv is not available in PATH.", ExitCode.LOCAL_ENV_MISSING
+        ) from exc
     except subprocess.TimeoutExpired as exc:
-        raise HarnessError("Remote CLI command timed out.", ExitCode.UNREACHABLE) from exc
+        raise HarnessError(
+            "Remote CLI command timed out.", ExitCode.UNREACHABLE
+        ) from exc
     result = CommandResult(
         args=command,
         exit_code=int(completed.returncode),
@@ -335,7 +347,9 @@ def classify_cli_failure(result: CommandResult) -> HarnessError:
             "unreachable",
         )
     ):
-        return HarnessError("Remote CLI could not reach the endpoint.", ExitCode.UNREACHABLE)
+        return HarnessError(
+            "Remote CLI could not reach the endpoint.", ExitCode.UNREACHABLE
+        )
     return HarnessError(
         f"Remote CLI failed with exit code {result.exit_code}.",
         ExitCode.GATE_FAILED,
@@ -351,7 +365,9 @@ def parse_cli_mapping(stdout: str) -> dict[str, object]:
         match = CLI_MAPPING_KEY_RE.match(line)
         if match is None:
             if line.strip():
-                raise HarnessError("Unexpected CLI mapping output.", ExitCode.USAGE_ERROR)
+                raise HarnessError(
+                    "Unexpected CLI mapping output.", ExitCode.USAGE_ERROR
+                )
             index += 1
             continue
         key = match.group(1)
@@ -424,13 +440,19 @@ def fetch_memory_reviews(
     try:
         raw = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
-        raise HarnessError("Memory reviews output is not JSON.", ExitCode.GATE_FAILED) from exc
+        raise HarnessError(
+            "Memory reviews output is not JSON.", ExitCode.GATE_FAILED
+        ) from exc
     if not isinstance(raw, list):
-        raise HarnessError("Memory reviews output must be a JSON list.", ExitCode.GATE_FAILED)
+        raise HarnessError(
+            "Memory reviews output must be a JSON list.", ExitCode.GATE_FAILED
+        )
     reviews: list[dict[str, object]] = []
     for item in raw:
         if not isinstance(item, dict):
-            raise HarnessError("Memory review entry must be an object.", ExitCode.GATE_FAILED)
+            raise HarnessError(
+                "Memory review entry must be an object.", ExitCode.GATE_FAILED
+            )
         reviews.append(dict(item))
     return reviews
 
@@ -444,10 +466,14 @@ def parse_runs(stdout: str) -> list[RunRow]:
             continue
         columns = line.split("\t")
         if len(columns) != 4:
-            raise HarnessError("Remote runs output has unexpected columns.", ExitCode.GATE_FAILED)
+            raise HarnessError(
+                "Remote runs output has unexpected columns.", ExitCode.GATE_FAILED
+            )
         run_id, status, _executor_id, tape_id = columns
         if not run_id or not status:
-            raise HarnessError("Remote runs output is missing run_id/status.", ExitCode.GATE_FAILED)
+            raise HarnessError(
+                "Remote runs output is missing run_id/status.", ExitCode.GATE_FAILED
+            )
         normalized_tape_id = tape_id.strip()
         if normalized_tape_id.lower() in {"", "none", "null"}:
             normalized_tape_id = None
@@ -484,11 +510,19 @@ def seed_dogfood_topic(
         ]
     )
     parsed = parse_cli_mapping(result.stdout)
-    if "topic_id" not in parsed or "candidate_id" not in parsed or "warnings" not in parsed:
-        raise HarnessError("Dogfood-topic output is missing required fields.", ExitCode.GATE_FAILED)
+    if (
+        "topic_id" not in parsed
+        or "candidate_id" not in parsed
+        or "warnings" not in parsed
+    ):
+        raise HarnessError(
+            "Dogfood-topic output is missing required fields.", ExitCode.GATE_FAILED
+        )
     warnings = parsed["warnings"]
     if not isinstance(warnings, list):
-        raise HarnessError("Dogfood-topic warnings must be a list.", ExitCode.GATE_FAILED)
+        raise HarnessError(
+            "Dogfood-topic warnings must be a list.", ExitCode.GATE_FAILED
+        )
     return parsed
 
 
@@ -519,11 +553,28 @@ def status_flags(status: dict[str, object]) -> dict[str, str]:
     return {"topic_store_available": str(value).lower()}
 
 
-def ensure_topic_store_available(status: dict[str, object], *, phase: str) -> None:
-    if status_flags(status)["topic_store_available"] == "true":
+def ensure_topic_store_available(
+    status: dict[str, object],
+    *,
+    phase: str,
+    action: str,
+    session_id: str,
+) -> None:
+    statuses = status_flags(status)
+    if statuses["topic_store_available"] == "true":
         return
+    append_evidence(
+        {
+            "timestamp": utc_timestamp(),
+            "phase": phase,
+            "action": action,
+            "session_id": session_id,
+            "statuses": statuses,
+            "exit_code": int(ExitCode.GATE_FAILED),
+        }
+    )
     raise HarnessError(
-        f"topic_store_available is false during {phase}.",
+        f"topic_store_available is false during {action}.",
         ExitCode.GATE_FAILED,
     )
 
@@ -588,12 +639,16 @@ def record_reviews(
                 "candidate_id": safe_optional_string(review.get("candidate_id")),
                 "topic_id": safe_optional_string(review.get("topic_id")),
                 "tape_id": safe_optional_string(review.get("tape_id")),
-                "statuses": {"review": safe_evidence_status(review.get("status")) or "unknown"},
+                "statuses": {
+                    "review": safe_evidence_status(review.get("status")) or "unknown"
+                },
             }
         )
 
 
-def record_runs(*, phase: str, action: str, session_id: str, runs: list[RunRow]) -> None:
+def record_runs(
+    *, phase: str, action: str, session_id: str, runs: list[RunRow]
+) -> None:
     append_evidence(
         {
             "timestamp": utc_timestamp(),
@@ -678,7 +733,9 @@ def validate_evidence_record(record: dict[str, object]) -> None:
         raise ValueError("Evidence action must be a short safe identifier.")
     for key in ("session_id", "run_id", "tape_id", "topic_id", "candidate_id"):
         value = record.get(key)
-        if value is not None and not (isinstance(value, str) and SAFE_ID_RE.match(value)):
+        if value is not None and not (
+            isinstance(value, str) and SAFE_ID_RE.match(value)
+        ):
             raise ValueError(f"Evidence {key} must be a safe id or null.")
     validate_counts(record.get("counts"))
     validate_statuses(record.get("statuses"))
@@ -817,7 +874,12 @@ def command_seed(args: argparse.Namespace) -> None:
     remote = load_remote_config()
     require_admin_env(remote)
     before_status = fetch_memory_status(args.session)
-    ensure_topic_store_available(before_status, phase="seed-before")
+    ensure_topic_store_available(
+        before_status,
+        phase="seed",
+        action="seed-before",
+        session_id=args.session,
+    )
     before_count = status_counts(before_status)["document_count"]
     seed_result = seed_dogfood_topic(
         session_id=args.session,
@@ -842,7 +904,12 @@ def command_seed(args: argparse.Namespace) -> None:
         )
         raise HarnessError("Dogfood-topic returned warnings.", ExitCode.GATE_FAILED)
     after_status = fetch_memory_status(args.session)
-    ensure_topic_store_available(after_status, phase="seed-after")
+    ensure_topic_store_available(
+        after_status,
+        phase="seed",
+        action="seed-after",
+        session_id=args.session,
+    )
     after_count = status_counts(after_status)["document_count"]
     if after_count <= before_count:
         append_fail_record(
@@ -858,7 +925,9 @@ def command_seed(args: argparse.Namespace) -> None:
                 "after_document_count": after_count,
             },
         )
-        raise HarnessError("document_count did not increase after seed.", ExitCode.GATE_FAILED)
+        raise HarnessError(
+            "document_count did not increase after seed.", ExitCode.GATE_FAILED
+        )
     append_evidence(
         {
             "timestamp": utc_timestamp(),
@@ -923,7 +992,12 @@ def command_transition(args: argparse.Namespace) -> None:
     if args.status == "accepted":
         require_admin_env(remote)
         before_memory_status = fetch_memory_status(args.session)
-        ensure_topic_store_available(before_memory_status, phase="transition-before")
+        ensure_topic_store_available(
+            before_memory_status,
+            phase="transition",
+            action="transition-before",
+            session_id=args.session,
+        )
         before_accepted_count = status_counts(before_memory_status)[
             "accepted_reviewed_memory_count"
         ]
@@ -978,10 +1052,17 @@ def command_transition(args: argparse.Namespace) -> None:
             exit_code=ExitCode.GATE_FAILED,
             note=args.reason,
         )
-        raise HarnessError("Review transition did not verify through CLI.", ExitCode.GATE_FAILED)
+        raise HarnessError(
+            "Review transition did not verify through CLI.", ExitCode.GATE_FAILED
+        )
     if before_accepted_count is not None:
         after_memory_status = fetch_memory_status(args.session)
-        ensure_topic_store_available(after_memory_status, phase="transition-after")
+        ensure_topic_store_available(
+            after_memory_status,
+            phase="transition",
+            action="transition-after",
+            session_id=args.session,
+        )
         after_accepted_count = status_counts(after_memory_status)[
             "accepted_reviewed_memory_count"
         ]
@@ -1049,7 +1130,9 @@ def read_evidence_records() -> list[dict[str, object]]:
     if not EVIDENCE_PATH.exists():
         return []
     records: list[dict[str, object]] = []
-    for line_number, line in enumerate(EVIDENCE_PATH.read_text(encoding="utf-8").splitlines(), 1):
+    for line_number, line in enumerate(
+        EVIDENCE_PATH.read_text(encoding="utf-8").splitlines(), 1
+    ):
         if not line.strip():
             continue
         try:
@@ -1178,8 +1261,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    phase0 = subparsers.add_parser("phase0", help="Run phase 0 checks and baseline capture.")
-    phase0.add_argument("--session", help="Probe session ID after the operator creates it.")
+    phase0 = subparsers.add_parser(
+        "phase0", help="Run phase 0 checks and baseline capture."
+    )
+    phase0.add_argument(
+        "--session", help="Probe session ID after the operator creates it."
+    )
     phase0.set_defaults(func=command_phase0)
 
     record_run = subparsers.add_parser("record-run", help="Record remote run rows.")
@@ -1189,7 +1276,9 @@ def build_parser() -> argparse.ArgumentParser:
     seed = subparsers.add_parser("seed", help="Seed and gate one dogfood topic.")
     seed.add_argument("--session", required=True, help="Remote session ID.")
     seed.add_argument("--title", required=True, help="Permanent-quality seed title.")
-    seed.add_argument("--summary", required=True, help="Permanent-quality seed summary.")
+    seed.add_argument(
+        "--summary", required=True, help="Permanent-quality seed summary."
+    )
     seed.add_argument("--kind", default="coding", help="Seed topic kind.")
     seed.set_defaults(func=command_seed)
 
@@ -1229,7 +1318,9 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--session", required=True, help="Remote session ID.")
     status.set_defaults(func=command_status)
 
-    report = subparsers.add_parser("report", help="Render deterministic Markdown evidence.")
+    report = subparsers.add_parser(
+        "report", help="Render deterministic Markdown evidence."
+    )
     report.set_defaults(func=command_report)
 
     return parser
