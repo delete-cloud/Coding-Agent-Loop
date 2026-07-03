@@ -5,11 +5,11 @@ It intentionally omits prompts, model output, command stdout/stderr, URLs, envir
 
 ## Summary
 
-- Records: 20
-- Sessions: 5
-- Runs: 7
-- Topics: 0
-- Candidates: 0
+- Records: 26
+- Sessions: 8
+- Runs: 9
+- Topics: 1
+- Candidates: 1
 
 ## Records
 
@@ -35,3 +35,9 @@ It intentionally omits prompts, model output, command stdout/stderr, URLs, envir
 | 18 | 2026-07-03T02:28:15Z | phase0 | health |  |  | healthz=http_200; readyz=http_200 |  |  |
 | 19 | 2026-07-03T02:28:18Z | phase0 | baseline-status | session_id=b3929ac9-4fd6-4cd3-a102-d3473c4c7864 | accepted_reviewed_memory_count=0; document_count=6; reviewed_memory_count=6 | topic_store_available=true |  |  |
 | 20 | 2026-07-03T02:28:21Z | phase0 | baseline-review-summary | session_id=b3929ac9-4fd6-4cd3-a102-d3473c4c7864 | review_count=0 |  |  |  |
+| 21 | 2026-07-03T07:51:45Z | seed | seed | session_id=8723a76b-1454-408a-be8c-67656f56c25e; topic_id=topic-4e0d9019bef64fbf99e1603fc281cd68; candidate_id=memory-candidate-0cb8c4431755b285 | after_document_count=7; before_document_count=6; warning_count=0 | result=pass |  | kind=coding; title=ADR-0074 semantic recall relevance floors; summary=ADR-0074 added default-off recall_min_score and recall_min_overlap floors to semantic recall so irrelevant low-similarity topic hits no longer suppress KB retrieval through deferWhenSemanticMemoryHits. |
+| 22 | 2026-07-03T08:10:15Z | probe | topic | session_id=d287a58b-1fb7-4b7d-8c75-f4bf281f9eaa; run_id=68d34ef20c8f4a8aa9df25c23e17ce58; tape_id=fb1f01a1-6d04-4bff-a231-591eb2373a4e |  | run=completed | fail | note=restic regression r1 with floors 0.4/0.3: overlap noise gone but semantic noise band 0.433-0.450 passes 0.4 floor, KB still deferred; recalibrating recallMinScore to 0.5 (D9: bge-m3 short-summary bands barely separable) |
+| 23 | 2026-07-03T08:21:30Z | record-run | run-summary | session_id=34cfa3a6-1be9-4418-82bd-fa62ead27d0d | run_count=1 |  |  |  |
+| 24 | 2026-07-03T08:21:30Z | record-run | run | session_id=34cfa3a6-1be9-4418-82bd-fa62ead27d0d; run_id=d5c72e7a2bc442329002428e9a1902f5; tape_id=b68b8bd3-e257-431b-9c6c-160c22ee9590 |  | run=completed |  |  |
+| 25 | 2026-07-03T08:21:33Z | probe | topic | session_id=34cfa3a6-1be9-4418-82bd-fa62ead27d0d; run_id=d5c72e7a2bc442329002428e9a1902f5; tape_id=b68b8bd3-e257-431b-9c6c-160c22ee9590 |  | run=completed | pass | note=restic regression r2, floors 0.5/0.3: Cross-topic empty, Repo references x3 from sre corpus (0.742-0.781), answer cites volsync-restic-async-backup - KB retrieval live for the first time, D7/D8 fixed end to end |
+| 26 | 2026-07-03T08:21:35Z | record-run | run-summary | session_id=8723a76b-1454-408a-be8c-67656f56c25e | run_count=0 |  |  |  |
