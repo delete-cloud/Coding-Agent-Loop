@@ -41,6 +41,7 @@ from coding_agent.subagents.coordinator import ChildWorkerCoordinator
 from coding_agent.tools.web_search import create_web_search_backend
 from coding_agent.topics.memory import MemoryReviewStore
 from coding_agent.topics.range_index import TopicRangeIndex
+from coding_agent.topics.recall_floor import validate_recall_floor
 from coding_agent.topics.semantic_backends import (
     FAKE_SEMANTIC_INDEX_SCHEMA,
     LANCEDB_SEMANTIC_INDEX_SCHEMA,
@@ -65,6 +66,8 @@ class SemanticMemoryConfig:
     db_path: str | None = None
     table_name: str = "semantic_memory"
     embedding_base_url: str | None = None
+    recall_min_score: float | None = None
+    recall_min_overlap: float | None = None
 
     def to_config_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -77,6 +80,10 @@ class SemanticMemoryConfig:
             payload["table_name"] = self.table_name
         if self.embedding_base_url is not None:
             payload["embedding_base_url"] = self.embedding_base_url
+        if self.recall_min_score is not None:
+            payload["recall_min_score"] = self.recall_min_score
+        if self.recall_min_overlap is not None:
+            payload["recall_min_overlap"] = self.recall_min_overlap
         if schema_payload := _semantic_schema_config_payload(self.backend, self.schema):
             payload.update(schema_payload)
         return payload
@@ -232,6 +239,14 @@ def _parse_semantic_memory_config(
     embedding_base_url = raw_semantic_cfg.get("embedding_base_url")
     if embedding_base_url is not None and not isinstance(embedding_base_url, str):
         raise ValueError("[memory.semantic].embedding_base_url must be a string")
+    recall_min_score = _optional_semantic_unit_float(
+        raw_semantic_cfg,
+        "recall_min_score",
+    )
+    recall_min_overlap = _optional_semantic_unit_float(
+        raw_semantic_cfg,
+        "recall_min_overlap",
+    )
     schema = _semantic_schema_from_config(backend, raw_semantic_cfg)
     return SemanticMemoryConfig(
         enabled=enabled,
@@ -240,6 +255,8 @@ def _parse_semantic_memory_config(
         db_path=db_path,
         table_name=table_name,
         embedding_base_url=embedding_base_url,
+        recall_min_score=recall_min_score,
+        recall_min_overlap=recall_min_overlap,
     )
 
 
@@ -321,6 +338,14 @@ def _optional_semantic_positive_int(
     if type(value) is not int or value <= 0:
         raise ValueError(f"[memory.semantic].{key} must be a positive integer")
     return value
+
+
+def _optional_semantic_unit_float(
+    raw_semantic_cfg: Mapping[str, Any],
+    key: str,
+) -> float | None:
+    value = raw_semantic_cfg.get(key)
+    return validate_recall_floor(f"[memory.semantic].{key}", value)
 
 
 def _default_semantic_schema(backend: str) -> SemanticIndexSchema:
@@ -617,6 +642,8 @@ def create_child_pipeline(
             read_enabled=memory_cfg.effective_read_enabled,
             topic_store=semantic_topic_store,
             topic_index=semantic_topic_index,
+            recall_min_score=memory_cfg.semantic.recall_min_score,
+            recall_min_overlap=memory_cfg.semantic.recall_min_overlap,
         )
 
     async def _execute_tool_async(

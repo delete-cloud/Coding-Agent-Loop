@@ -917,6 +917,28 @@ def test_helm_kb_enabled_can_render_optional_max_distance() -> None:
     assert _agent_toml(docs)["kb"]["max_distance"] == 0.42
 
 
+def test_helm_semantic_memory_can_render_recall_relevance_floors() -> None:
+    docs = _render(
+        "--set",
+        "memory.semantic.enabled=true",
+        "--set",
+        "memory.semantic.recallMinScore=0.55",
+        "--set",
+        "memory.semantic.recallMinOverlap=0.25",
+    )
+
+    assert _agent_toml(docs)["memory"]["semantic"]["recall_min_score"] == 0.55
+    assert _agent_toml(docs)["memory"]["semantic"]["recall_min_overlap"] == 0.25
+
+
+def test_helm_semantic_memory_omits_unset_recall_relevance_floors() -> None:
+    docs = _render("--set", "memory.semantic.enabled=true")
+
+    semantic_config = _agent_toml(docs)["memory"]["semantic"]
+    assert "recall_min_score" not in semantic_config
+    assert "recall_min_overlap" not in semantic_config
+
+
 def test_helm_kb_enabled_can_defer_when_semantic_memory_hits() -> None:
     docs = _render(
         "--set",

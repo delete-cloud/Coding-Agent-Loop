@@ -20,6 +20,7 @@ from coding_agent.topics.recall_context import (
     TopicRecallPlannerInput,
     build_topic_recall_query,
 )
+from coding_agent.topics.recall_floor import validate_recall_floor
 from coding_agent.topics.semantic_index import (
     HybridRecallHit,
     SafeSemanticMemoryIndex,
@@ -54,11 +55,21 @@ class SemanticRecallPlanner:
         semantic_index: SafeSemanticMemoryIndex,
         topic_store: SemanticTopicStore,
         memory_review_store: SemanticMemoryReviewStore,
+        recall_min_score: float | None = None,
+        recall_min_overlap: float | None = None,
     ) -> None:
         _require_dependency("topic_planner", topic_planner)
         _require_dependency("semantic_index", semantic_index)
         _require_dependency("topic_store", topic_store)
         _require_dependency("memory_review_store", memory_review_store)
+        self._recall_min_score = validate_recall_floor(
+            "recall_min_score",
+            recall_min_score,
+        )
+        self._recall_min_overlap = validate_recall_floor(
+            "recall_min_overlap",
+            recall_min_overlap,
+        )
         self._topic_planner = topic_planner
         self._semantic_index = semantic_index
         self._topic_store = topic_store
@@ -66,6 +77,15 @@ class SemanticRecallPlanner:
 
     async def plan(self, planner_input: TopicRecallPlannerInput) -> TopicRecallPlan:
         base_plan = self._topic_planner.plan(planner_input)
+        deterministic_results = self._filter_deterministic_results(
+            base_plan.topic_results
+        )
+        if deterministic_results != base_plan.topic_results:
+            base_plan = TopicRecallPlan(
+                source_topic=base_plan.source_topic,
+                topic_results=deterministic_results,
+                accepted_memories=base_plan.accepted_memories,
+            )
         if not planner_input.enabled:
             return base_plan
 
@@ -82,8 +102,12 @@ class SemanticRecallPlanner:
         for hit in semantic_hits:
             document_id = SemanticDocId.parse(hit.memory_id)
             if document_id.kind is SemanticDocKind.TOPIC_SUMMARY:
+                if not self._semantic_hit_satisfies_floor(hit):
+                    continue
                 topic_hits.append(hit)
             elif document_id.kind is SemanticDocKind.ACCEPTED_REVIEWED_MEMORY:
+                if not self._semantic_hit_satisfies_floor(hit):
+                    continue
                 memory_hits.append(hit)
 
         rehydrated_topics = await self._rehydrate_topic_hits(
@@ -207,6 +231,19 @@ class SemanticRecallPlanner:
             if len(records) >= limit:
                 break
         return tuple(records)
+
+    def _filter_deterministic_results(
+        self,
+        results: tuple[TopicRangeSearchResult, ...],
+    ) -> tuple[TopicRangeSearchResult, ...]:
+        if self._recall_min_overlap is None:
+            return results
+        return tuple(
+            result for result in results if result.score >= self._recall_min_overlap
+        )
+
+    def _semantic_hit_satisfies_floor(self, hit: MemoryHit) -> bool:
+        return self._recall_min_score is None or hit.score >= self._recall_min_score
 
 
 def _topic_hit_is_current(

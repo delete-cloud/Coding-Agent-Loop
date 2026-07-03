@@ -952,6 +952,88 @@ embedding_dim = 1024
     }
 
 
+def test_semantic_config_parses_recall_relevance_floors(
+    tmp_path: Path,
+) -> None:
+    config_path = _default_plugin_config(
+        tmp_path,
+        memory="""
+
+[memory]
+read_enabled = true
+write_enabled = true
+
+[memory.semantic]
+enabled = true
+backend = "fake"
+recall_min_score = 0.55
+recall_min_overlap = 0.25
+""",
+    )
+
+    pipeline, ctx = create_agent(
+        config_path=config_path,
+        data_dir=tmp_path / "data",
+        api_key="sk-test",
+    )
+
+    assert ctx.config["memory"]["semantic"] == {
+        "enabled": True,
+        "backend": "fake",
+        "recall_min_score": 0.55,
+        "recall_min_overlap": 0.25,
+    }
+    plugin = pipeline._registry.get("semantic_memory")
+    assert isinstance(plugin, SemanticMemoryPlugin)
+    assert plugin._recall_min_score == 0.55
+    assert plugin._recall_min_overlap == 0.25
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "message"),
+    [
+        ("recall_min_score", '"0.5"', "must be a number"),
+        ("recall_min_score", "true", "must be a number"),
+        ("recall_min_score", "-0.1", "must be between 0 and 1"),
+        ("recall_min_score", "1.1", "must be between 0 and 1"),
+        ("recall_min_score", "nan", "must be between 0 and 1"),
+        ("recall_min_overlap", '"0.5"', "must be a number"),
+        ("recall_min_overlap", "false", "must be a number"),
+        ("recall_min_overlap", "-0.1", "must be between 0 and 1"),
+        ("recall_min_overlap", "1.1", "must be between 0 and 1"),
+        ("recall_min_overlap", "nan", "must be between 0 and 1"),
+    ],
+)
+def test_semantic_config_rejects_invalid_recall_relevance_floors(
+    tmp_path: Path,
+    key: str,
+    value: str,
+    message: str,
+) -> None:
+    config_path = _default_plugin_config(
+        tmp_path,
+        memory=f"""
+
+[memory]
+
+[memory.semantic]
+enabled = true
+backend = "fake"
+{key} = {value}
+""",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=rf"\[memory\.semantic\]\.{key} {message}",
+    ):
+        create_agent(
+            config_path=config_path,
+            data_dir=tmp_path / "data",
+            api_key="sk-test",
+        )
+
+
 def test_semantic_enabled_rejects_empty_embedding_schema_override(
     tmp_path: Path,
 ) -> None:

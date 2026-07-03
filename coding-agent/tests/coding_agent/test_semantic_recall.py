@@ -118,6 +118,172 @@ async def test_stale_semantic_topic_doc_id_is_dropped() -> None:
 
 
 @pytest.mark.asyncio
+async def test_recall_min_score_filters_semantic_results() -> None:
+    below_floor = _topic(
+        "topic-low-score",
+        title="Low score semantic",
+        summary="Low similarity semantic topic.",
+    )
+    above_floor = _topic(
+        "topic-high-score",
+        title="High score semantic",
+        summary="High similarity semantic topic.",
+    )
+    planner = _planner(
+        semantic_hits=(
+            _hit(
+                str(SemanticDocId.for_topic(below_floor)),
+                source_refs=("topic:topic-low-score",),
+                score=0.49,
+            ),
+            _hit(
+                str(SemanticDocId.for_topic(above_floor)),
+                source_refs=("topic:topic-high-score",),
+                score=0.80,
+            ),
+        ),
+        topics=(below_floor, above_floor),
+        recall_min_score=0.50,
+    )
+
+    plan = await planner.plan(
+        TopicRecallPlannerInput(source_topic=_source_topic(), text="jwt middleware")
+    )
+
+    assert [result.topic_id for result in plan.topic_results] == ["topic-high-score"]
+
+
+@pytest.mark.asyncio
+async def test_recall_min_score_filters_semantic_accepted_memory_hits() -> None:
+    below_floor = _record("memory-low-score", status="accepted")
+    above_floor = _record("memory-high-score", status="accepted")
+    planner = _planner(
+        semantic_hits=(
+            _memory_hit("memory-low-score", score=0.49),
+            _memory_hit("memory-high-score", score=0.80),
+        ),
+        memories=(below_floor, above_floor),
+        recall_min_score=0.50,
+    )
+
+    plan = await planner.plan(
+        TopicRecallPlannerInput(source_topic=_source_topic(), text="jwt middleware")
+    )
+
+    assert plan.topic_results == ()
+    assert plan.accepted_memories == (above_floor,)
+
+
+@pytest.mark.asyncio
+async def test_recall_min_score_exempts_scoreless_accepted_memory_listing() -> None:
+    listing_record = _record("memory-listing", status="accepted")
+    below_floor = _record("memory-low-score", status="accepted")
+    planner = _planner(
+        semantic_hits=(_memory_hit("memory-low-score", score=0.49),),
+        memories=(below_floor,),
+        accepted_memories=(listing_record,),
+        recall_min_score=0.50,
+    )
+
+    plan = await planner.plan(
+        TopicRecallPlannerInput(source_topic=_source_topic(), text="memory listing")
+    )
+
+    assert len(plan.topic_results) == 0
+    assert len(plan.accepted_memories) == 1
+    assert plan.accepted_memories == (listing_record,)
+
+
+@pytest.mark.asyncio
+async def test_recall_min_overlap_filters_deterministic_results() -> None:
+    low_overlap = _topic(
+        "topic-low-overlap",
+        title="JWT auth",
+        summary="JWT token rotation.",
+    )
+    high_overlap = _topic(
+        "topic-high-overlap",
+        title="JWT auth validation",
+        summary="JWT auth validation middleware.",
+    )
+    topic_index = TopicRangeIndex()
+    topic_index.index_topic(low_overlap, profile="local")
+    topic_index.index_topic(high_overlap, profile="local")
+    planner = _planner(
+        semantic_hits=(),
+        topic_index=topic_index,
+        recall_min_overlap=0.75,
+    )
+
+    plan = await planner.plan(
+        TopicRecallPlannerInput(
+            source_topic=_source_topic(),
+            text="jwt auth validation middleware",
+            profile="local",
+        )
+    )
+
+    assert [result.topic_id for result in plan.topic_results] == ["topic-high-overlap"]
+
+
+@pytest.mark.asyncio
+async def test_floors_default_off_preserve_existing_plans() -> None:
+    deterministic_topic = _topic(
+        "topic-deterministic",
+        title="JWT deterministic",
+        summary="JWT validation deterministic match",
+    )
+    semantic_topic = _topic(
+        "topic-semantic",
+        title="Semantic auth",
+        summary="Semantic auth retry summary.",
+    )
+    accepted_memory = _record("memory-accepted", status="accepted")
+    topic_index = TopicRangeIndex()
+    topic_index.index_topic(deterministic_topic, profile="local")
+    semantic_hits = (
+        _hit(
+            str(SemanticDocId.for_topic(semantic_topic)),
+            source_refs=("topic:topic-semantic",),
+            score=0.01,
+        ),
+        _memory_hit("memory-accepted"),
+    )
+    legacy_signature_planner = SemanticRecallPlanner(
+        topic_planner=TopicRecallPlanner(topic_index=topic_index),
+        semantic_index=SafeSemanticMemoryIndex(FakeMemoryIndex(semantic_hits)),
+        topic_store=FakeTopicStore((semantic_topic,)),
+        memory_review_store=FakeMemoryReviewStore((accepted_memory,)),
+    )
+    explicit_default_planner = _planner(
+        semantic_hits=semantic_hits,
+        topics=(semantic_topic,),
+        memories=(accepted_memory,),
+        topic_index=topic_index,
+        recall_min_score=None,
+        recall_min_overlap=None,
+    )
+    planner_input = TopicRecallPlannerInput(
+        source_topic=_source_topic(),
+        text="jwt validation",
+        profile="local",
+        limit=3,
+    )
+
+    default_plan = await legacy_signature_planner.plan(planner_input)
+    explicit_default_plan = await explicit_default_planner.plan(planner_input)
+
+    assert default_plan == explicit_default_plan
+    assert default_plan.topic_results == explicit_default_plan.topic_results
+    assert default_plan.accepted_memories == explicit_default_plan.accepted_memories
+    assert [result.topic_id for result in default_plan.topic_results] == [
+        "topic-deterministic",
+        "topic-semantic",
+    ]
+    assert default_plan.accepted_memories == (accepted_memory,)
+
+
+@pytest.mark.asyncio
 async def test_missing_unfinalized_no_summary_and_source_topic_hits_are_dropped() -> (
     None
 ):
@@ -454,13 +620,21 @@ def _planner(
     semantic_hits: tuple[MemoryHit, ...],
     topics: tuple[TopicRecord, ...] = (),
     memories: tuple[ReviewedMemoryRecord, ...] = (),
+    accepted_memories: tuple[ReviewedMemoryRecord, ...] = (),
     topic_index: TopicRangeIndex | None = None,
+    recall_min_score: float | None = None,
+    recall_min_overlap: float | None = None,
 ) -> SemanticRecallPlanner:
     return SemanticRecallPlanner(
-        topic_planner=TopicRecallPlanner(topic_index=topic_index or TopicRangeIndex()),
+        topic_planner=TopicRecallPlanner(
+            topic_index=topic_index or TopicRangeIndex(),
+            accepted_memories=accepted_memories,
+        ),
         semantic_index=SafeSemanticMemoryIndex(FakeMemoryIndex(semantic_hits)),
         topic_store=FakeTopicStore(topics),
         memory_review_store=FakeMemoryReviewStore(memories),
+        recall_min_score=recall_min_score,
+        recall_min_overlap=recall_min_overlap,
     )
 
 
@@ -480,10 +654,11 @@ def _hit(
     )
 
 
-def _memory_hit(candidate_id: str) -> MemoryHit:
+def _memory_hit(candidate_id: str, *, score: float = 0.8) -> MemoryHit:
     return _hit(
         f"accepted-memory:{candidate_id}:accepted",
         source_refs=(f"memory:{candidate_id}",),
+        score=score,
     )
 
 
