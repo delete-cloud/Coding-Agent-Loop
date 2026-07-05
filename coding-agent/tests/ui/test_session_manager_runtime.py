@@ -13,8 +13,13 @@ import pytest
 
 from agentkit.runtime.context import AgentRunContext
 from agentkit.checkpoint.models import CheckpointMeta
+from agentkit.plugin.registry import PluginRegistry
+from agentkit.providers.models import DoneEvent, TextEvent
+from agentkit.runtime.hook_runtime import HookRuntime
+from agentkit.runtime.pipeline import Pipeline
 from agentkit.tools import FatalToolExecutionError
 from agentkit.tape.models import Entry
+from agentkit.tape.store import ForkTapeStore
 from agentkit.tape.tape import Tape
 from agentkit.runtime.pipeline import PipelineContext
 from coding_agent.adapter.types import StopReason, TurnOutcome
@@ -5897,3 +5902,136 @@ async def test_clear_sessions_closes_cached_runtimes() -> None:
     await asyncio.sleep(0)
 
     assert close_calls == ["first", "second"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_turn_clears_admission_after_stream_disconnect() -> None:
+    store = InMemorySessionStore()
+    manager = SessionManager(store=store)
+    session_id = await manager.create_session()
+    adapter_started = asyncio.Event()
+    release_adapter = asyncio.Event()
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, consumer
+            self.ctx = ctx
+
+        async def run_turn(self, prompt: str) -> None:
+            del prompt
+            adapter_started.set()
+            await release_adapter.wait()
+
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        )
+    )
+
+    def fake_create_agent(**kwargs):
+        return fake_pipeline, types.SimpleNamespace(
+            config={},
+            tape=kwargs.get("tape") or Tape(tape_id="stable-cancel-tape"),
+            plugin_states={},
+        )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
+        mp.setattr("coding_agent.server.session_manager.PipelineAdapter", FakeAdapter)
+
+        task = asyncio.create_task(manager.run_agent(session_id, "cancel me"))
+        session = manager.get_session(session_id)
+        session.task = task
+        await asyncio.wait_for(adapter_started.wait(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    session = manager.get_session(session_id)
+    assert session.turn_in_progress is False
+    assert session.task is None
+    assert session.turn_status == "cancelled"
+    assert session.as_dict()["turn_status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_forked_turn_next_prompt_does_not_rebind_tape(
+    tmp_path: Path,
+) -> None:
+    class CancelOnceStoragePlugin:
+        state_key = "llm_provider"
+
+        def __init__(self, backing_store: object) -> None:
+            self._storage = ForkTapeStore(backing_store)
+            self.cancel_next_build = True
+
+        def hooks(self) -> dict[str, object]:
+            return {
+                "provide_storage": self.provide_storage,
+                "provide_llm": self.provide_llm,
+                "get_tools": self.get_tools,
+                "build_context": self.build_context,
+            }
+
+        def provide_storage(self, **kwargs: object) -> ForkTapeStore:
+            del kwargs
+            return self._storage
+
+        def provide_llm(self, **kwargs: object) -> "CancelOnceStoragePlugin":
+            del kwargs
+            return self
+
+        def get_tools(self, **kwargs: object) -> list[object]:
+            del kwargs
+            return []
+
+        def build_context(self, **kwargs: object) -> list[dict[str, object]]:
+            del kwargs
+            if self.cancel_next_build:
+                self.cancel_next_build = False
+                raise asyncio.CancelledError
+            return []
+
+        async def stream(self, messages, tools=None, **kwargs):
+            del messages, tools, kwargs
+            yield TextEvent(text="second turn completed")
+            yield DoneEvent()
+
+    manager = SessionManager(
+        storage_config=local_sqlite_storage_config(tmp_path),
+        owner_store=SQLiteSessionOwnerStore(local_sqlite_path(tmp_path)),
+        owner_id="owner-a",
+        fencing_token=999,
+    )
+    plugin = CancelOnceStoragePlugin(manager._tape_store)
+
+    def fake_create_agent(**kwargs):
+        registry = PluginRegistry()
+        registry.register(plugin)
+        runtime = HookRuntime(registry)
+        pipeline = Pipeline(runtime=runtime, registry=registry)
+        return pipeline, PipelineContext(
+            tape=kwargs.get("tape") or Tape(tape_id="stable-fork-tape"),
+            session_id=kwargs["session_id_override"],
+            config={},
+        )
+
+    session_id = await manager.create_session()
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
+        first = asyncio.create_task(manager.run_agent(session_id, "cancelled fork"))
+        session = manager.get_session(session_id)
+        session.task = first
+        with pytest.raises(asyncio.CancelledError):
+            await first
+
+        stable_tape_id = manager.get_session(session_id).tape_id
+        assert stable_tape_id == "stable-fork-tape"
+
+        await manager.run_agent(session_id, "next prompt")
+
+    session = manager.get_session(session_id)
+    assert session.tape_id == stable_tape_id
+    assert session.turn_in_progress is False
+    assert session.task is None

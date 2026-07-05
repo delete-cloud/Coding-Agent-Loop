@@ -11028,3 +11028,179 @@ class TestApprovalStoreIntegration:
 
         # Store should be cleaned up
         assert session_id not in session_manager._approval_stores
+
+
+@pytest.mark.asyncio
+async def test_prompt_stream_disconnect_does_not_leave_turn_in_progress(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    create_resp = await client.post("/sessions", json={})
+    session_id = create_resp.json()["session_id"]
+    adapter_started = asyncio.Event()
+    adapter_cancelled = asyncio.Event()
+
+    class FakeEventSourceResponse:
+        def __init__(self, body_iterator, **kwargs: object) -> None:
+            del kwargs
+            self.body_iterator = body_iterator
+
+    class FakeAdapter:
+        def __init__(self, pipeline, ctx, consumer) -> None:
+            del pipeline, consumer
+            self.ctx = ctx
+
+        async def run_turn(self, prompt: str) -> None:
+            del prompt
+            adapter_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                adapter_cancelled.set()
+                raise
+
+    fake_pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(
+            get=lambda _: types.SimpleNamespace(_instance=None)
+        )
+    )
+
+    def fake_create_agent(**kwargs: object) -> tuple[object, object]:
+        tape = kwargs.get("tape") if isinstance(kwargs, dict) else None
+        return fake_pipeline, types.SimpleNamespace(
+            config={},
+            tape=tape or Tape(tape_id="http-disconnect-tape"),
+            plugin_states={},
+        )
+
+    monkeypatch.setattr(
+        "coding_agent.server.http_server.EventSourceResponse",
+        FakeEventSourceResponse,
+    )
+    monkeypatch.setattr("coding_agent.__main__.create_agent", fake_create_agent)
+    monkeypatch.setattr(
+        "coding_agent.server.session_manager.PipelineAdapter", FakeAdapter
+    )
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": f"/sessions/{session_id}/prompt",
+            "headers": [],
+        }
+    )
+    response = await http_server.send_prompt(
+        request,
+        session_id,
+        body=http_server.PromptRequest(prompt="Hello"),
+        prompt=None,
+        event_format="wire",
+        api_key=None,
+    )
+    event_generator = cast(AsyncIterator[dict[str, str]], response.body_iterator)
+    consumer = asyncio.create_task(anext(event_generator))
+
+    await asyncio.wait_for(adapter_started.wait(), timeout=1)
+    session = session_manager.get_session(session_id)
+    assert session.turn_in_progress is True
+    assert session.task is not None
+
+    consumer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(consumer, timeout=1)
+    await asyncio.wait_for(adapter_cancelled.wait(), timeout=1)
+
+    session = session_manager.get_session(session_id)
+    assert session.turn_in_progress is False
+    assert session.task is None
+    assert session.turn_status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_prompt_stream_aclose_cancels_running_turn(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    create_resp = await client.post("/sessions", json={})
+    session_id = create_resp.json()["session_id"]
+    run_started = asyncio.Event()
+    task_cancelled = asyncio.Event()
+
+    class FakeEventSourceResponse:
+        def __init__(self, body_iterator, **kwargs: object) -> None:
+            del kwargs
+            self.body_iterator = body_iterator
+
+    async def fake_run_agent(_session_id: str, _prompt: str) -> None:
+        session = session_manager.get_session(_session_id)
+        session.turn_status = "running"
+        run_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            session.turn_status = "cancelled"
+            task_cancelled.set()
+            raise
+
+    async def fake_stream_wire_messages(
+        wire: object,
+        task: asyncio.Task[object] | None = None,
+    ) -> AsyncIterator[dict[str, str]]:
+        del wire, task
+        await run_started.wait()
+        yield {
+            "event": "StreamDelta",
+            "data": json.dumps(
+                {
+                    "session_id": session_id,
+                    "agent_id": "",
+                    "content": "hello",
+                    "role": "assistant",
+                    "timestamp": datetime.now(UTC).isoformat(),
+                }
+            ),
+        }
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        "coding_agent.server.http_server.EventSourceResponse",
+        FakeEventSourceResponse,
+    )
+    monkeypatch.setattr(session_manager, "run_agent", fake_run_agent)
+    monkeypatch.setattr(
+        "coding_agent.server.http_server.stream_wire_messages",
+        fake_stream_wire_messages,
+    )
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": f"/sessions/{session_id}/prompt",
+            "headers": [],
+        }
+    )
+    response = await http_server.send_prompt(
+        request,
+        session_id,
+        body=http_server.PromptRequest(prompt="Hello"),
+        prompt=None,
+        event_format="wire",
+        api_key=None,
+    )
+    event_generator = cast(AsyncIterator[dict[str, str]], response.body_iterator)
+
+    first_event = await asyncio.wait_for(anext(event_generator), timeout=1)
+    assert first_event["event"] == "StreamDelta"
+    session = session_manager.get_session(session_id)
+    assert session.turn_in_progress is True
+    assert session.task is not None
+
+    await asyncio.wait_for(event_generator.aclose(), timeout=1)
+    await asyncio.wait_for(task_cancelled.wait(), timeout=1)
+
+    session = session_manager.get_session(session_id)
+    assert session.turn_in_progress is False
+    assert session.task is None
+    assert session.turn_status == "cancelled"

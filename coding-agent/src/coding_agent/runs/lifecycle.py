@@ -246,6 +246,16 @@ def _set_failure_details_from_outcome(
     session.last_failure_details = None
 
 
+def _task_finished(task: object | None) -> bool:
+    if task is None:
+        return False
+    done = getattr(task, "done", None)
+    if callable(done) and done():
+        return True
+    cancelled = getattr(task, "cancelled", None)
+    return bool(callable(cancelled) and cancelled())
+
+
 @dataclass(frozen=True)
 class RuntimeCloser:
     async def close(self, session: RuntimeHandleSession) -> None:
@@ -576,8 +586,15 @@ class RuntimeTurnSessionState:
         session: RuntimeTurnStateSession,
         *,
         current_task: object | None,
+        turn_finished: bool = False,
     ) -> None:
-        if session.task is None or session.task is not current_task:
+        session_task = session.task
+        owns_task = session_task is not None and session_task is current_task
+        clear_admission = not owns_task or turn_finished or _task_finished(session_task)
+
+        if clear_admission:
+            if owns_task:
+                session.task = None
             session.turn_in_progress = False
             if session.turn_status == "running":
                 session.turn_status = "idle"
@@ -619,6 +636,7 @@ class RuntimeTurnErrorHandler:
             result={},
             error="cancelled",
         )
+        session.turn_status = "cancelled"
 
     async def handle_generic(
         self,

@@ -587,6 +587,71 @@ async def test_runtime_turn_session_state_preserves_owned_running_turn() -> None
 
 
 @pytest.mark.asyncio
+async def test_runtime_turn_session_state_finalizes_owned_finished_turn() -> None:
+    current_task = object()
+    persisted: list[FakeTurnStateSession] = []
+    session = FakeTurnStateSession(
+        id="session-1",
+        tape_id="tape-1",
+        last_activity=datetime(2025, 1, 1, tzinfo=UTC),
+        turn_in_progress=True,
+        turn_status="running",
+        task=current_task,
+    )
+
+    async def persist_session(session: FakeTurnStateSession) -> None:
+        persisted.append(session)
+
+    state = RuntimeTurnSessionState(
+        persist_session=persist_session,
+        now=lambda: datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    await state.finalize(
+        session,
+        current_task=current_task,
+        turn_finished=True,
+    )
+
+    assert session.task is None
+    assert session.turn_in_progress is False
+    assert session.turn_status == "idle"
+    assert session.last_activity == datetime(2026, 1, 2, tzinfo=UTC)
+    assert persisted == [session]
+
+
+@pytest.mark.asyncio
+async def test_runtime_turn_session_state_finalizes_owned_done_task() -> None:
+    current_task = asyncio.create_task(asyncio.sleep(0))
+    await current_task
+    persisted: list[FakeTurnStateSession] = []
+    session = FakeTurnStateSession(
+        id="session-1",
+        tape_id="tape-1",
+        last_activity=datetime(2025, 1, 1, tzinfo=UTC),
+        turn_in_progress=True,
+        turn_status="running",
+        task=current_task,
+    )
+
+    async def persist_session(session: FakeTurnStateSession) -> None:
+        persisted.append(session)
+
+    state = RuntimeTurnSessionState(
+        persist_session=persist_session,
+        now=lambda: datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    await state.finalize(session, current_task=current_task)
+
+    assert session.task is None
+    assert session.turn_in_progress is False
+    assert session.turn_status == "idle"
+    assert session.last_activity == datetime(2026, 1, 2, tzinfo=UTC)
+    assert persisted == [session]
+
+
+@pytest.mark.asyncio
 async def test_runtime_turn_controller_routes_before_and_after_hooks() -> None:
     store = RecordingRuntimeStore()
     lifecycle = RuntimeRunLifecycle(

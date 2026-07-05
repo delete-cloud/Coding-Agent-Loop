@@ -203,6 +203,7 @@ from coding_agent.runs import (
     ManagedPoolExecutorRef,
     LocalPathWorkspaceRef,
     RunTarget,
+    RuntimeTurnSessionState,
     run_target_from_dict,
 )
 from coding_agent.server.rate_limit import RateLimits, limiter
@@ -3164,14 +3165,43 @@ async def send_prompt(
             await _broadcast_event(session, error_data)
             yield error_data
         finally:
-            if session.task is not None:
+            task = session.task
+            stream_task = asyncio.current_task()
+            stream_cancelling = stream_task is not None and stream_task.cancelling() > 0
+            task_cancelled_error: asyncio.CancelledError | None = None
+            task_base_error: BaseException | None = None
+            if task is not None:
+                if not task.done():
+                    task.cancel()
                 try:
-                    await session.task
+                    await task
+                except asyncio.CancelledError as exc:
+                    task_cancelled_error = exc
                 except Exception:
                     pass
-                session.task = None
-            session.turn_in_progress = False
-            session.last_activity = datetime.now(UTC)
+                except BaseException as exc:
+                    task_base_error = exc
+            has_admission_state = (
+                session.turn_in_progress or session.turn_status == "running"
+            )
+            finalize_needed = (task is not None and session.task is task) or (
+                session.task is None and has_admission_state
+            )
+            if finalize_needed:
+                turn_session_state = RuntimeTurnSessionState(
+                    persist_session=session_manager._persist_session_async
+                )
+                await asyncio.shield(
+                    turn_session_state.finalize(
+                        session,
+                        current_task=task,
+                        turn_finished=False,
+                    )
+                )
+            if task_base_error is not None:
+                raise task_base_error
+            if stream_cancelling and task_cancelled_error is not None:
+                raise task_cancelled_error
 
     # Return SSE stream from wire
     return EventSourceResponse(

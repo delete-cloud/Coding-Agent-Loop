@@ -1,3 +1,6 @@
+import asyncio
+import logging
+
 import pytest
 from unittest.mock import MagicMock
 from agentkit.directive.types import Reject
@@ -1809,3 +1812,91 @@ class TestPipelineView:
         assert "[Summary]" in ctx.messages[1]["content"]
         assert ctx.messages[2]["content"] == "new msg"
         assert not any("old-" in str(m.get("content", "")) for m in ctx.messages)
+
+
+@pytest.mark.asyncio
+async def test_pipeline_rolls_back_fork_on_cancelled_error():
+    class CancellingBuildContextPlugin(MinimalPlugin):
+        state_key = "cancelling_build_context"
+
+        def build_context(self, **kwargs):
+            del kwargs
+            raise asyncio.CancelledError
+
+    registry = PluginRegistry()
+    plugin = CancellingBuildContextPlugin()
+    registry.register(plugin)
+    runtime = HookRuntime(registry)
+    pipeline = Pipeline(runtime=runtime, registry=registry)
+
+    class RecordingStorage:
+        def __init__(self):
+            self.commit_calls = []
+            self.rollback_calls = []
+
+        def begin(self, tape):
+            return tape.fork()
+
+        async def commit(self, tape):
+            self.commit_calls.append(tape)
+            return "stable-tape-id"
+
+        def rollback(self, tape):
+            self.rollback_calls.append(tape)
+
+    storage = RecordingStorage()
+    plugin._mock_storage = storage
+    tape = Tape(tape_id="stable-tape-id")
+    tape.append(Entry(kind="message", payload={"role": "user", "content": "hello"}))
+    ctx = PipelineContext(tape=tape, session_id="s-cancel")
+    await pipeline.mount(ctx)
+
+    with pytest.raises(asyncio.CancelledError):
+        await pipeline.run_turn(ctx)
+
+    assert storage.commit_calls == []
+    assert len(storage.rollback_calls) == 1
+    assert storage.rollback_calls[0].parent_id == tape.tape_id
+    assert ctx.tape is tape
+
+
+@pytest.mark.asyncio
+async def test_pipeline_preserves_cancelled_error_when_rollback_fails(caplog):
+    class CancellingBuildContextPlugin(MinimalPlugin):
+        state_key = "cancelling_build_context_with_failed_rollback"
+
+        def build_context(self, **kwargs):
+            del kwargs
+            raise asyncio.CancelledError
+
+    registry = PluginRegistry()
+    plugin = CancellingBuildContextPlugin()
+    registry.register(plugin)
+    runtime = HookRuntime(registry)
+    pipeline = Pipeline(runtime=runtime, registry=registry)
+
+    class FailingRollbackStorage:
+        def begin(self, tape):
+            return tape.fork()
+
+        async def commit(self, tape):
+            del tape
+            raise AssertionError("cancelled turns must not commit")
+
+        def rollback(self, tape):
+            del tape
+            raise RuntimeError("rollback failed")
+
+    plugin._mock_storage = FailingRollbackStorage()
+    tape = Tape(tape_id="stable-tape-id")
+    tape.append(Entry(kind="message", payload={"role": "user", "content": "hello"}))
+    ctx = PipelineContext(tape=tape, session_id="s-cancel")
+    await pipeline.mount(ctx)
+
+    with caplog.at_level(logging.ERROR, logger="agentkit.runtime.pipeline"):
+        with pytest.raises(asyncio.CancelledError):
+            await pipeline.run_turn(ctx)
+
+    assert "Failed to roll back pipeline storage fork" in caplog.text
+    assert "rollback failed" in caplog.text
+    assert ctx.tape is tape
