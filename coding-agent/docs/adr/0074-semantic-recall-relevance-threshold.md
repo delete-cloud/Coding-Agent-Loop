@@ -1,6 +1,6 @@
 # ADR-0074: Semantic recall relevance floors and KB-deferral integrity
 
-**Status**: Proposed
+**Status**: Accepted
 **Date**: 2026-07-03
 
 ## Context
@@ -85,24 +85,39 @@ KB-deferral marker only counts hits that passed the floors:
 
 ## Acceptance Criteria
 
-- [ ] `test_recall_min_score_filters_semantic_results` — semantic hits below
+- [x] `test_recall_min_score_filters_semantic_results` — semantic hits below
   the floor are excluded from `plan.topic_results`.
-- [ ] `test_recall_min_score_filters_semantic_accepted_memory_hits` —
+- [x] `test_recall_min_score_filters_semantic_accepted_memory_hits` —
   semantic accepted-memory hits below the floor are excluded from
   `plan.accepted_memories` and from the grounding marker count.
-- [ ] `test_recall_min_overlap_filters_deterministic_results` — token-overlap
+- [x] `test_recall_min_overlap_filters_deterministic_results` — token-overlap
   results below the floor are excluded.
-- [ ] `test_subfloor_hits_zero_grounding_marker_and_kb_runs` — a query whose
+- [x] `test_subfloor_hits_zero_grounding_marker_and_kb_runs` — a query whose
   hits are all sub-floor yields hit count 0 in the grounding marker and
   KBPlugin performs retrieval (defer does not trigger).
-- [ ] `test_floors_default_off_preserve_existing_plans` — with both knobs
+- [x] `test_floors_default_off_preserve_existing_plans` — with both knobs
   unset, plan contents are byte-identical to today (existing consumers and
   Bee/eval paths unaffected).
-- [ ] `[memory.semantic]` config parsing validates both knobs (number,
+- [x] `[memory.semantic]` config parsing validates both knobs (number,
   0 <= v <= 1) with clear errors, mirroring `[kb].max_distance` validation.
-- [ ] Helm render contract: `recallMinScore`/`recallMinOverlap` render into
+- [x] Helm render contract: `recallMinScore`/`recallMinOverlap` render into
   `[memory.semantic]`; omitted values render nothing.
-- [ ] `uv run pytest tests/coding_agent/test_semantic_recall.py tests/coding_agent/plugins/test_semantic_memory.py tests/coding_agent/plugins/test_kb_plugin.py tests/deploy/test_helm_chart.py -q`
+- [x] `uv run pytest tests/coding_agent/test_semantic_recall.py tests/coding_agent/plugins/test_semantic_memory.py tests/coding_agent/plugins/test_kb_plugin.py tests/deploy/test_helm_chart.py -q`
+
+Accepted 2026-07-03. Implementation merged in PR #668 (all named tests in
+the gating suites, full suite 4045 green). Live acceptance completed the same
+day: o6n opted in via sre-infra PRs #182/#183 after a two-round calibration
+(round 1 floors 0.4/0.3 were calibrated on token-overlap-scale samples and
+the semantic noise band 0.433-0.493 passed; round 2 raised recall_min_score
+to 0.5). Final live values: recall_min_score=0.5, recall_min_overlap=0.3.
+Regression evidence (docs/dogfood/SEMANTIC_MEMORY_RUN_EVIDENCE.md): the
+restic probe now injects zero cross-topic noise and grounds from the sre KB
+corpus (Repo references, distances 0.742-0.781), while the relevant seeded
+topic still recalls (overlap 0.5333). Note: rendered recall scores carry no
+scale label (similarity vs token-overlap), which caused the round-1
+miscalibration - recorded as a defect-ledger follow-up alongside D9 (bge-m3
+short-summary similarity bands are barely separable: unrelated 0.433-0.450
+vs adjacent 0.463-0.493).
 
 ## References
 
