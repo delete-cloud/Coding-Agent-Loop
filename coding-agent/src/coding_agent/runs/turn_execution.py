@@ -8,7 +8,11 @@ from coding_agent.executors.local_daemon import (
     LocalDaemonRuntimeBinding,
     LocalDaemonRuntimeExecution,
 )
-from coding_agent.runs.coordinator import RunCoordinator, RunCoordinatorError, RunRequest
+from coding_agent.runs.coordinator import (
+    RunCoordinator,
+    RunCoordinatorError,
+    RunRequest,
+)
 from coding_agent.runs.target import RunTarget
 from coding_agent.runs.lifecycle import (
     RuntimeObservationCompleter,
@@ -186,7 +190,11 @@ class RuntimeTurnService:
                 ensure_started_error_types=(RunCoordinatorError,),
             )
         finally:
-            await turn_session_state.finalize(session, current_task=current_task)
+            await turn_session_state.finalize(
+                session,
+                current_task=current_task,
+                turn_finished=True,
+            )
 
 
 __all__ = [

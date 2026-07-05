@@ -539,9 +539,15 @@ class Pipeline:
                 ctx.tape.tape_id = stable_tape_id
 
             return ctx
-        except Exception:
+        except BaseException:
             if fork is not None:
-                ctx.storage.rollback(fork)
+                try:
+                    ctx.storage.rollback(fork)
+                except BaseException:
+                    logger.exception(
+                        "Failed to roll back pipeline storage fork %s",
+                        fork.tape_id,
+                    )
             ctx.tape = original_tape
             raise
 
