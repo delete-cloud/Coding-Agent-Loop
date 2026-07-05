@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
-import asyncio
 import tempfile
-from dataclasses import dataclass
+import threading
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
+from queue import Empty, Queue
 from typing import Any, Protocol, cast
 from urllib.parse import quote, urlencode
 
@@ -30,6 +32,10 @@ from coding_agent.wire.protocol import (
     TurnStatusDelta,
     WireMessage,
 )
+
+ERROR_DETAIL_READ_TIMEOUT_SECONDS = 5.0
+ERROR_DETAIL_READ_MAX_BYTES = 64 * 1024
+_ERROR_DETAIL_READ_CHUNK_SIZE = 8192
 
 
 class DisplayWireConsumer(Protocol):
@@ -1702,22 +1708,109 @@ def _raise_remote_http_error(response: httpx.Response, action: str) -> None:
 
 
 def _response_error_detail(response: httpx.Response) -> str:
-    if not hasattr(response, "json"):
-        status_code = getattr(response, "status_code", None)
-        return f"HTTP {status_code}" if isinstance(status_code, int) else "HTTP error"
+    fallback = _response_status_detail(response)
+    body = _read_response_body_for_error_detail(response)
+    if body is not None:
+        detail = _json_error_detail_from_body(body)
+        if detail is not None:
+            return f"{fallback}: {detail}"
+        text_detail = _text_error_detail_from_body(body)
+        if text_detail:
+            return f"{fallback}: {text_detail}"
+        return fallback
+
+    json_method = getattr(response, "json", None)
+    if not callable(json_method):
+        return fallback
     try:
-        payload = cast(object, response.json())
-    except ValueError:
-        text = response.text.strip()
-        if text:
-            return text
-        return f"HTTP {response.status_code}"
+        payload = cast(object, json_method())
+    except Exception:
+        return fallback
+    detail = _json_error_detail_from_payload(payload)
+    if detail is None:
+        return fallback
+    return f"{fallback}: {detail}"
+
+
+def _json_error_detail_from_body(body: bytes) -> str | None:
+    try:
+        payload = cast(object, json.loads(body))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return _json_error_detail_from_payload(payload)
+
+
+def _text_error_detail_from_body(body: bytes) -> str | None:
+    text = " ".join(body.decode("utf-8", errors="replace").split())
+    if not text:
+        return None
+    return text[:300]
+
+
+def _json_error_detail_from_payload(payload: object) -> str | None:
     if isinstance(payload, Mapping):
         payload = cast(Mapping[str, object], payload)
         detail = payload.get("detail")
         if isinstance(detail, str) and detail:
             return detail
-    return f"HTTP {response.status_code}"
+    return None
+
+
+def _response_status_detail(response: httpx.Response) -> str:
+    status_code = getattr(response, "status_code", None)
+    return f"HTTP {status_code}" if isinstance(status_code, int) else "HTTP error"
+
+
+def _read_response_body_for_error_detail(response: httpx.Response) -> bytes | None:
+    try:
+        return response.content[:ERROR_DETAIL_READ_MAX_BYTES]
+    except Exception:
+        pass
+
+    iter_bytes = getattr(response, "iter_bytes", None)
+    if not callable(iter_bytes):
+        return None
+    if getattr(response, "is_closed", True):
+        return None
+    if getattr(response, "is_stream_consumed", True):
+        return None
+
+    result: Queue[bytes | None] = Queue(maxsize=1)
+
+    def read_body() -> None:
+        remaining = ERROR_DETAIL_READ_MAX_BYTES
+        chunks: list[bytes] = []
+        try:
+            for chunk in iter_bytes(chunk_size=_ERROR_DETAIL_READ_CHUNK_SIZE):
+                if not chunk:
+                    continue
+                if len(chunk) >= remaining:
+                    chunks.append(chunk[:remaining])
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            result.put(b"".join(chunks))
+        except Exception:
+            result.put(None)
+
+    worker = threading.Thread(
+        target=read_body,
+        name="remote-error-detail-reader",
+        daemon=True,
+    )
+    worker.start()
+    worker.join(timeout=ERROR_DETAIL_READ_TIMEOUT_SECONDS)
+    if worker.is_alive():
+        # Intentionally abandon the daemon reader on timeout after closing the response.
+        try:
+            response.close()
+        except Exception:
+            pass
+        return None
+    try:
+        return result.get_nowait()
+    except Empty:
+        return None
 
 
 def _remote_payload(endpoint: RemoteEndpoint) -> dict[str, str]:

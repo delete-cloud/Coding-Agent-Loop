@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+from queue import Empty, Queue
 import shlex
 import stat
 import subprocess
 import asyncio
+import threading
 from pathlib import Path
 
 import httpx
@@ -6539,7 +6541,8 @@ def test_stream_prompt_reports_non_200_sse_response(monkeypatch) -> None:
     from coding_agent.remote.client import stream_prompt
 
     with pytest.raises(
-        click.ClickException, match="Failed to stream remote prompt: server busy"
+        click.ClickException,
+        match="Failed to stream remote prompt: HTTP 503: server busy",
     ):
         stream_prompt(
             base_url="http://agent.example",
@@ -6547,6 +6550,248 @@ def test_stream_prompt_reports_non_200_sse_response(monkeypatch) -> None:
             prompt="hello",
             headers={},
         )
+
+
+def test_stream_prompt_reports_streaming_json_error_detail(monkeypatch) -> None:
+    request = httpx.Request("POST", "http://agent.example/sessions/sess-1/prompt")
+    response = httpx.Response(
+        409,
+        request=request,
+        stream=httpx.ByteStream(b'{"detail":"Turn already in progress"}'),
+    )
+
+    class FakeEventSource:
+        def __init__(self, response: httpx.Response) -> None:
+            self.response = response
+
+        def __enter__(self) -> FakeEventSource:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def iter_sse(self):
+            raise AssertionError("error responses must not stream SSE events")
+            yield None
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+    monkeypatch.setattr(
+        "coding_agent.remote.client.connect_sse",
+        lambda *args, **kwargs: FakeEventSource(response),
+    )
+
+    from coding_agent.remote.client import stream_prompt
+
+    with pytest.raises(
+        click.ClickException,
+        match="Failed to stream remote prompt: HTTP 409: Turn already in progress",
+    ):
+        stream_prompt(
+            base_url="http://agent.example",
+            session_id="sess-1",
+            prompt="hello",
+            headers={},
+        )
+
+
+def test_stream_prompt_with_unreadable_streaming_error_degrades_to_status(
+    monkeypatch,
+) -> None:
+    class UnreadableStream(httpx.SyncByteStream):
+        def __iter__(self):
+            raise httpx.StreamClosed()
+            yield b""
+
+        def close(self) -> None:
+            return None
+
+    request = httpx.Request("POST", "http://agent.example/sessions/sess-1/prompt")
+    response = httpx.Response(502, request=request, stream=UnreadableStream())
+
+    class FakeEventSource:
+        def __init__(self, response: httpx.Response) -> None:
+            self.response = response
+
+        def __enter__(self) -> FakeEventSource:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def iter_sse(self):
+            raise AssertionError("error responses must not stream SSE events")
+            yield None
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+    monkeypatch.setattr(
+        "coding_agent.remote.client.connect_sse",
+        lambda *args, **kwargs: FakeEventSource(response),
+    )
+
+    from coding_agent.remote.client import stream_prompt
+
+    with pytest.raises(
+        click.ClickException,
+        match="Failed to stream remote prompt: HTTP 502",
+    ):
+        stream_prompt(
+            base_url="http://agent.example",
+            session_id="sess-1",
+            prompt="hello",
+            headers={},
+        )
+
+
+def test_stream_prompt_with_stalled_error_detail_degrades_to_status(
+    monkeypatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    class StalledStream(httpx.SyncByteStream):
+        def __iter__(self):
+            started.set()
+            release.wait()
+            yield b'{"detail":"too late"}'
+
+        def close(self) -> None:
+            return None
+
+    request = httpx.Request("POST", "http://agent.example/sessions/sess-1/prompt")
+    response = httpx.Response(504, request=request, stream=StalledStream())
+
+    class FakeEventSource:
+        def __init__(self, response: httpx.Response) -> None:
+            self.response = response
+
+        def __enter__(self) -> FakeEventSource:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def iter_sse(self):
+            raise AssertionError("error responses must not stream SSE events")
+            yield None
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+    monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
+    monkeypatch.setattr(
+        "coding_agent.remote.client.connect_sse",
+        lambda *args, **kwargs: FakeEventSource(response),
+    )
+    monkeypatch.setattr(
+        "coding_agent.remote.client.ERROR_DETAIL_READ_TIMEOUT_SECONDS",
+        0.05,
+        raising=False,
+    )
+
+    from coding_agent.remote.client import stream_prompt
+
+    results: Queue[object] = Queue()
+
+    def run_stream_prompt() -> None:
+        try:
+            stream_prompt(
+                base_url="http://agent.example",
+                session_id="sess-1",
+                prompt="hello",
+                headers={},
+            )
+        except BaseException as exc:
+            results.put(exc)
+        else:
+            results.put("returned")
+
+    worker = threading.Thread(target=run_stream_prompt, daemon=True)
+    worker.start()
+    assert started.wait(timeout=1)
+    try:
+        result = results.get(timeout=0.5)
+    except Empty as exc:
+        raise AssertionError(
+            "remote error detail read did not return promptly"
+        ) from exc
+    finally:
+        release.set()
+        worker.join(timeout=1)
+
+    assert isinstance(result, click.ClickException)
+    assert str(result) == "Failed to stream remote prompt: HTTP 504"
+
+
+def test_remote_http_error_detail_keeps_non_streaming_json_detail() -> None:
+    from coding_agent.remote.client import _raise_remote_http_error
+
+    request = httpx.Request("POST", "http://agent.example/sessions")
+    response = httpx.Response(
+        400,
+        request=request,
+        json={"detail": "workspace source is required"},
+    )
+
+    with pytest.raises(
+        click.ClickException,
+        match="Failed to create remote session: HTTP 400: workspace source is required",
+    ):
+        _raise_remote_http_error(response, "create remote session")
+
+
+def test_remote_http_error_detail_keeps_bounded_non_json_text_detail() -> None:
+    from coding_agent.remote.client import _raise_remote_http_error
+
+    request = httpx.Request("POST", "http://agent.example/sessions")
+    text = "plain\tfailure\n" + ("x" * 350)
+    response = httpx.Response(503, request=request, content=text.encode())
+    expected = " ".join(text.split())[:300]
+
+    with pytest.raises(click.ClickException) as exc_info:
+        _raise_remote_http_error(response, "create remote session")
+
+    assert (
+        str(exc_info.value) == f"Failed to create remote session: HTTP 503: {expected}"
+    )
+
+
+def test_remote_http_error_detail_empty_body_degrades_to_status_only() -> None:
+    from coding_agent.remote.client import _raise_remote_http_error
+
+    request = httpx.Request("POST", "http://agent.example/sessions")
+    response = httpx.Response(500, request=request, content=b"")
+
+    with pytest.raises(click.ClickException) as exc_info:
+        _raise_remote_http_error(response, "create remote session")
+
+    assert str(exc_info.value) == "Failed to create remote session: HTTP 500"
 
 
 def test_stream_prompt_requests_display_event_stream(monkeypatch, capsys) -> None:
