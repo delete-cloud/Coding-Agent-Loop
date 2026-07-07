@@ -37,6 +37,10 @@ from coding_agent.topics.store import (
     TopicRecord,
 )
 from coding_agent.ui import http_server
+from coding_agent.server.developer_console import (
+    ConsoleContextEvidence,
+    _context_score,
+)
 from coding_agent.server.http_server import app, session_manager
 from coding_agent.server.session_manager import Session, SessionManager
 from coding_agent.server.stores.workspace_store import WorkspaceRecord
@@ -83,6 +87,22 @@ FORBIDDEN_RENDERED_TEXT = (
     "stderr",
     "env",
 )
+
+
+def test_context_score_formats_unlabeled_scores_with_general_format() -> None:
+    item = ConsoleContextEvidence(
+        kind="repo_file",
+        label="Repo reference",
+        source_id="repo-src-auth",
+        repo_path="src/auth.py",
+        line_start=10,
+        line_end=20,
+        score=1.0,
+        score_scale=None,
+        reason=None,
+    )
+
+    assert _context_score(item) == "1"
 
 
 class _ConsoleTapeStore:
@@ -647,6 +667,25 @@ def _runtime_run(
                                         "kind": "repo_file",
                                         "label": "memory evidence",
                                         "repo_path": "src/memory.py",
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    {
+                        "title": "Cross-topic recall references",
+                        "items": [
+                            {
+                                "source_kind": "topic_summary",
+                                "source_id": "topic:topic-auth",
+                                "label": "Auth recall",
+                                "score": 0.47,
+                                "score_scale": "similarity",
+                                "evidence": [
+                                    {
+                                        "kind": "topic",
+                                        "source_id": "topic-auth",
+                                        "label": "topic range summary",
                                     }
                                 ],
                             }
@@ -2361,6 +2400,7 @@ async def test_console_context_renders_context_pack_evidence_without_body() -> N
     assert "src/auth.py" in response.text
     assert "10-20" in response.text
     assert "0.12" in response.text
+    assert "similarity 0.47" in response.text
     assert "reason: auth evidence" in response.text
     assert 'href="/console/runs/run-alpha"' in response.text
     for forbidden in FORBIDDEN_RENDERED_TEXT:

@@ -4414,6 +4414,7 @@ def _context_evidence_from_item(
         line_start=_optional_int(raw_item.get("line_start")),
         line_end=_optional_int(raw_item.get("line_end")),
         score=score,
+        score_scale=safe_label_value(raw_item.get("score_scale")),
         reason=evidence_reason,
     )
 

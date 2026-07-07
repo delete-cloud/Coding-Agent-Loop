@@ -113,11 +113,15 @@ to 0.5). Final live values: recall_min_score=0.5, recall_min_overlap=0.3.
 Regression evidence (docs/dogfood/SEMANTIC_MEMORY_RUN_EVIDENCE.md): the
 restic probe now injects zero cross-topic noise and grounds from the sre KB
 corpus (Repo references, distances 0.742-0.781), while the relevant seeded
-topic still recalls (overlap 0.5333). Note: rendered recall scores carry no
-scale label (similarity vs token-overlap), which caused the round-1
-miscalibration - recorded as a defect-ledger follow-up alongside D9 (bge-m3
-short-summary similarity bands are barely separable: unrelated 0.433-0.450
-vs adjacent 0.463-0.493).
+topic still recalls (overlap 0.5333). The round-1 miscalibration came from
+reading token-overlap samples as semantic similarity samples. 2026-07-07
+addendum: rendered/operator-visible semantic and deterministic topic-recall
+scores are now scale-labeled (`similarity` for semantic
+`l2_distance_to_similarity_v1`, `overlap` for deterministic token-overlap) to
+make that gotcha visible. KB repo-reference distances (L2) still render as
+unlabeled scores and remain out of scope for this change; D9 remains separate
+(bge-m3 short-summary similarity bands are barely separable: unrelated
+0.433-0.450 vs adjacent 0.463-0.493).
 
 ## References
 

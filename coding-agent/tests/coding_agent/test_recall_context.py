@@ -307,6 +307,7 @@ def test_recall_context_pack_contains_reference_evidence() -> None:
     item = payload["sections"][0]["items"][0]
 
     assert item["source_kind"] == "topic_summary"
+    assert item["score_scale"] == "overlap"
     assert item["metadata"]["source_topic_ids"] == ["topic-auth"]
     assert item["evidence"][0]["kind"] == "topic"
     assert messages[0]["content"].startswith("[Context Pack] Reference grounding")

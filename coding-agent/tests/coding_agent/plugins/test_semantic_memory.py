@@ -163,6 +163,31 @@ async def test_build_context_rehydrates_topic_hits_from_authoritative_store() ->
 
 
 @pytest.mark.asyncio
+async def test_build_context_labels_deterministic_topic_score_as_overlap() -> None:
+    topic = _topic(
+        "topic-auth",
+        title="Auth gateway",
+        summary="JWT middleware lives in auth gateway.",
+    )
+    topic_index = TopicRangeIndex()
+    topic_index.index_topic(topic)
+    plugin = SemanticMemoryPlugin(
+        semantic_index=SafeSemanticMemoryIndex(FakeSemanticMemoryBackend()),
+        memory_review_store=MemoryReviewStore(),
+        read_enabled=True,
+        topic_store=FakeTopicStore((topic,)),
+        topic_index=topic_index,
+    )
+
+    result = await plugin.build_context(tape=_tape("jwt unrelated"))
+
+    rendered = "\n".join(str(item["content"]) for item in result)
+    assert "(overlap 0.5)" in rendered
+    assert "(score 0.5)" not in rendered
+    assert "(similarity 0.5)" not in rendered
+
+
+@pytest.mark.asyncio
 async def test_build_context_derives_topic_range_index_from_topic_store() -> None:
     topic = _topic(
         "topic-auth",

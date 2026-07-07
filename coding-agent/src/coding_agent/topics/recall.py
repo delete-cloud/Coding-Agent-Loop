@@ -15,6 +15,7 @@ from coding_agent.topics.context_pack import (
     EvidenceRef,
 )
 from coding_agent.topics.lifecycle import _append_anchor, _remove_anchor
+from coding_agent.topics.range_index import TOPIC_RANGE_SCORE_SCALE_OVERLAP
 from coding_agent.topics.store import JSONObject, TopicRecallLinkRecord, TopicRecord
 
 RECALL_ANCHOR = "recall_anchor"
@@ -168,6 +169,7 @@ def _context_item(recalled: RecalledTopic) -> ContextPackItem:
         label=topic.title or topic.topic_id,
         body=topic.summary,
         score=recalled.score,
+        score_scale=TOPIC_RANGE_SCORE_SCALE_OVERLAP,
         evidence=(
             EvidenceRef(
                 kind="topic",

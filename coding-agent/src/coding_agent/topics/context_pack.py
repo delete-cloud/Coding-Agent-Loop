@@ -65,6 +65,7 @@ class ContextPackItem:
     body: str | None = None
     rank: int | None = None
     score: float | None = None
+    score_scale: str | None = None
     repo_path: str | None = None
     line_start: int | None = None
     line_end: int | None = None
@@ -78,6 +79,10 @@ class ContextPackItem:
         _validate_line_range(self.line_start, self.line_end)
         if self.rank is not None and self.rank <= 0:
             raise ValueError("rank must be positive when provided")
+        if self.score_scale is not None:
+            _require_non_empty(self.score_scale, "score_scale")
+            if self.score is None:
+                raise ValueError("score_scale requires score")
         if self.body is not None and not isinstance(self.body, str):
             raise TypeError("body must be a string when provided")
         object.__setattr__(self, "evidence", tuple(self.evidence))
@@ -93,6 +98,7 @@ class ContextPackItem:
         _add_optional(payload, "body", self.body)
         _add_optional(payload, "rank", self.rank)
         _add_optional(payload, "score", self.score)
+        _add_optional(payload, "score_scale", self.score_scale)
         _add_optional(payload, "repo_path", self.repo_path)
         _add_optional(payload, "line_start", self.line_start)
         _add_optional(payload, "line_end", self.line_end)
@@ -247,7 +253,8 @@ def _item_suffix(item: ContextPackItem) -> str:
     if item.rank is not None:
         parts.append(f"rank {item.rank}")
     if item.score is not None:
-        parts.append(f"score {item.score:g}")
+        score_label = item.score_scale or "score"
+        parts.append(f"{score_label} {item.score:g}")
     location = _format_location(item.repo_path, item.line_start, item.line_end)
     if location is not None:
         parts.append(location)
