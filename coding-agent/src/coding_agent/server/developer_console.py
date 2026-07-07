@@ -126,6 +126,7 @@ class ConsoleContextEvidence:
     line_start: int | None
     line_end: int | None
     score: float | None
+    score_scale: str | None
     reason: str | None
 
 
@@ -1084,7 +1085,7 @@ def _context_sections(context: ConsoleContextSummary | None) -> str:
                 f"<td>{escape(item.source_id)}</td>"
                 f"<td>{escape(item.repo_path or '-')}</td>"
                 f"<td>{escape(_line_range(item.line_start, item.line_end))}</td>"
-                f"<td>{escape('-' if item.score is None else str(item.score))}</td>"
+                f"<td>{escape(_context_score(item))}</td>"
                 f"<td>{escape(item.reason or '-')}</td>"
                 "</tr>"
             )
@@ -1100,6 +1101,14 @@ def _context_sections(context: ConsoleContextSummary | None) -> str:
             "</section>"
         )
     return "".join(sections)
+
+
+def _context_score(item: ConsoleContextEvidence) -> str:
+    if item.score is None:
+        return "-"
+    if item.score_scale is None:
+        return f"{item.score:g}"
+    return f"{item.score_scale} {item.score:g}"
 
 
 def _memory_evidence_section(memory: ConsoleMemorySummary | None) -> str:

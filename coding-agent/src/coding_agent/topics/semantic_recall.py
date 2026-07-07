@@ -9,6 +9,7 @@ from agentkit.storage.protocols import MemoryHit
 from coding_agent.topics.memory import ReviewedMemoryRecord, memory_candidate_session_id
 from coding_agent.topics.provenance import topic_entry_range
 from coding_agent.topics.range_index import (
+    TOPIC_RANGE_SCORE_SCALE_SIMILARITY,
     TopicRangeSearchQuery,
     TopicRangeSearchResult,
     rank_topic_results_for_query,
@@ -375,6 +376,7 @@ def _topic_result_from_record(
         title=topic.title,
         summary=topic.summary,
         score=score,
+        score_scale=TOPIC_RANGE_SCORE_SCALE_SIMILARITY,
         reason="semantic_rehydrated",
         source_ranges=(topic_entry_range(topic),),
         kind=topic.kind,
