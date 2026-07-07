@@ -5,9 +5,9 @@ It intentionally omits prompts, model output, command stdout/stderr, URLs, envir
 
 ## Summary
 
-- Records: 26
-- Sessions: 8
-- Runs: 9
+- Records: 30
+- Sessions: 9
+- Runs: 11
 - Topics: 1
 - Candidates: 1
 
@@ -41,3 +41,7 @@ It intentionally omits prompts, model output, command stdout/stderr, URLs, envir
 | 24 | 2026-07-03T08:21:30Z | record-run | run | session_id=34cfa3a6-1be9-4418-82bd-fa62ead27d0d; run_id=d5c72e7a2bc442329002428e9a1902f5; tape_id=b68b8bd3-e257-431b-9c6c-160c22ee9590 |  | run=completed |  |  |
 | 25 | 2026-07-03T08:21:33Z | probe | topic | session_id=34cfa3a6-1be9-4418-82bd-fa62ead27d0d; run_id=d5c72e7a2bc442329002428e9a1902f5; tape_id=b68b8bd3-e257-431b-9c6c-160c22ee9590 |  | run=completed | pass | note=restic regression r2, floors 0.5/0.3: Cross-topic empty, Repo references x3 from sre corpus (0.742-0.781), answer cites volsync-restic-async-backup - KB retrieval live for the first time, D7/D8 fixed end to end |
 | 26 | 2026-07-03T08:21:35Z | record-run | run-summary | session_id=8723a76b-1454-408a-be8c-67656f56c25e | run_count=0 |  |  |  |
+| 27 | 2026-07-05T08:33:27Z | record-run | run-summary | session_id=8bef270e-18f2-4c83-86ed-0c230978f4d6 | run_count=2 |  |  |  |
+| 28 | 2026-07-05T08:33:27Z | record-run | run | session_id=8bef270e-18f2-4c83-86ed-0c230978f4d6; run_id=ebddb3dfdff344fda9e314f59e77109e; tape_id=38b4492c-9e59-4a08-b06c-7759bd565555 |  | run=cancelled |  |  |
+| 29 | 2026-07-05T08:33:27Z | record-run | run | session_id=8bef270e-18f2-4c83-86ed-0c230978f4d6; run_id=015122cb41e646b8826bb0d330d2f498; tape_id=38b4492c-9e59-4a08-b06c-7759bd565555 |  | run=completed |  |  |
+| 30 | 2026-07-05T08:33:28Z | probe | negative | session_id=8bef270e-18f2-4c83-86ed-0c230978f4d6; run_id=015122cb41e646b8826bb0d330d2f498; tape_id=38b4492c-9e59-4a08-b06c-7759bd565555 |  | run=completed | pass | note=F3/F4 acceptance on 041896f: interrupted approval run cancelled, same-session next prompt completed (no 409, no tape rebind brick) - fixes verified live |
