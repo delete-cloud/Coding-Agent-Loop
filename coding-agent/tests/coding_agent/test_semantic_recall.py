@@ -98,6 +98,38 @@ async def test_semantic_topic_hit_is_rehydrated_from_authoritative_topic() -> No
 
 
 @pytest.mark.asyncio
+async def test_semantic_topic_hit_renders_similarity_score_label() -> None:
+    topic = _topic(
+        "topic-auth",
+        title="Auth convention",
+        summary="Authoritative JWT middleware summary",
+    )
+    planner = _planner(
+        semantic_hits=(
+            _hit(
+                str(SemanticDocId.for_topic(topic)),
+                source_refs=("topic:topic-auth",),
+                score=0.47,
+            ),
+        ),
+        topics=(topic,),
+    )
+
+    plan = await planner.plan(
+        TopicRecallPlannerInput(
+            source_topic=_source_topic(),
+            text="jwt middleware",
+            profile="local",
+        )
+    )
+
+    rendered = recall_context_messages(plan)[0]["content"]
+    assert "(similarity 0.47)" in rendered
+    assert "(score 0.47)" not in rendered
+    assert "(overlap 0.47)" not in rendered
+
+
+@pytest.mark.asyncio
 async def test_stale_semantic_topic_doc_id_is_dropped() -> None:
     topic = _topic("topic-auth", start=4, end=12)
     planner = _planner(

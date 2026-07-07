@@ -69,6 +69,8 @@ _ARTIFACT_QUERY_MARKERS = (
     "版本",
 )
 _RECENCY_SCORE_WINDOW = 0.15
+TOPIC_RANGE_SCORE_SCALE_OVERLAP = "overlap"
+TOPIC_RANGE_SCORE_SCALE_SIMILARITY = "similarity"
 
 
 @dataclass(frozen=True)
@@ -197,6 +199,7 @@ class TopicRangeSearchResult:
     report_refs: tuple[str, ...] = ()
     evidence_refs: tuple[str, ...] = ()
     tags: tuple[str, ...] = ()
+    score_scale: str = TOPIC_RANGE_SCORE_SCALE_OVERLAP
 
 
 @dataclass

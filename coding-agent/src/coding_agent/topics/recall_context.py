@@ -176,6 +176,7 @@ def _topic_result_item(result: TopicRangeSearchResult) -> ContextPackItem:
         label=result.title or result.topic_id,
         body=result.summary,
         score=result.score,
+        score_scale=result.score_scale,
         evidence=(
             EvidenceRef(
                 kind="topic",
