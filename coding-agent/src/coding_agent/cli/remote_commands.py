@@ -116,6 +116,11 @@ def remote_remove(name: str) -> None:
     help="Create an empty server-side Docker workspace.",
 )
 @click.option(
+    "--no-workspace",
+    is_flag=True,
+    help="Create a session without provisioning a workspace; use for servers without cloud workspace support.",
+)
+@click.option(
     "--runtime",
     "runtime_profile",
     default=None,
@@ -141,6 +146,7 @@ def remote_repl(
     name: str,
     repo: str | None,
     empty_workspace: bool,
+    no_workspace: bool,
     runtime_profile: str | None,
     goal: str,
     approval_policy: str,
@@ -151,6 +157,7 @@ def remote_repl(
         name=name,
         repo=repo,
         empty_workspace=empty_workspace,
+        no_workspace=no_workspace,
         runtime_profile=runtime_profile,
         goal=goal,
         approval_policy=approval_policy,
@@ -171,6 +178,11 @@ def remote_repl(
     "--empty-workspace",
     is_flag=True,
     help="Create an empty server-side Docker workspace.",
+)
+@click.option(
+    "--no-workspace",
+    is_flag=True,
+    help="Create a session without provisioning a workspace; use for servers without cloud workspace support.",
 )
 @click.option(
     "--runtime",
@@ -209,6 +221,7 @@ def remote_run(
     name: str,
     repo: str | None,
     empty_workspace: bool,
+    no_workspace: bool,
     runtime_profile: str | None,
     goal: str,
     approval_policy: str,
@@ -221,6 +234,7 @@ def remote_run(
         name=name,
         repo=repo,
         empty_workspace=empty_workspace,
+        no_workspace=no_workspace,
         runtime_profile=runtime_profile,
         goal=goal,
         approval_policy=approval_policy,
@@ -236,6 +250,7 @@ def _remote_run_once(
     name: str,
     repo: str | None,
     empty_workspace: bool,
+    no_workspace: bool,
     runtime_profile: str | None,
     goal: str,
     approval_policy: str,
@@ -255,16 +270,24 @@ def _remote_run_once(
         create_workspace_archive_base64,
     )
 
-    if repo is not None and empty_workspace:
+    workspace_mode_count = (
+        int(repo is not None) + int(empty_workspace) + int(no_workspace)
+    )
+    if workspace_mode_count > 1:
         raise click.ClickException(
-            "Pass either --repo to use a local repo or --empty-workspace, not both."
+            "Pass only one of --repo, --empty-workspace, or --no-workspace."
         )
-    if repo is None and not empty_workspace:
+    if workspace_mode_count == 0:
         raise click.ClickException(
-            "Pass --repo to use a local repo or --empty-workspace to create a blank remote workspace."
+            "Pass --repo to use a local repo, --empty-workspace to create a blank remote workspace, "
+            "or --no-workspace to create a session without a workspace for servers without cloud workspace support."
         )
     if download_results and repo is None:
         raise click.ClickException("Pass --repo with --download.")
+    if no_workspace and runtime_profile is not None:
+        raise click.ClickException(
+            "Pass --runtime only when creating a remote workspace."
+        )
 
     endpoint = get_remote(name)
     headers = auth_headers(endpoint)
@@ -290,6 +313,7 @@ def _remote_run_once(
         endpoint,
         snapshot_archive_base64=snapshot_archive_base64,
         workspace_source=workspace_source,
+        no_workspace=no_workspace,
         approval_policy=approval_policy,
         runtime_profile=None if workspace_source is not None else runtime_profile,
     )

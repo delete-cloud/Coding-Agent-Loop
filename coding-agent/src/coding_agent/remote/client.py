@@ -250,6 +250,7 @@ def create_remote_session(
     *,
     snapshot_archive_base64: str | None = None,
     workspace_source: dict[str, object] | None = None,
+    no_workspace: bool = False,
     approval_policy: str = "auto",
     runtime_profile: str | None = None,
     observation_sink: ObservationSink | None = None,
@@ -260,23 +261,34 @@ def create_remote_session(
         raise click.ClickException(
             "Pass either workspace_source or snapshot_archive_base64, not both."
         )
-    if workspace_source is None:
-        workspace_source = {"kind": "docker"}
-        if snapshot_archive_base64 is not None:
-            workspace_source["snapshot_archive_base64"] = snapshot_archive_base64
-    else:
-        workspace_source = dict(workspace_source)
-    if runtime_profile is not None:
-        workspace_source["runtime_profile"] = runtime_profile
-    payload: dict[str, object] = {
-        "workspace_source": workspace_source,
-        "approval_policy": approval_policy,
-    }
+    if no_workspace and (
+        workspace_source is not None
+        or snapshot_archive_base64 is not None
+        or runtime_profile is not None
+    ):
+        raise click.ClickException(
+            "Pass either no_workspace or remote workspace options, not both."
+        )
+    payload: dict[str, object] = {"approval_policy": approval_policy}
+    workspace_ref_kind = "none"
+    if not no_workspace:
+        if workspace_source is None:
+            workspace_source = {"kind": "docker"}
+            if snapshot_archive_base64 is not None:
+                workspace_source["snapshot_archive_base64"] = snapshot_archive_base64
+            if runtime_profile is not None:
+                workspace_source["runtime_profile"] = runtime_profile
+        else:
+            workspace_source = dict(workspace_source)
+            if runtime_profile is not None:
+                workspace_source["runtime_profile"] = runtime_profile
+        payload["workspace_source"] = workspace_source
+        workspace_ref_kind = _workspace_ref_kind(workspace_source)
     with record_span(
         "remote.workspace.provision",
         sink=observation_sink,
         attributes={
-            "workspace_ref_kind": _workspace_ref_kind(workspace_source),
+            "workspace_ref_kind": workspace_ref_kind,
             "remote_status": "started",
         },
     ) as span:
@@ -1704,7 +1716,22 @@ def _raise_remote_http_error(response: httpx.Response, action: str) -> None:
         _ = response.raise_for_status()
     except httpx.HTTPStatusError as exc:
         detail = _response_error_detail(response)
+        if action == "create remote session" and _looks_like_cloud_workspace_disabled(
+            detail
+        ):
+            detail = (
+                f"{detail}. Use --no-workspace to create a session without "
+                "server-side workspace provisioning."
+            )
         raise click.ClickException(f"Failed to {action}: {detail}") from exc
+
+
+def _looks_like_cloud_workspace_disabled(detail: str) -> bool:
+    normalized = detail.lower()
+    return (
+        "cloud_workspace.enabled=true" in normalized
+        or "cloud workspace provisioning" in normalized
+    )
 
 
 def _response_error_detail(response: httpx.Response) -> str:
