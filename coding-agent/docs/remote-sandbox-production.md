@@ -244,6 +244,9 @@ from `origin`. It streams one prompt, leaves the remote session open, and prints
 follow-up commands for inspecting, exporting, or publishing the result. It does
 not overwrite the local checkout by default.
 
+Use `remote run --no-workspace` when the server has no cloud workspace support
+and the session should be created without any server-side workspace provisioning.
+
 Set the remote tool approval policy explicitly when automation cannot answer
 approval prompts:
 
