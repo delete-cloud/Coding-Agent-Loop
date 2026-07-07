@@ -5,9 +5,9 @@ It intentionally omits prompts, model output, command stdout/stderr, URLs, envir
 
 ## Summary
 
-- Records: 30
-- Sessions: 9
-- Runs: 11
+- Records: 34
+- Sessions: 10
+- Runs: 13
 - Topics: 1
 - Candidates: 1
 
@@ -45,3 +45,7 @@ It intentionally omits prompts, model output, command stdout/stderr, URLs, envir
 | 28 | 2026-07-05T08:33:27Z | record-run | run | session_id=8bef270e-18f2-4c83-86ed-0c230978f4d6; run_id=ebddb3dfdff344fda9e314f59e77109e; tape_id=38b4492c-9e59-4a08-b06c-7759bd565555 |  | run=cancelled |  |  |
 | 29 | 2026-07-05T08:33:27Z | record-run | run | session_id=8bef270e-18f2-4c83-86ed-0c230978f4d6; run_id=015122cb41e646b8826bb0d330d2f498; tape_id=38b4492c-9e59-4a08-b06c-7759bd565555 |  | run=completed |  |  |
 | 30 | 2026-07-05T08:33:28Z | probe | negative | session_id=8bef270e-18f2-4c83-86ed-0c230978f4d6; run_id=015122cb41e646b8826bb0d330d2f498; tape_id=38b4492c-9e59-4a08-b06c-7759bd565555 |  | run=completed | pass | note=F3/F4 acceptance on 041896f: interrupted approval run cancelled, same-session next prompt completed (no 409, no tape rebind brick) - fixes verified live |
+| 31 | 2026-07-07T03:26:06Z | record-run | run-summary | session_id=cee7eb2a-7a3b-4724-8888-022c60879ca0 | run_count=2 |  |  |  |
+| 32 | 2026-07-07T03:26:06Z | record-run | run | session_id=cee7eb2a-7a3b-4724-8888-022c60879ca0; run_id=6f5de0ba357c4d76aaecf3b6060984dc; tape_id=1eed48b6-7a3f-472d-98ca-40d112b7506c |  | run=completed |  |  |
+| 33 | 2026-07-07T03:26:06Z | record-run | run | session_id=cee7eb2a-7a3b-4724-8888-022c60879ca0; run_id=c7a684fbf24c4c6f8e8736d32abe4153; tape_id=1eed48b6-7a3f-472d-98ca-40d112b7506c |  | run=completed |  |  |
+| 34 | 2026-07-07T03:26:20Z | probe | negative | session_id=cee7eb2a-7a3b-4724-8888-022c60879ca0; run_id=c7a684fbf24c4c6f8e8736d32abe4153; tape_id=1eed48b6-7a3f-472d-98ca-40d112b7506c |  | run=completed | pass | note=D3+F5 acceptance on 752793f: --no-workspace CLI created session; approve-all held within-turn and cross-turn; F5 refuted |
