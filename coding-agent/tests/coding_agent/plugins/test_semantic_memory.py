@@ -19,6 +19,7 @@ from coding_agent.plugins.semantic_memory import (
     SemanticMemoryPlugin,
     semantic_grounding_query_digest,
 )
+from coding_agent.topics.context_pack import CONTEXT_PACK_STASH_KEY
 from coding_agent.topics.memory import (
     MemoryReviewStore,
     ReviewedMemoryRecord,
@@ -282,6 +283,57 @@ async def test_build_context_records_grounding_hit_count_in_pipeline_context() -
         "tape_entry_count": len(tape),
         "hit_count": 1,
     }
+
+
+@pytest.mark.asyncio
+async def test_build_context_stashes_context_pack_in_pipeline_context() -> None:
+    topic = _topic(
+        "topic-auth",
+        title="Auth gateway",
+        summary="JWT middleware lives in auth gateway.",
+    )
+    topic_index = TopicRangeIndex()
+    topic_index.index_topic(topic)
+    plugin = SemanticMemoryPlugin(
+        semantic_index=SafeSemanticMemoryIndex(FakeSemanticMemoryBackend()),
+        memory_review_store=MemoryReviewStore(),
+        read_enabled=True,
+        topic_store=FakeTopicStore((topic,)),
+        topic_index=topic_index,
+    )
+    tape = _tape("jwt unrelated")
+    ctx = PipelineContext(tape=tape)
+
+    await plugin.build_context(tape=tape, ctx=ctx)
+
+    stash = ctx.config[CONTEXT_PACK_STASH_KEY]
+    pack = stash["semantic_memory"]
+    section = pack["sections"][0]
+    assert section["title"] == "Cross-topic recall references"
+    item = section["items"][0]
+    assert item["source_kind"] == "topic_summary"
+    assert item["source_id"] == "topic:topic-auth"
+    assert item["label"] == "Auth gateway"
+    assert item["score"] == 0.5
+    assert item["score_scale"] == "overlap"
+
+
+@pytest.mark.asyncio
+async def test_build_context_clears_stale_context_pack_stash() -> None:
+    plugin = SemanticMemoryPlugin(
+        semantic_index=SafeSemanticMemoryIndex(FakeSemanticMemoryBackend()),
+        memory_review_store=MemoryReviewStore(),
+        read_enabled=True,
+    )
+    tape = Tape(tape_id="tape-semantic")
+    ctx = PipelineContext(tape=tape, session_id="session-runtime")
+    ctx.config[CONTEXT_PACK_STASH_KEY] = {
+        "semantic_memory": {"title": "Context Pack", "sections": [{"title": "stale"}]}
+    }
+
+    await plugin.build_context(tape=tape, ctx=ctx)
+
+    assert CONTEXT_PACK_STASH_KEY not in ctx.config
 
 
 @pytest.mark.asyncio

@@ -12,6 +12,7 @@ from coding_agent.stores.runtime_store import AgentRunRecord, JSONObject
 from coding_agent.runs import (
     RuntimeCloser,
     RuntimeRunLifecycle,
+    RuntimeRunPersistenceService,
     RuntimeTaskStopper,
     RuntimeTurnController,
     RuntimeTurnSessionState,
@@ -23,6 +24,12 @@ from coding_agent.runs import (
     RuntimeTurnStarter,
     runtime_result_from_turn_outcome,
     runtime_status_from_turn_outcome,
+)
+from coding_agent.topics.context_pack import (
+    ContextPack,
+    ContextPackItem,
+    ContextPackSection,
+    stash_context_pack,
 )
 
 
@@ -342,6 +349,7 @@ async def test_runtime_turn_finalizer_finishes_store_backed_outcome() -> None:
         result: JSONObject,
         error: str | None,
         resume_context: FakeResumeContext | None = None,
+        extra_metadata: JSONObject | None = None,
     ) -> None:
         finishes.append(
             {
@@ -424,6 +432,7 @@ async def test_runtime_turn_finalizer_records_storeless_failure_outcome() -> Non
         result: JSONObject,
         error: str | None,
         resume_context: FakeResumeContext | None = None,
+        extra_metadata: JSONObject | None = None,
     ) -> None:
         del session, status, result, error, resume_context
         finishes.append(run_id)
@@ -455,6 +464,101 @@ async def test_runtime_turn_finalizer_records_storeless_failure_outcome() -> Non
     assert finishes == []
     assert persisted == [session]
     assert observations == ["failed"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_turn_finalizer_persists_stashed_context_pack() -> None:
+    store = RecordingRuntimeStore()
+    persistence = RuntimeRunPersistenceService(
+        run_store=store,
+        checkpoint_store=None,
+        metadata_for_session=lambda session, *, resume_context=None: {
+            "session_id": session.id,
+        },
+    )
+    persisted: list[FakeTurnSession] = []
+
+    async def persist_session(session: FakeTurnSession) -> None:
+        persisted.append(session)
+
+    finalizer = persistence.turn_finalizer(persist_session=persist_session)
+    session = FakeTurnSession(id="session-1", tape_id=None)
+    ctx = FakeRuntimeContext("tape-recalled")
+    stash_context_pack(
+        ctx.config,
+        contributor="semantic_memory",
+        pack=ContextPack(
+            sections=(
+                ContextPackSection(
+                    title="Cross-topic recall references",
+                    items=(
+                        ContextPackItem(
+                            source_kind="topic_summary",
+                            source_id="topic:topic-auth",
+                            label="Auth recall",
+                            score=0.47,
+                            score_scale="similarity",
+                        ),
+                    ),
+                ),
+            )
+        ),
+    )
+
+    await persistence.lifecycle().start(
+        session,
+        run_id="run-1",
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    await finalizer.complete(
+        session,
+        ctx=ctx,
+        outcome=TurnOutcome(stop_reason=StopReason.NO_TOOL_CALLS, steps_taken=1),
+        run_id="run-1",
+    )
+
+    metadata = store.updated[-1]["metadata"]
+    assert metadata["session_id"] == "session-1"
+    pack = metadata["context_pack"]
+    assert pack["title"] == "Context Pack"
+    item = pack["sections"][0]["items"][0]
+    assert item["source_kind"] == "topic_summary"
+    assert item["source_id"] == "topic:topic-auth"
+    assert item["label"] == "Auth recall"
+    assert item["score"] == 0.47
+    assert item["score_scale"] == "similarity"
+
+
+@pytest.mark.asyncio
+async def test_runtime_turn_finalizer_omits_context_pack_without_stash() -> None:
+    store = RecordingRuntimeStore()
+    persistence = RuntimeRunPersistenceService(
+        run_store=store,
+        checkpoint_store=None,
+        metadata_for_session=lambda session, *, resume_context=None: {
+            "session_id": session.id,
+        },
+    )
+
+    async def persist_session(session: FakeTurnSession) -> None:
+        del session
+
+    finalizer = persistence.turn_finalizer(persist_session=persist_session)
+    session = FakeTurnSession(id="session-1", tape_id=None)
+
+    await persistence.lifecycle().start(
+        session,
+        run_id="run-1",
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    await finalizer.complete(
+        session,
+        ctx=FakeRuntimeContext("tape-plain"),
+        outcome=TurnOutcome(stop_reason=StopReason.NO_TOOL_CALLS, steps_taken=1),
+        run_id="run-1",
+    )
+
+    assert "context_pack" not in store.updated[-1]["metadata"]
 
 
 def test_runtime_turn_observation_state_tracks_recorder_actions() -> None:
@@ -698,6 +802,7 @@ async def test_runtime_turn_controller_routes_before_and_after_hooks() -> None:
         result: JSONObject,
         error: str | None,
         resume_context: FakeResumeContext | None = None,
+        extra_metadata: JSONObject | None = None,
     ) -> None:
         del session, status, result, error, resume_context
         finishes.append(run_id)

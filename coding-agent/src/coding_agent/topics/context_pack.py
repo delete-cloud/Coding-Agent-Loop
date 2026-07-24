@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -141,6 +142,58 @@ class ContextPack:
             "title": self.title,
             "sections": [section.to_dict() for section in self.sections],
         }
+
+
+CONTEXT_PACK_STASH_KEY = "context_pack"
+
+
+def stash_context_pack(
+    config: MutableMapping[str, Any],
+    *,
+    contributor: str,
+    pack: ContextPack | None,
+) -> None:
+    """Stash a plugin's context pack contribution on the pipeline ctx config.
+
+    Mirrors the grounding-marker pattern: build_context hooks record their
+    pack under a shared contributor-keyed entry so turn finalization can
+    persist it into run metadata. Passing ``pack=None`` (or an empty pack)
+    clears the contributor's stale contribution.
+    """
+
+    raw = config.get(CONTEXT_PACK_STASH_KEY)
+    contributions: dict[str, Any] = dict(raw) if isinstance(raw, dict) else {}
+    if pack is None or not pack.sections:
+        contributions.pop(contributor, None)
+    else:
+        contributions[contributor] = pack.to_dict()
+    if contributions:
+        config[CONTEXT_PACK_STASH_KEY] = contributions
+    else:
+        config.pop(CONTEXT_PACK_STASH_KEY, None)
+
+
+def merged_context_pack_stash(
+    config: Mapping[str, Any],
+) -> dict[str, JsonValue] | None:
+    """Merge stashed contributions into the run-metadata context_pack shape."""
+
+    raw = config.get(CONTEXT_PACK_STASH_KEY)
+    if not isinstance(raw, Mapping):
+        return None
+    sections: list[JsonValue] = []
+    for contributor in sorted(raw):
+        pack = raw[contributor]
+        if not isinstance(pack, Mapping):
+            continue
+        pack_sections = pack.get("sections")
+        if isinstance(pack_sections, list):
+            sections.extend(
+                section for section in pack_sections if isinstance(section, dict)
+            )
+    if not sections:
+        return None
+    return {"title": "Context Pack", "sections": sections}
 
 
 class ContextPackRenderer:

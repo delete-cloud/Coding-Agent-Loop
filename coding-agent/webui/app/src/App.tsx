@@ -2,9 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AgentClient } from "./lib/api";
 import type {
   ApprovalPolicy,
+  ContextPackItem,
   DisplayEventEnvelope,
   DisplayStreamEvent,
   FinalResultPayload,
+  MemoryReviewRecord,
   ProgressPayload,
   SessionSummary,
   WorkspaceDiff,
@@ -23,6 +25,7 @@ import Header from "./components/Header";
 import Composer from "./components/Composer";
 import SessionList from "./components/SessionList";
 import DiffPanel from "./components/DiffPanel";
+import MemoryPanel, { extractRecallHits } from "./components/MemoryPanel";
 
 const LS_KEY = "coding-agent-webui-config";
 type Config = {
@@ -70,6 +73,11 @@ export default function App() {
   const [diffState, setDiffState] = useState<{
     diff: WorkspaceDiff;
     patch: WorkspacePatch | null;
+  } | null>(null);
+  const [memoryState, setMemoryState] = useState<{
+    hits: ContextPackItem[];
+    memories: MemoryReviewRecord[];
+    error: string | null;
   } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const followAbortRef = useRef<AbortController | null>(null);
@@ -129,6 +137,24 @@ export default function App() {
     }
   }, [client]);
 
+  const refreshMemory = useCallback(async (id: string) => {
+    try {
+      const [runs, memories] = await Promise.all([
+        client.runs(id),
+        client.listMemoryReviews(id, "accepted"),
+      ]);
+      if (activeSessionRef.current !== id) return;
+      setMemoryState({ hits: extractRecallHits(runs), memories, error: null });
+    } catch (e) {
+      if (activeSessionRef.current !== id) return;
+      setMemoryState((prev) => ({
+        hits: prev?.hits ?? [],
+        memories: prev?.memories ?? [],
+        error: `memory load failed: ${msg(e)}`,
+      }));
+    }
+  }, [client]);
+
   useEffect(() => {
     void refreshSessions();
     // Config edits can pass through incomplete URLs; refresh explicitly after edits.
@@ -161,8 +187,10 @@ export default function App() {
       setSessionLoadingState(false);
       setItems([]);
       setDiffState(null);
+      setMemoryState(null);
       setStatus("idle");
       void refreshSessions();
+      void refreshMemory(id);
     } catch (e) {
       if (loadSeqRef.current !== loadSeq) return;
       activeSessionRef.current = previousSessionId;
@@ -177,7 +205,7 @@ export default function App() {
         },
       ]);
     }
-  }, [client, config.repoPath, config.approval, refreshSessions, setSessionLoadingState]);
+  }, [client, config.repoPath, config.approval, refreshSessions, refreshMemory, setSessionLoadingState]);
 
   const followSession = useCallback(async (id: string) => {
     const ctrl = new AbortController();
@@ -203,8 +231,9 @@ export default function App() {
     } finally {
       if (followAbortRef.current === ctrl) followAbortRef.current = null;
       void refreshSessions();
+      void refreshMemory(id);
     }
-  }, [client, refreshSessions]);
+  }, [client, refreshSessions, refreshMemory]);
 
   const loadSession = useCallback(async (id: string) => {
     const loadSeq = loadSeqRef.current + 1;
@@ -220,6 +249,7 @@ export default function App() {
     setSessionLoadingState(true);
     setItems([]);
     setDiffState(null);
+    setMemoryState(null);
     setStatus("loading history…");
     try {
       const [summary, events] = await Promise.all([
@@ -232,6 +262,7 @@ export default function App() {
       setSessionLoadingState(false);
       setItems(replayEvents([], events));
       setStatus(summary.turn_in_progress ? "reconnected" : "idle");
+      void refreshMemory(id);
       if (summary.turn_in_progress) void followSession(id);
     } catch (e) {
       if (loadSeqRef.current !== loadSeq || activeSessionRef.current !== id) return;
@@ -245,7 +276,7 @@ export default function App() {
       ]);
       setStatus("restore failed");
     }
-  }, [client, followSession, setSessionLoadingState]);
+  }, [client, followSession, refreshMemory, setSessionLoadingState]);
 
   async function reconcileSession(id: string, errorText: string) {
     try {
@@ -320,8 +351,9 @@ export default function App() {
         abortRef.current = null;
       }
       void refreshSessions();
+      if (activeSessionRef.current === sessionId) void refreshMemory(sessionId);
     }
-  }, [client, prompt, sessionId, sessionMode, streaming, refreshSessions]);
+  }, [client, prompt, sessionId, sessionMode, streaming, refreshSessions, refreshMemory]);
 
   const onApprove = useCallback(
     async (requestId: string, approved: boolean, feedback: string) => {
@@ -399,6 +431,14 @@ export default function App() {
               diff={diffState.diff}
               patch={diffState.patch}
               onClose={() => setDiffState(null)}
+            />
+          )}
+          {sessionId && (
+            <MemoryPanel
+              hits={memoryState?.hits ?? []}
+              memories={memoryState?.memories ?? []}
+              loading={memoryState === null}
+              error={memoryState?.error ?? null}
             />
           )}
         </main>

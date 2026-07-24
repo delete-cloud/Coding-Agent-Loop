@@ -22,6 +22,7 @@ from coding_agent.plugins.semantic_memory import (
     SemanticMemoryPlugin,
     semantic_grounding_query_digest,
 )
+from coding_agent.topics.context_pack import CONTEXT_PACK_STASH_KEY
 from coding_agent.topics.memory import MemoryReviewStore
 from coding_agent.topics.range_index import TopicRangeIndex
 from coding_agent.topics.semantic_backends import FakeSemanticMemoryBackend
@@ -241,6 +242,51 @@ class TestBuildContextSearch:
         assert result1 == result2
         assert indexed_plugin._snapshot is not None
         assert indexed_plugin._snapshot.last_user_msg == "How does auth work?"
+
+    def test_build_context_stashes_context_pack_in_pipeline_context(
+        self, indexed_plugin: KBPlugin
+    ):
+        tape = Tape()
+        tape.append(
+            Entry(
+                kind="message",
+                payload={"role": "user", "content": "How does auth work?"},
+            )
+        )
+        ctx = PipelineContext(tape=tape)
+
+        indexed_plugin.build_context(tape=tape, ctx=ctx)
+
+        stash = ctx.config[CONTEXT_PACK_STASH_KEY]
+        pack = stash["kb"]
+        section = pack["sections"][0]
+        assert section["title"] == "Repo references"
+        item = section["items"][0]
+        assert item["source_kind"] == "repo_file"
+        assert item["label"] == "src/auth.py"
+        assert item["rank"] == 1
+        assert isinstance(item["score"], float)
+
+    def test_build_context_cache_hit_restashes_context_pack(
+        self, indexed_plugin: KBPlugin
+    ):
+        tape = Tape()
+        tape.append(
+            Entry(
+                kind="message",
+                payload={"role": "user", "content": "How does auth work?"},
+            )
+        )
+        first_ctx = PipelineContext(tape=tape)
+        second_ctx = PipelineContext(tape=tape)
+
+        indexed_plugin.build_context(tape=tape, ctx=first_ctx)
+        indexed_plugin.build_context(tape=tape, ctx=second_ctx)
+
+        assert (
+            second_ctx.config[CONTEXT_PACK_STASH_KEY]
+            == first_ctx.config[CONTEXT_PACK_STASH_KEY]
+        )
 
     def test_new_user_message_triggers_fresh_search(self, indexed_plugin: KBPlugin):
         first_tape = Tape()

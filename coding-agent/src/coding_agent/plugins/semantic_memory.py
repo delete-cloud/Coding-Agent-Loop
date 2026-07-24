@@ -11,6 +11,11 @@ from typing import Any
 from agentkit.runtime.messages import RuntimeMessageKind
 from agentkit.runtime.pipeline import PipelineContext
 from agentkit.tape.tape import Tape
+from coding_agent.topics.context_pack import (
+    ContextPack,
+    ContextPackRenderer,
+    stash_context_pack,
+)
 from coding_agent.topics.memory import (
     MemoryReviewStore,
     ReviewedMemoryRecord,
@@ -21,7 +26,7 @@ from coding_agent.topics.range_index_builder import build_topic_range_index_from
 from coding_agent.topics.recall_context import (
     TopicRecallPlanner,
     TopicRecallPlannerInput,
-    recall_context_messages,
+    recall_context_pack,
 )
 from coding_agent.topics.recall_floor import validate_recall_floor
 from coding_agent.topics.semantic_index import SafeSemanticMemoryIndex
@@ -38,6 +43,8 @@ _RUNTIME_QUERY_KINDS = frozenset(
     }
 )
 SEMANTIC_MEMORY_GROUNDING_MARKER_KEY = "semantic_memory.grounding_marker"
+SEMANTIC_MEMORY_CONTEXT_PACK_CONTRIBUTOR = "semantic_memory"
+_CONTEXT_PACK_RENDERER = ContextPackRenderer()
 
 
 class _NoopTopicStore:
@@ -98,6 +105,7 @@ class SemanticMemoryPlugin:
         self, tape: Tape | None = None, **kwargs: Any
     ) -> list[dict[str, object]]:
         _clear_semantic_memory_grounding_marker(kwargs.get("ctx"))
+        _clear_semantic_memory_context_pack(kwargs.get("ctx"))
         if not self._read_enabled:
             return []
         if tape is None:
@@ -144,7 +152,9 @@ class SemanticMemoryPlugin:
             query=user_message,
             hit_count=len(plan.topic_results) + len(plan.accepted_memories),
         )
-        return recall_context_messages(plan, enabled=self._read_enabled)
+        pack = recall_context_pack(plan, enabled=self._read_enabled)
+        _stash_semantic_memory_context_pack(kwargs.get("ctx"), pack)
+        return _CONTEXT_PACK_RENDERER.render_messages(pack)
 
 
 def _latest_user_message(tape: Tape) -> str | None:
@@ -221,6 +231,24 @@ def _session_id_from_context(ctx: object) -> str | None:
 def _clear_semantic_memory_grounding_marker(ctx: object) -> None:
     if isinstance(ctx, PipelineContext):
         ctx.config.pop(SEMANTIC_MEMORY_GROUNDING_MARKER_KEY, None)
+
+
+def _clear_semantic_memory_context_pack(ctx: object) -> None:
+    if isinstance(ctx, PipelineContext):
+        stash_context_pack(
+            ctx.config,
+            contributor=SEMANTIC_MEMORY_CONTEXT_PACK_CONTRIBUTOR,
+            pack=None,
+        )
+
+
+def _stash_semantic_memory_context_pack(ctx: object, pack: ContextPack) -> None:
+    if isinstance(ctx, PipelineContext):
+        stash_context_pack(
+            ctx.config,
+            contributor=SEMANTIC_MEMORY_CONTEXT_PACK_CONTRIBUTOR,
+            pack=pack,
+        )
 
 
 def _set_semantic_memory_grounding_marker(
