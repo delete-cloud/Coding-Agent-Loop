@@ -51,6 +51,13 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = [".", "src"]
 
+[tool.ruff.lint]
+# Pin the classic default rule set explicitly. ruff 0.16 expanded its
+# default select (BLE/TRY/UP/S/...), which broke the previously-green
+# Woodpecker lint step on pre-existing code. Keep lint stable across
+# ruff upgrades; opt into more rules deliberately.
+select = ["E4", "E7", "E9", "F"]
+
 [tool.ruff.lint.flake8-bugbear]
 extend-immutable-calls = [
     "fastapi.Depends",
