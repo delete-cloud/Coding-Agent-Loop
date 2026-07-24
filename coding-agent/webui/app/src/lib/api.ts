@@ -3,6 +3,7 @@ import type {
   ApprovalPolicy,
   ApprovalScope,
   DisplayStreamEvent,
+  MemoryReviewRecord,
   RuntimeRun,
   SessionSummary,
   SessionResult,
@@ -87,7 +88,7 @@ export class AgentClient {
   }
 
   async displayEvents(sessionId: string): Promise<DisplayStreamEvent[]> {
-    const runs = await this.sessionRuns(sessionId);
+    const runs = await this.runs(sessionId);
     const events: DisplayStreamEvent[] = [];
     for (const run of runs) {
       events.push(...await this.runDisplayEvents(run.run_id));
@@ -182,13 +183,27 @@ export class AgentClient {
     ).json();
   }
 
-  private async sessionRuns(sessionId: string): Promise<RuntimeRun[]> {
+  async runs(sessionId: string): Promise<RuntimeRun[]> {
     const data = await (
       await this.check(
         await fetch(this.url(`/sessions/${sessionId}/runs`), { headers: this.headers() }),
       )
     ).json() as { runs: RuntimeRun[] };
     return data.runs;
+  }
+
+  async listMemoryReviews(sessionId: string, status?: string): Promise<MemoryReviewRecord[]> {
+    const params = new URLSearchParams();
+    if (status?.trim()) params.set("status", status.trim());
+    const suffix = params.size ? `?${params.toString()}` : "";
+    const data = await (
+      await this.check(
+        await fetch(this.url(`/sessions/${sessionId}/memory/reviews${suffix}`), {
+          headers: this.headers(),
+        }),
+      )
+    ).json();
+    return Array.isArray(data) ? (data as MemoryReviewRecord[]) : [];
   }
 
   private async runDisplayEvents(runId: string): Promise<DisplayStreamEvent[]> {

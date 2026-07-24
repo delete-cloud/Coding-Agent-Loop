@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from inspect import isawaitable
@@ -11,6 +11,7 @@ from typing import Any, Protocol, cast
 from coding_agent.adapter.types import StopReason, TurnOutcome
 from coding_agent.stores.runtime_store import AgentRunRecord, JSONObject
 from coding_agent.stores import RuntimeRunLifecycleStore
+from coding_agent.topics.context_pack import merged_context_pack_stash
 
 RuntimeRunStore = RuntimeRunLifecycleStore
 
@@ -72,6 +73,7 @@ class RuntimeRunFinisher(Protocol):
         result: JSONObject,
         error: str | None,
         resume_context: RuntimeRunResumeContext | None = None,
+        extra_metadata: JSONObject | None = None,
     ) -> None: ...
 
 
@@ -445,17 +447,21 @@ class RuntimeRunLifecycle:
         result: JSONObject,
         error: str | None,
         resume_context: RuntimeRunResumeContext | None = None,
+        extra_metadata: JSONObject | None = None,
     ) -> None:
         if self.store is None:
             return
+        metadata = self.metadata_for_session(
+            session,
+            resume_context=resume_context,
+        )
+        if extra_metadata:
+            metadata.update(extra_metadata)
         await self.store.update_agent_run(
             run_id,
             status=status,
             ended_at=ended_at,
-            metadata=self.metadata_for_session(
-                session,
-                resume_context=resume_context,
-            ),
+            metadata=metadata,
             result=result,
             error=error,
         )
@@ -469,6 +475,7 @@ class RuntimeRunLifecycle:
         result: JSONObject,
         error: str | None,
         resume_context: RuntimeRunResumeContext | None = None,
+        extra_metadata: JSONObject | None = None,
     ) -> None:
         await self.update(
             session,
@@ -478,6 +485,7 @@ class RuntimeRunLifecycle:
             result=result,
             error=error,
             resume_context=resume_context,
+            extra_metadata=extra_metadata,
         )
 
 
@@ -853,6 +861,7 @@ class RuntimeTurnFinalizer:
                 result=runtime_result_from_turn_outcome(turn_outcome),
                 error=turn_outcome.error,
                 resume_context=resume_context,
+                extra_metadata=_context_pack_run_metadata(ctx),
             )
             _set_failure_details_from_outcome(
                 session,
@@ -873,6 +882,16 @@ class RuntimeTurnFinalizer:
         if self.complete_observation is not None:
             self.complete_observation(ctx=ctx, turn_status=turn_status)
         await self.persist_session(session)
+
+
+def _context_pack_run_metadata(ctx: Any) -> JSONObject | None:
+    config = getattr(ctx, "config", None)
+    if not isinstance(config, Mapping):
+        return None
+    pack = merged_context_pack_stash(config)
+    if pack is None:
+        return None
+    return {"context_pack": cast(JSONObject, pack)}
 
 
 __all__ = [

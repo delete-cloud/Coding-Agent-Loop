@@ -7,7 +7,11 @@ from enum import Enum
 from math import isfinite
 from typing import Any, Protocol, cast
 
-from coding_agent.stores.runtime_store import JSONObject, JSONValue, RunMessageSnapshotRecord
+from coding_agent.stores.runtime_store import (
+    JSONObject,
+    JSONValue,
+    RunMessageSnapshotRecord,
+)
 from coding_agent.stores import RuntimeCheckpointStore, RuntimeRunLifecycleStore
 
 from .lifecycle import (
@@ -105,6 +109,7 @@ class RuntimeRunPersistenceService:
         result: JSONObject,
         error: str | None,
         resume_context: RuntimeRunResumeContext | None = None,
+        extra_metadata: JSONObject | None = None,
     ) -> None:
         await self.lifecycle().finish(
             session,
@@ -113,6 +118,7 @@ class RuntimeRunPersistenceService:
             result=result,
             error=error,
             resume_context=resume_context,
+            extra_metadata=extra_metadata,
         )
 
     async def save_message_snapshot(

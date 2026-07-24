@@ -21,12 +21,14 @@ from coding_agent.topics.context_pack import (
     ContextPackRenderer,
     ContextPackSection,
     EvidenceRef,
+    stash_context_pack,
 )
 
 logger = logging.getLogger(__name__)
 
 _CHUNK_TRUNCATE = 500
 _CONTEXT_PACK_RENDERER = ContextPackRenderer(max_item_chars=_CHUNK_TRUNCATE)
+KB_CONTEXT_PACK_CONTRIBUTOR = "kb"
 _RUNTIME_QUERY_KINDS = frozenset(
     {
         RuntimeMessageKind.USER_STEER,
@@ -41,6 +43,7 @@ class _SearchSnapshot:
     grounding_messages: list[dict[str, Any]]
     retrieval_attributes: dict[str, Any]
     retrieval_results: tuple[KBSearchResult, ...]
+    context_pack: ContextPack
 
 
 class KBPlugin:
@@ -135,6 +138,7 @@ class KBPlugin:
     def build_context(
         self, tape: Tape | None = None, **kwargs: Any
     ) -> list[dict[str, Any]]:
+        _clear_kb_context_pack(kwargs.get("ctx"))
         if tape is None or not self._has_table or self._kb is None:
             return []
 
@@ -155,6 +159,7 @@ class KBPlugin:
                 self._observation_sink,
                 self._snapshot.retrieval_attributes,
             )
+            _stash_kb_context_pack(kwargs.get("ctx"), self._snapshot.context_pack)
             return self._snapshot.grounding_messages
 
         with record_span(
@@ -193,13 +198,29 @@ class KBPlugin:
         ):
             grounding = _CONTEXT_PACK_RENDERER.render_messages(pack)
 
+        _stash_kb_context_pack(kwargs.get("ctx"), pack)
         self._snapshot = _SearchSnapshot(
             last_user_msg=user_message,
             grounding_messages=grounding,
             retrieval_attributes=retrieval_attributes,
             retrieval_results=tuple(results),
+            context_pack=pack,
         )
         return grounding
+
+
+def _clear_kb_context_pack(ctx: Any) -> None:
+    if isinstance(ctx, PipelineContext):
+        stash_context_pack(
+            ctx.config, contributor=KB_CONTEXT_PACK_CONTRIBUTOR, pack=None
+        )
+
+
+def _stash_kb_context_pack(ctx: Any, pack: ContextPack) -> None:
+    if isinstance(ctx, PipelineContext):
+        stash_context_pack(
+            ctx.config, contributor=KB_CONTEXT_PACK_CONTRIBUTOR, pack=pack
+        )
 
 
 def _take_semantic_memory_hit_count(ctx: Any, *, tape: Tape, query: str) -> int:

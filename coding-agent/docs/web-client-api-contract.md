@@ -36,6 +36,10 @@ Source of truth in code:
 | `GET`  | `/sessions/{id}/display-events` | → live reconnect **DisplayEvent SSE stream** |
 | `GET`  | `/runs/{run_id}/display-events` | → replayed `DisplayEvent[]` |
 | `GET`  | `/sessions/{id}/result` | → `SessionResultResponse` (`final_answer`, ...) |
+| `GET`  | `/sessions/{id}/memory/reviews?status=` | → `MemoryReviewRecordResponse[]` |
+| `POST` | `/sessions/{id}/memory/reviews/{candidate_id}` | `{ status, reason? }` → `MemoryReviewTransitionResponse` |
+| `GET`  | `/sessions/{id}/memory/semantic/status` | → `SemanticMemoryStatusResponse` |
+| `POST` | `/sessions/{id}/memory/semantic/rebuild` | `{ batch_size, allow_rebuild, confirm_global: true }` → `SemanticMemoryRebuildResponse` |
 | `GET`  | `/sessions/{id}/workspace/diff` | → `{ files[], additions, deletions }` |
 | `GET`  | `/sessions/{id}/workspace/patch` | → `{ format: "unified_diff", patch }` |
 | `GET`  | `/healthz` | → `{ status, sessions, version }` |
@@ -52,6 +56,71 @@ that still contain `execution_binding` are migrated server-side into
 
 `409 Turn already in progress` is returned if you POST `/prompt` while a turn is
 streaming. `404` = session not found (or not visible to this auth context).
+
+## Memory review endpoints
+
+Reviewed-memory candidates are curated per session through these endpoints. The
+two `semantic/*` maintenance endpoints additionally require an admin auth
+context.
+
+- `GET /sessions/{id}/memory/reviews?status=candidate|accepted|rejected|archived`
+  lists review records visible to the session (`status` query param optional).
+  `MemoryReviewRecordResponse`: `candidate_id`, `status`, `review_reason?`,
+  `kind`, `title`, `summary`, `scope`, `tags[]`, `confidence`, `topic_id?`,
+  `session_id?`, `tape_id?`.
+- `POST /sessions/{id}/memory/reviews/{candidate_id}` transitions one candidate.
+  Body: `{ status: "accepted"|"rejected"|"archived", reason? }` →
+  `MemoryReviewTransitionResponse` (`candidate_id`, `status`, `review_reason?`,
+  `kind`, `title`, `scope`, `tags[]`, `confidence`). `400` on an invalid
+  transition, `404` on an unknown candidate.
+- `GET /sessions/{id}/memory/semantic/status` →
+  `SemanticMemoryStatusResponse` (`document_count`, `reviewed_memory_count`,
+  `accepted_reviewed_memory_count`, `topic_store_available`).
+- `POST /sessions/{id}/memory/semantic/rebuild` reindexes the global semantic
+  backend. Body: `{ batch_size: int, allow_rebuild: bool,
+  confirm_global: true }` (`confirm_global` must be `true`; the rebuild is
+  global, not per-session) → `SemanticMemoryRebuildResponse` (`scope`,
+  `topic_count`, `reviewed_memory_count`, `indexed_count`, `skipped_count`,
+  `deleted_count`, `indexed_ids[]`, `deleted_ids[]`).
+
+## Run metadata context pack
+
+`GET /sessions/{id}/runs` returns `RuntimeRun[]`; each run's `metadata` dict may
+carry a `context_pack` key describing the recall grounding (semantic memory +
+KB) that was injected for that turn. Shape (same as
+`ContextPack.to_dict()` in `src/coding_agent/topics/context_pack.py`):
+
+```json
+{
+  "title": "Context Pack",
+  "sections": [
+    {
+      "title": "Cross-topic recall references",
+      "items": [
+        {
+          "source_kind": "topic_summary",
+          "source_id": "topic:topic-auth",
+          "label": "Auth recall",
+          "body": "...",
+          "rank": 1,
+          "score": 0.47,
+          "score_scale": "similarity",
+          "repo_path": "src/auth.py",
+          "line_start": 10,
+          "line_end": 20,
+          "evidence": [{"kind": "topic", "source_id": "topic-auth", "label": "..."}],
+          "metadata": {}
+        }
+      ]
+    }
+  ]
+}
+```
+
+Only `source_kind`, `source_id`, `label`, and `evidence` are always present on
+an item; all other fields are optional. The key is absent entirely on turns
+with no recall hits — treat a missing `context_pack` as "no grounding
+recorded", not as an error.
 
 ## DisplayEvent SSE event types
 

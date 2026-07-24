@@ -163,6 +163,43 @@ export interface RuntimeRun {
   error: string | null;
 }
 
+export interface MemoryReviewRecord {
+  candidate_id: string;
+  status: "candidate" | "accepted" | "rejected" | "archived" | string;
+  review_reason?: string | null;
+  kind: string;
+  title: string;
+  summary: string;
+  scope: string;
+  tags: string[];
+  confidence: number;
+  topic_id?: string | null;
+  session_id?: string | null;
+  tape_id?: string | null;
+}
+
+export interface ContextPackItem {
+  source_kind: string;
+  source_id: string;
+  label: string;
+  body?: string | null;
+  score?: number | null;
+  score_scale?: "similarity" | "overlap" | string | null;
+  rank?: number | null;
+  evidence?: unknown;
+  metadata?: Record<string, unknown> | null;
+}
+
+export interface ContextPackSection {
+  title?: string;
+  items?: ContextPackItem[];
+}
+
+export interface ContextPack {
+  title?: string;
+  sections?: ContextPackSection[];
+}
+
 export interface SessionResult {
   session_id: string;
   status: string;
