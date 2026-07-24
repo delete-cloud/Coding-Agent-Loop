@@ -40,12 +40,14 @@ export class AgentClient {
   async createSession(opts: {
     repoPath?: string;
     approvalPolicy?: ApprovalPolicy;
+    provider?: string;
     model?: string;
   }): Promise<string> {
     const body: Record<string, unknown> = {
       approval_policy: opts.approvalPolicy ?? "auto",
     };
     if (opts.repoPath?.trim()) body.repo_path = opts.repoPath.trim();
+    if (opts.provider?.trim()) body.provider = opts.provider.trim();
     if (opts.model?.trim()) body.model = opts.model.trim();
     const r = await this.check(
       await fetch(this.url("/sessions"), {
@@ -77,6 +79,17 @@ export class AgentClient {
       await this.check(await fetch(this.url("/sessions"), { headers: this.headers() }))
     ).json() as { sessions: SessionSummary[] };
     return data.sessions;
+  }
+
+  async closeSession(sessionId: string): Promise<{ status: string; session_id: string }> {
+    return (
+      await this.check(
+        await fetch(this.url(`/sessions/${sessionId}`), {
+          method: "DELETE",
+          headers: this.headers(),
+        }),
+      )
+    ).json();
   }
 
   async getSession(sessionId: string): Promise<SessionSummary> {

@@ -5,7 +5,24 @@ interface Config {
   apiKey: string;
   repoPath: string;
   approval: ApprovalPolicy;
+  provider: string;
+  model: string;
 }
+
+// Mirrors ProviderName in src/coding_agent/server/schemas.py.
+const PROVIDERS = [
+  "openai",
+  "anthropic",
+  "copilot",
+  "kimi",
+  "kimi-code",
+  "kimi-code-anthropic",
+  "deepseek",
+  "stepfun",
+  "codex",
+] as const;
+
+const MODEL_PRESETS = ["kimi-for-coding", "k3", "deepseek-chat"] as const;
 
 interface Props {
   config: Config;
@@ -45,6 +62,33 @@ export default function Header({
         value={config.repoPath}
         onChange={(e) => onConfigChange({ repoPath: e.target.value })}
       />
+      <select
+        className="rounded-lg border border-border bg-surface-0 px-3 py-1.5 text-sm text-fg focus:border-accent focus:outline-none"
+        value={config.provider}
+        title="provider"
+        onChange={(e) => onConfigChange({ provider: e.target.value })}
+      >
+        <option value="">server default</option>
+        {PROVIDERS.map((p) => (
+          <option key={p} value={p}>
+            {p}
+          </option>
+        ))}
+      </select>
+      <input
+        className="w-44 rounded-lg border border-border bg-surface-0 px-3 py-1.5 text-sm text-fg placeholder:text-muted focus:border-accent focus:outline-none disabled:opacity-40"
+        list="model-presets"
+        placeholder="model (e.g. kimi-for-coding)"
+        title="model"
+        value={config.model}
+        disabled={!config.provider}
+        onChange={(e) => onConfigChange({ model: e.target.value })}
+      />
+      <datalist id="model-presets">
+        {MODEL_PRESETS.map((m) => (
+          <option key={m} value={m} />
+        ))}
+      </datalist>
       <select
         className="rounded-lg border border-border bg-surface-0 px-3 py-1.5 text-sm text-fg focus:border-accent focus:outline-none"
         value={config.approval}
