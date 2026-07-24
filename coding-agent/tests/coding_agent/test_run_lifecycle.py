@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -527,6 +528,81 @@ async def test_runtime_turn_finalizer_persists_stashed_context_pack() -> None:
     assert item["label"] == "Auth recall"
     assert item["score"] == 0.47
     assert item["score_scale"] == "similarity"
+
+
+@pytest.mark.asyncio
+async def test_runtime_turn_finalizer_sanitizes_non_finite_context_pack_scores() -> (
+    None
+):
+    store = RecordingRuntimeStore()
+    persistence = RuntimeRunPersistenceService(
+        run_store=store,
+        checkpoint_store=None,
+        metadata_for_session=lambda session, *, resume_context=None: {
+            "session_id": session.id,
+        },
+    )
+
+    async def persist_session(session: FakeTurnSession) -> None:
+        del session
+
+    finalizer = persistence.turn_finalizer(persist_session=persist_session)
+    session = FakeTurnSession(id="session-1", tape_id=None)
+    ctx = FakeRuntimeContext("tape-non-finite")
+    stash_context_pack(
+        ctx.config,
+        contributor="semantic_memory",
+        pack=ContextPack(
+            sections=(
+                ContextPackSection(
+                    title="Cross-topic recall references",
+                    items=(
+                        ContextPackItem(
+                            source_kind="memory",
+                            source_id="memory:nan",
+                            label="NaN score",
+                            score=float("nan"),
+                        ),
+                        ContextPackItem(
+                            source_kind="memory",
+                            source_id="memory:inf",
+                            label="Inf score",
+                            score=float("inf"),
+                        ),
+                        ContextPackItem(
+                            source_kind="memory",
+                            source_id="memory:finite",
+                            label="Finite score",
+                            score=0.5,
+                        ),
+                    ),
+                ),
+            )
+        ),
+    )
+
+    await persistence.lifecycle().start(
+        session,
+        run_id="run-1",
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    await finalizer.complete(
+        session,
+        ctx=ctx,
+        outcome=TurnOutcome(stop_reason=StopReason.NO_TOOL_CALLS, steps_taken=1),
+        run_id="run-1",
+    )
+
+    metadata = store.updated[-1]["metadata"]
+    items = metadata["context_pack"]["sections"][0]["items"]
+    scores = {item["source_id"]: item["score"] for item in items}
+    assert scores == {
+        "memory:nan": "nan",
+        "memory:inf": "inf",
+        "memory:finite": 0.5,
+    }
+    # Starlette JSONResponse serializes with allow_nan=False; this must not raise.
+    json.dumps(metadata, allow_nan=False)
 
 
 @pytest.mark.asyncio
