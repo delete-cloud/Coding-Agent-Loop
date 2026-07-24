@@ -74,6 +74,69 @@ class TestOpenAICompatProvider:
         assert isinstance(events[2], DoneEvent)
 
     @pytest.mark.asyncio
+    async def test_stream_omits_temperature_when_none(self):
+        """kimi-for-coding rejects temperature != 1; None means omit the field."""
+        provider = OpenAICompatProvider(
+            model="kimi-for-coding",
+            api_key="sk-test",
+            temperature=None,
+        )
+
+        captured: dict = {}
+
+        async def mock_create(*args, **kwargs):
+            captured.update(kwargs)
+            mock_chunk = MagicMock()
+            mock_chunk.choices = [MagicMock()]
+            mock_chunk.choices[0].delta.content = "ok"
+            mock_chunk.choices[0].delta.tool_calls = None
+            mock_chunk.choices[0].delta.reasoning_content = None
+            mock_chunk.choices[0].finish_reason = None
+            mock_chunk.usage = None
+            mock_chunk.choices[0].usage = None
+            mock_stream = AsyncMock()
+            mock_stream.__aiter__.return_value = [mock_chunk]
+            return mock_stream
+
+        provider._client.chat.completions.create = mock_create
+
+        async for _ in provider.stream(messages=[{"role": "user", "content": "Hi"}]):
+            pass
+
+        assert "temperature" not in captured
+
+    @pytest.mark.asyncio
+    async def test_stream_sends_temperature_by_default(self):
+        """Default behavior keeps sending the configured temperature."""
+        provider = OpenAICompatProvider(
+            model="gpt-4o",
+            api_key="sk-test",
+        )
+
+        captured: dict = {}
+
+        async def mock_create(*args, **kwargs):
+            captured.update(kwargs)
+            mock_chunk = MagicMock()
+            mock_chunk.choices = [MagicMock()]
+            mock_chunk.choices[0].delta.content = "ok"
+            mock_chunk.choices[0].delta.tool_calls = None
+            mock_chunk.choices[0].delta.reasoning_content = None
+            mock_chunk.choices[0].finish_reason = None
+            mock_chunk.usage = None
+            mock_chunk.choices[0].usage = None
+            mock_stream = AsyncMock()
+            mock_stream.__aiter__.return_value = [mock_chunk]
+            return mock_stream
+
+        provider._client.chat.completions.create = mock_create
+
+        async for _ in provider.stream(messages=[{"role": "user", "content": "Hi"}]):
+            pass
+
+        assert captured["temperature"] == 0.7
+
+    @pytest.mark.asyncio
     async def test_stream_handles_rate_limit_with_retry(self):
         """Test that rate limit errors trigger retry."""
         from openai import RateLimitError

@@ -41,6 +41,8 @@ class OpenAICompatProvider:
         "kimi-k2-0711-preview": 131072,
         "moonshot-v1-auto": 131072,
         "kimi-for-coding": 262144,
+        # kimi coding plan 的 k3 模型,context 与 kimi-for-coding 一致
+        "k3": 262144,
     }
 
     def __init__(
@@ -49,7 +51,7 @@ class OpenAICompatProvider:
         api_key: str,
         base_url: str | None = None,
         max_tokens: int | None = None,
-        temperature: float = 0.7,
+        temperature: float | None = 0.7,
         max_connections: int = 10,
         max_keepalive: int = 5,
         timeout: float = 60.0,
@@ -130,6 +132,10 @@ class OpenAICompatProvider:
 
         last_exception: Exception | None = None
 
+        sampling_kwargs: dict[str, Any] = {}
+        if self._temperature is not None:
+            sampling_kwargs["temperature"] = self._temperature
+
         for attempt in range(self._max_retries + 1):
             try:
                 stream = await self._client.chat.completions.create(
@@ -138,8 +144,8 @@ class OpenAICompatProvider:
                     tools=openai_tools,
                     stream=True,
                     stream_options={"include_usage": True},
-                    temperature=self._temperature,
                     max_tokens=self._max_tokens,
+                    **sampling_kwargs,
                     **extra_kwargs,
                 )
 

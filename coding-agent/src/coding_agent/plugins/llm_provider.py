@@ -82,6 +82,9 @@ class LLMProviderPlugin:
                 api_key=api_key,
                 base_url="https://api.kimi.com/coding/v1",
                 default_headers={"User-Agent": "claude-code/1.0.17"},
+                # kimi-for-coding rejects any temperature other than 1
+                # (HTTP 400); omit the field and let the server default apply.
+                temperature=None,
             )
         elif self._provider_name == "kimi-code-anthropic":
             import os

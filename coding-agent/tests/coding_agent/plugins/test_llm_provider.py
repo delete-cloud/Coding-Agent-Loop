@@ -116,6 +116,8 @@ class TestKimiProvider:
             ("moonshot-v1-128k", 131072),
             ("kimi-k2-0711-preview", 131072),
             ("moonshot-v1-auto", 131072),
+            ("kimi-for-coding", 262144),
+            ("k3", 262144),
         ]:
             p = OpenAICompatProvider(model=model, api_key="x")
             assert p.max_context_size == expected
