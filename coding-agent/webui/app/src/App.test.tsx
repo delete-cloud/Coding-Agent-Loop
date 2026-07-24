@@ -695,4 +695,142 @@ describe("App session switching", () => {
     );
     expect(screen.getByText("→ approved")).toBeTruthy();
   });
+
+  it("sends provider and model from the header config when creating a session", async () => {
+    let createBody: Record<string, unknown> | null = null;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/sessions") && init?.method === "POST") {
+          createBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+          return Promise.resolve(jsonResponse({ session_id: "session-new-0001" }));
+        }
+        if (url.endsWith("/sessions")) {
+          return Promise.resolve(jsonResponse({ sessions: [] }));
+        }
+        if (url.endsWith("/sessions/session-new-0001/runs")) {
+          return Promise.resolve(jsonResponse({ session_id: "session-new-0001", runs: [] }));
+        }
+        if (url.includes("/sessions/session-new-0001/memory/reviews")) {
+          return Promise.resolve(jsonResponse([]));
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+
+    await waitFor(() => expect(createBody).not.toBeNull());
+    expect(createBody).toMatchObject({
+      approval_policy: "auto",
+      provider: "kimi-code",
+      model: "kimi-for-coding",
+    });
+  });
+
+  it("omits provider and model when server default is selected", async () => {
+    let createBody: Record<string, unknown> | null = null;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/sessions") && init?.method === "POST") {
+          createBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+          return Promise.resolve(jsonResponse({ session_id: "session-new-0002" }));
+        }
+        if (url.endsWith("/sessions")) {
+          return Promise.resolve(jsonResponse({ sessions: [] }));
+        }
+        if (url.endsWith("/sessions/session-new-0002/runs")) {
+          return Promise.resolve(jsonResponse({ session_id: "session-new-0002", runs: [] }));
+        }
+        if (url.includes("/sessions/session-new-0002/memory/reviews")) {
+          return Promise.resolve(jsonResponse([]));
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    fireEvent.change(screen.getByTitle("provider"), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+
+    await waitFor(() => expect(createBody).not.toBeNull());
+    expect(createBody).not.toHaveProperty("provider");
+    expect(createBody).not.toHaveProperty("model");
+  });
+
+  it("deletes a session after confirmation and removes it from the list", async () => {
+    const doomed = session("session-doomed-0001", "model-doomed");
+    let deletePath = "";
+    let deleteMethod = "";
+    vi.stubGlobal("confirm", vi.fn(() => true));
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/sessions")) {
+          return Promise.resolve(jsonResponse({ sessions: [doomed] }));
+        }
+        if (url.endsWith(`/sessions/${doomed.session_id}`) && init?.method === "DELETE") {
+          deletePath = url;
+          deleteMethod = init.method;
+          return Promise.resolve(
+            jsonResponse({ status: "closed", session_id: doomed.session_id }),
+          );
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    expect(await screen.findByRole("button", { name: /model-doomed/i })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /close session/i }));
+
+    await waitFor(() => expect(deletePath).not.toBe(""));
+    expect(deleteMethod).toBe("DELETE");
+    expect(deletePath).toContain(`/sessions/${doomed.session_id}`);
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: /model-doomed/i })).toBeNull(),
+    );
+  });
+
+  it("surfaces a readable error and keeps the session when delete returns 409", async () => {
+    const stuck = session("session-stuck-0001", "model-stuck");
+    vi.stubGlobal("confirm", vi.fn(() => true));
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/sessions")) {
+          return Promise.resolve(jsonResponse({ sessions: [stuck] }));
+        }
+        if (url.endsWith(`/sessions/${stuck.session_id}`) && init?.method === "DELETE") {
+          return Promise.resolve(
+            new Response("session turn is owned elsewhere", { status: 409 }),
+          );
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    expect(await screen.findByRole("button", { name: /model-stuck/i })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /close session/i }));
+
+    expect(
+      await screen.findByText(/close session failed: 409 session turn is owned elsewhere/i),
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: /model-stuck/i })).toBeTruthy();
+  });
 });

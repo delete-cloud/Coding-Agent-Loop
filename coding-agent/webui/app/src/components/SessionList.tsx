@@ -7,6 +7,7 @@ interface Props {
   error: string | null;
   onRefresh: () => void;
   onSelect: (sessionId: string) => void;
+  onDelete: (sessionId: string) => void;
 }
 
 export default function SessionList({
@@ -16,6 +17,7 @@ export default function SessionList({
   error,
   onRefresh,
   onSelect,
+  onDelete,
 }: Props) {
   return (
     <aside className="flex w-full flex-col border-r border-border bg-surface-1 md:w-72">
@@ -46,6 +48,7 @@ export default function SessionList({
               session={session}
               active={session.session_id === activeSessionId}
               onSelect={onSelect}
+              onDelete={onDelete}
             />
           ))
         )}
@@ -58,37 +61,56 @@ function SessionRow({
   session,
   active,
   onSelect,
+  onDelete,
 }: {
   session: SessionSummary;
   active: boolean;
   onSelect: (sessionId: string) => void;
+  onDelete: (sessionId: string) => void;
 }) {
   return (
-    <button
-      className={`block w-full border-b border-border px-3 py-3 text-left transition-colors hover:bg-surface-2 ${
+    <div
+      className={`flex items-stretch border-b border-border transition-colors hover:bg-surface-2 ${
         active ? "bg-accent/10" : ""
       }`}
-      onClick={() => onSelect(session.session_id)}
     >
-      <div className="flex items-center gap-2">
-        <StatusDot status={session.status} pending={session.pending_approval} />
-        <span className="truncate text-sm font-medium text-fg">
-          {shortId(session.session_id)}
-        </span>
-        {session.turn_in_progress && (
-          <span className="rounded bg-warn/10 px-1.5 py-0.5 text-[10px] font-medium text-warn">
-            running
+      <button
+        className="block min-w-0 flex-1 px-3 py-3 text-left"
+        onClick={() => onSelect(session.session_id)}
+      >
+        <div className="flex items-center gap-2">
+          <StatusDot status={session.status} pending={session.pending_approval} />
+          <span className="truncate text-sm font-medium text-fg">
+            {shortId(session.session_id)}
           </span>
-        )}
-      </div>
-      <div className="mt-1 truncate text-xs text-muted">
-        {session.model_name ?? "model ?"}
-      </div>
-      <div className="mt-1 text-[11px] text-muted">
-        {formatTime(session.last_activity)}
-      </div>
-    </button>
+          {session.turn_in_progress && (
+            <span className="rounded bg-warn/10 px-1.5 py-0.5 text-[10px] font-medium text-warn">
+              running
+            </span>
+          )}
+        </div>
+        <div className="mt-1 truncate text-xs text-muted">
+          {formatModel(session)}
+        </div>
+        <div className="mt-1 text-[11px] text-muted">
+          {formatTime(session.last_activity)}
+        </div>
+      </button>
+      <button
+        className="shrink-0 px-2 text-muted transition-colors hover:text-err"
+        aria-label={`Close session ${shortId(session.session_id)}`}
+        title="Close session"
+        onClick={() => onDelete(session.session_id)}
+      >
+        ×
+      </button>
+    </div>
   );
+}
+
+function formatModel(session: SessionSummary) {
+  const parts = [session.provider_name, session.model_name].filter(Boolean);
+  return parts.length ? parts.join(" / ") : "model ?";
 }
 
 function StatusDot({

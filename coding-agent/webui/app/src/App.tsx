@@ -33,6 +33,8 @@ type Config = {
   apiKey: string;
   repoPath: string;
   approval: ApprovalPolicy;
+  provider: string;
+  model: string;
 };
 
 function defaultBaseUrl(): string {
@@ -44,18 +46,21 @@ function defaultBaseUrl(): string {
 }
 
 function loadConfig(): Config {
-  try {
-    const raw = localStorage.getItem(LS_KEY);
-    if (raw) return JSON.parse(raw) as Config;
-  } catch {
-    /* ignore */
-  }
-  return {
+  const defaults: Config = {
     baseUrl: defaultBaseUrl(),
     apiKey: "",
     repoPath: "",
     approval: "auto",
+    provider: "kimi-code",
+    model: "kimi-for-coding",
   };
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    if (raw) return { ...defaults, ...(JSON.parse(raw) as Partial<Config>) };
+  } catch {
+    /* ignore */
+  }
+  return defaults;
 }
 
 export default function App() {
@@ -176,9 +181,14 @@ export default function App() {
       setSessionLoadingState(true);
       setStreaming(false);
       setStatus("creating session…");
+      // Provider "server default" (empty) means: let the server pick, send neither field.
+      const provider = config.provider.trim();
+      const model = provider ? config.model.trim() : "";
       const id = await client.createSession({
         repoPath: config.repoPath,
         approvalPolicy: config.approval,
+        provider: provider || undefined,
+        model: model || undefined,
       });
       if (loadSeqRef.current !== loadSeq) return;
       activeSessionRef.current = id;
@@ -205,7 +215,32 @@ export default function App() {
         },
       ]);
     }
-  }, [client, config.repoPath, config.approval, refreshSessions, refreshMemory, setSessionLoadingState]);
+  }, [client, config.repoPath, config.approval, config.provider, config.model, refreshSessions, refreshMemory, setSessionLoadingState]);
+
+  const deleteSession = useCallback(async (id: string) => {
+    if (!window.confirm(`Close session ${id}? This stops its task and removes it.`)) return;
+    try {
+      await client.closeSession(id);
+      setSessions((prev) => prev.filter((it) => it.session_id !== id));
+      if (activeSessionRef.current === id) {
+        loadSeqRef.current += 1;
+        abortRef.current?.abort();
+        abortRef.current = null;
+        followAbortRef.current?.abort();
+        followAbortRef.current = null;
+        activeSessionRef.current = null;
+        setSessionId(null);
+        setItems([]);
+        setDiffState(null);
+        setMemoryState(null);
+        setStreaming(false);
+        setSessionLoadingState(false);
+        setStatus("no session");
+      }
+    } catch (e) {
+      setSessionsError(`close session failed: ${msg(e)}`);
+    }
+  }, [client, setSessionLoadingState]);
 
   const followSession = useCallback(async (id: string) => {
     const ctrl = new AbortController();
@@ -423,6 +458,7 @@ export default function App() {
           error={sessionsError}
           onRefresh={refreshSessions}
           onSelect={loadSession}
+          onDelete={deleteSession}
         />
         <main className="flex min-w-0 flex-1 flex-col">
           <Timeline items={items} onApprove={onApprove} />
