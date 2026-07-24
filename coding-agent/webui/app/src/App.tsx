@@ -87,6 +87,7 @@ export default function App() {
   const abortRef = useRef<AbortController | null>(null);
   const followAbortRef = useRef<AbortController | null>(null);
   const loadSeqRef = useRef(0);
+  const memorySeqRef = useRef(0);
   const activeSessionRef = useRef<string | null>(null);
   const sessionLoadingRef = useRef(false);
 
@@ -143,15 +144,20 @@ export default function App() {
   }, [client]);
 
   const refreshMemory = useCallback(async (id: string) => {
+    // Skip work for sessions that are no longer active; this also keeps stale
+    // callbacks from invalidating the sequence of the current session.
+    if (activeSessionRef.current !== id) return;
+    // Same-session refreshes can resolve out of order; only the latest may apply.
+    const memorySeq = ++memorySeqRef.current;
     try {
       const [runs, memories] = await Promise.all([
         client.runs(id),
         client.listMemoryReviews(id, "accepted"),
       ]);
-      if (activeSessionRef.current !== id) return;
+      if (activeSessionRef.current !== id || memorySeqRef.current !== memorySeq) return;
       setMemoryState({ hits: extractRecallHits(runs), memories, error: null });
     } catch (e) {
-      if (activeSessionRef.current !== id) return;
+      if (activeSessionRef.current !== id || memorySeqRef.current !== memorySeq) return;
       setMemoryState((prev) => ({
         hits: prev?.hits ?? [],
         memories: prev?.memories ?? [],
@@ -237,10 +243,13 @@ export default function App() {
         setSessionLoadingState(false);
         setStatus("no session");
       }
+      // Re-fetch after the DELETE resolved so an in-flight list issued earlier
+      // cannot be the last word and re-add the deleted session.
+      void refreshSessions();
     } catch (e) {
       setSessionsError(`close session failed: ${msg(e)}`);
     }
-  }, [client, setSessionLoadingState]);
+  }, [client, refreshSessions, setSessionLoadingState]);
 
   const followSession = useCallback(async (id: string) => {
     const ctrl = new AbortController();
@@ -310,6 +319,9 @@ export default function App() {
         },
       ]);
       setStatus("restore failed");
+      // memoryState was reset to null above; resolve it so the memory panel
+      // shows an error (or recovered data) instead of loading forever.
+      void refreshMemory(id);
     }
   }, [client, followSession, refreshMemory, setSessionLoadingState]);
 

@@ -770,21 +770,23 @@ describe("App session switching", () => {
     const doomed = session("session-doomed-0001", "model-doomed");
     let deletePath = "";
     let deleteMethod = "";
+    let deleted = false;
     vi.stubGlobal("confirm", vi.fn(() => true));
 
     vi.stubGlobal(
       "fetch",
       vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
-        if (url.endsWith("/sessions")) {
-          return Promise.resolve(jsonResponse({ sessions: [doomed] }));
-        }
         if (url.endsWith(`/sessions/${doomed.session_id}`) && init?.method === "DELETE") {
           deletePath = url;
           deleteMethod = init.method;
+          deleted = true;
           return Promise.resolve(
             jsonResponse({ status: "closed", session_id: doomed.session_id }),
           );
+        }
+        if (url.endsWith("/sessions")) {
+          return Promise.resolve(jsonResponse({ sessions: deleted ? [] : [doomed] }));
         }
         throw new Error(`unexpected fetch ${url}`);
       }),
@@ -832,5 +834,171 @@ describe("App session switching", () => {
       await screen.findByText(/close session failed: 409 session turn is owned elsewhere/i),
     ).toBeTruthy();
     expect(screen.getByRole("button", { name: /model-stuck/i })).toBeTruthy();
+  });
+
+  it("applies only the latest refreshMemory response when same-session refreshes resolve out of order", async () => {
+    const active = session("session-memory-0001", "model-memory");
+    const memory = (id: string, title: string) => ({
+      candidate_id: id,
+      status: "accepted",
+      kind: "fact",
+      title,
+      summary: `summary for ${title}`,
+      scope: "project",
+      tags: [],
+      confidence: 0.9,
+    });
+    const refreshRuns: Array<ReturnType<typeof deferred<Response>>> = [];
+    const refreshReviews: Array<ReturnType<typeof deferred<Response>>> = [];
+    let runsCalls = 0;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/sessions")) {
+          return Promise.resolve(jsonResponse({ sessions: [active] }));
+        }
+        if (url.endsWith(`/sessions/${active.session_id}`)) {
+          return Promise.resolve(jsonResponse(active));
+        }
+        if (url.endsWith(`/sessions/${active.session_id}/runs`)) {
+          runsCalls += 1;
+          // First runs call comes from displayEvents during loadSession.
+          if (runsCalls === 1) {
+            return Promise.resolve(jsonResponse({ session_id: active.session_id, runs: [] }));
+          }
+          const d = deferred<Response>();
+          refreshRuns.push(d);
+          return d.promise;
+        }
+        if (url.includes(`/sessions/${active.session_id}/memory/reviews`)) {
+          const d = deferred<Response>();
+          refreshReviews.push(d);
+          return d.promise;
+        }
+        if (url.includes(`/sessions/${active.session_id}/prompt?event_format=display`)) {
+          return Promise.resolve(
+            new Response(
+              new ReadableStream({
+                start(controller) {
+                  controller.close();
+                },
+              }),
+              { status: 200, headers: { "Content-Type": "text/event-stream" } },
+            ),
+          );
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /model-memory/i }));
+    await screen.findByText("idle");
+    // loadSession's refreshMemory (seq 1) is now in flight.
+    await waitFor(() => expect(refreshRuns).toHaveLength(1));
+
+    // Trigger a second refreshMemory (seq 2) via send()'s finally block.
+    fireEvent.change(screen.getByPlaceholderText(/ask the agent/i), {
+      target: { value: "hi" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(refreshRuns).toHaveLength(2));
+    await waitFor(() => expect(refreshReviews).toHaveLength(2));
+
+    // The newer refresh resolves first and applies.
+    refreshRuns[1].resolve(jsonResponse({ session_id: active.session_id, runs: [] }));
+    refreshReviews[1].resolve(jsonResponse([memory("mem-new", "latest-memory")]));
+    expect(await screen.findByText("latest-memory")).toBeTruthy();
+
+    // The older refresh resolves later and must not clobber the newer state.
+    refreshRuns[0].resolve(jsonResponse({ session_id: active.session_id, runs: [] }));
+    refreshReviews[0].resolve(jsonResponse([memory("mem-old", "stale-memory")]));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.getByText("latest-memory")).toBeTruthy();
+    expect(screen.queryByText("stale-memory")).toBeNull();
+  });
+
+  it("shows a memory error instead of loading forever when session restore fails", async () => {
+    const broken = session("session-broken-0001", "model-broken");
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/sessions")) {
+          return Promise.resolve(jsonResponse({ sessions: [broken] }));
+        }
+        if (url.endsWith(`/sessions/${broken.session_id}`)) {
+          return Promise.resolve(new Response("boom", { status: 500 }));
+        }
+        if (url.endsWith(`/sessions/${broken.session_id}/runs`)) {
+          return Promise.resolve(new Response("boom", { status: 500 }));
+        }
+        if (url.includes(`/sessions/${broken.session_id}/memory/reviews`)) {
+          return Promise.resolve(new Response("boom", { status: 500 }));
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /model-broken/i }));
+
+    expect(await screen.findByText("restore failed")).toBeTruthy();
+    expect(await screen.findByText(/memory load failed/)).toBeTruthy();
+    expect(screen.queryByText("Loading memory…")).toBeNull();
+  });
+
+  it("re-fetches the session list after a delete so a ghost entry cannot reappear", async () => {
+    const doomed = session("session-ghost-0001", "model-ghost");
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    const deleteDone = deferred<Response>();
+    const listCalls: Array<ReturnType<typeof deferred<Response>>> = [];
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith(`/sessions/${doomed.session_id}`) && init?.method === "DELETE") {
+          return deleteDone.promise;
+        }
+        if (url.endsWith("/sessions")) {
+          const d = deferred<Response>();
+          listCalls.push(d);
+          return d.promise;
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    listCalls[0].resolve(jsonResponse({ sessions: [doomed] }));
+    expect(await screen.findByRole("button", { name: /model-ghost/i })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /close session/i }));
+    await waitFor(() => expect(listCalls.length).toBeGreaterThanOrEqual(1));
+
+    // An in-flight list refresh issued before the DELETE resolved.
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(listCalls).toHaveLength(2));
+
+    deleteDone.resolve(jsonResponse({ status: "closed", session_id: doomed.session_id }));
+
+    // The delete triggers a fresh list fetch issued after the DELETE resolved.
+    await waitFor(() => expect(listCalls).toHaveLength(3));
+
+    // Stale in-flight response (still contains the ghost) lands first...
+    listCalls[1].resolve(jsonResponse({ sessions: [doomed] }));
+    // ...then the authoritative post-delete response lands last.
+    listCalls[2].resolve(jsonResponse({ sessions: [] }));
+
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: /model-ghost/i })).toBeNull(),
+    );
   });
 });

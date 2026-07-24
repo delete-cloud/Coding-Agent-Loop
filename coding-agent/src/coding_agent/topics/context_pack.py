@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass, field
-from typing import Any
+from math import isfinite
+from typing import Any, cast
 
 JsonScalar = str | int | float | bool | None
 JsonValue = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
@@ -193,7 +194,12 @@ def merged_context_pack_stash(
             )
     if not sections:
         return None
-    return {"title": "Context Pack", "sections": sections}
+    merged: dict[str, JsonValue] = {"title": "Context Pack", "sections": sections}
+    # Scores come from embedding backends and can be NaN/inf in degenerate
+    # cases; run metadata must stay serializable with json.dumps(allow_nan=False)
+    # (Starlette JSONResponse uses it). Match persistence._json_compatible_value:
+    # non-finite floats become their string form.
+    return cast(dict[str, JsonValue], _sanitize_non_finite_floats(merged))
 
 
 class ContextPackRenderer:
@@ -289,6 +295,16 @@ def _add_optional(
 
 def _json_safe_mapping(data: dict[str, JsonValue]) -> dict[str, JsonValue]:
     return {key: _json_safe_value(value) for key, value in data.items()}
+
+
+def _sanitize_non_finite_floats(value: JsonValue) -> JsonValue:
+    if isinstance(value, float) and not isfinite(value):
+        return str(value)
+    if isinstance(value, list):
+        return [_sanitize_non_finite_floats(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _sanitize_non_finite_floats(item) for key, item in value.items()}
+    return value
 
 
 def _json_safe_value(value: JsonValue) -> JsonValue:
