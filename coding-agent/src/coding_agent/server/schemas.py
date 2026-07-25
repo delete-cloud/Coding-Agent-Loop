@@ -599,6 +599,20 @@ class ReadinessResponse(BaseModel):
     checks: dict[str, str]
 
 
+class ProviderModelSchema(BaseModel):
+    """One model entry from a provider's live model listing."""
+
+    id: str
+
+
+class ProviderModelsResponse(BaseModel):
+    """Response schema for the provider model-listing endpoint."""
+
+    provider: ProviderName
+    models: list[ProviderModelSchema]
+    source: Literal["live", "unavailable"]
+
+
 class WorkspaceArchiveResponse(BaseModel):
     format: Literal["tar.gz"]
     archive_base64: str

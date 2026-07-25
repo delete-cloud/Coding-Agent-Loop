@@ -42,6 +42,7 @@ Source of truth in code:
 | `POST` | `/sessions/{id}/memory/semantic/rebuild` | `{ batch_size, allow_rebuild, confirm_global: true }` → `SemanticMemoryRebuildResponse` |
 | `GET`  | `/sessions/{id}/workspace/diff` | → `{ files[], additions, deletions }` |
 | `GET`  | `/sessions/{id}/workspace/patch` | → `{ format: "unified_diff", patch }` |
+| `GET`  | `/providers/{provider}/models` | → `ProviderModelsResponse` |
 | `GET`  | `/healthz` | → `{ status, sessions, version }` |
 
 `CreateSessionRequest` (all optional unless noted):
@@ -82,6 +83,28 @@ context.
   global, not per-session) → `SemanticMemoryRebuildResponse` (`scope`,
   `topic_count`, `reviewed_memory_count`, `indexed_count`, `skipped_count`,
   `deleted_count`, `indexed_ids[]`, `deleted_ids[]`).
+
+## Provider model listing
+
+`GET /providers/{provider}/models` returns the live model list for a provider,
+for populating a model picker in the client. `provider` must be one of the
+`ProviderName` literals (`openai`, `anthropic`, `copilot`, `kimi`, `kimi-code`,
+`kimi-code-anthropic`, `deepseek`, `stepfun`, `codex`); anything else is a
+`422`.
+
+`ProviderModelsResponse`: `{ provider, models: [{ id }], source }` where
+`source` is `"live"` when the provider's `GET /models` listing succeeded and
+`"unavailable"` otherwise. The endpoint **never fails on provider-side
+problems** — missing API key, network error, listing timeout (10s), or a
+provider without an OpenAI-compatible listing API (anthropic, codex,
+kimi-code-anthropic, copilot) all return `200` with
+`{ models: [], source: "unavailable" }`. Clients should treat `"unavailable"`
+as "fall back to local presets", not as an error.
+
+Listing reuses the same provider construction as session runs
+(`LLMProviderPlugin.provide_llm`), including env-var API-key fallbacks
+(`KIMI_CODE_API_KEY`, `MOONSHOT_API_KEY`, `DEEPSEEK_API_KEY`, `STEP_API_KEY`),
+so a provider that works for sessions also works here.
 
 ## Run metadata context pack
 
