@@ -1002,3 +1002,212 @@ describe("App session switching", () => {
     );
   });
 });
+
+function datalistValues(): string[] {
+  const list = document.getElementById("model-options");
+  if (!list) return [];
+  return Array.from(list.querySelectorAll("option")).map(
+    (o) => o.getAttribute("value") ?? "",
+  );
+}
+
+describe("theme toggle", () => {
+  beforeEach(() => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+      clear: () => storage.clear(),
+      removeItem: (key: string) => storage.delete(key),
+    });
+    Element.prototype.scrollIntoView = vi.fn();
+    localStorage.setItem(
+      "coding-agent-webui-config",
+      JSON.stringify({ baseUrl: "http://127.0.0.1:18080", apiKey: "" }),
+    );
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/sessions")) {
+          return Promise.resolve(jsonResponse({ sessions: [] }));
+        }
+        if (url.includes("/providers/")) {
+          return Promise.resolve(
+            jsonResponse({ provider: "kimi-code", models: [], source: "unavailable" }),
+          );
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      }),
+    );
+  });
+
+  afterEach(() => {
+    cleanup();
+    localStorage.clear();
+    vi.restoreAllMocks();
+    delete document.documentElement.dataset.theme;
+  });
+
+  it("defaults to dark and toggles data-theme with persistence", async () => {
+    render(<App />);
+
+    expect(document.documentElement.dataset.theme).toBe("dark");
+
+    fireEvent.click(screen.getByRole("button", { name: "toggle theme" }));
+    expect(document.documentElement.dataset.theme).toBe("light");
+    expect(localStorage.getItem("coding-agent-webui-theme")).toBe("light");
+
+    fireEvent.click(screen.getByRole("button", { name: "toggle theme" }));
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    expect(localStorage.getItem("coding-agent-webui-theme")).toBe("dark");
+  });
+
+  it("restores a persisted light theme on load", async () => {
+    localStorage.setItem("coding-agent-webui-theme", "light");
+
+    render(<App />);
+
+    expect(document.documentElement.dataset.theme).toBe("light");
+  });
+});
+
+describe("provider model list", () => {
+  beforeEach(() => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+      clear: () => storage.clear(),
+      removeItem: (key: string) => storage.delete(key),
+    });
+    Element.prototype.scrollIntoView = vi.fn();
+    localStorage.setItem(
+      "coding-agent-webui-config",
+      JSON.stringify({ baseUrl: "http://127.0.0.1:18080", apiKey: "" }),
+    );
+  });
+
+  afterEach(() => {
+    cleanup();
+    localStorage.clear();
+    vi.restoreAllMocks();
+    delete document.documentElement.dataset.theme;
+  });
+
+  it("uses live model ids in the datalist when the fetch succeeds", async () => {
+    let modelsPath = "";
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/sessions")) {
+          return Promise.resolve(jsonResponse({ sessions: [] }));
+        }
+        if (url.endsWith("/providers/kimi-code/models")) {
+          modelsPath = url;
+          return Promise.resolve(
+            jsonResponse({
+              provider: "kimi-code",
+              models: [{ id: "k-live-1" }, { id: "k-live-2" }],
+              source: "live",
+            }),
+          );
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    expect(datalistValues()).toEqual(["kimi-for-coding", "k3", "deepseek-chat"]);
+    await waitFor(() => expect(modelsPath).not.toBe(""));
+    expect(modelsPath).toBe("http://127.0.0.1:18080/providers/kimi-code/models");
+    await waitFor(() => expect(datalistValues()).toEqual(["k-live-1", "k-live-2"]));
+    // The model input stays free-text (datalist, not a select).
+    expect(screen.getByTitle("model").tagName).toBe("INPUT");
+  });
+
+  it("keeps the preset datalist when the fetch fails", async () => {
+    let modelsRequested = false;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/sessions")) {
+          return Promise.resolve(jsonResponse({ sessions: [] }));
+        }
+        if (url.endsWith("/providers/kimi-code/models")) {
+          modelsRequested = true;
+          return Promise.resolve(new Response("boom", { status: 500 }));
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    await waitFor(() => expect(modelsRequested).toBe(true));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(datalistValues()).toEqual(["kimi-for-coding", "k3", "deepseek-chat"]);
+  });
+
+  it("keeps the preset datalist when the server reports source unavailable", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/sessions")) {
+          return Promise.resolve(jsonResponse({ sessions: [] }));
+        }
+        if (url.endsWith("/providers/kimi-code/models")) {
+          return Promise.resolve(
+            jsonResponse({ provider: "kimi-code", models: [], source: "unavailable" }),
+          );
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    await waitFor(() =>
+      expect(datalistValues()).toEqual(["kimi-for-coding", "k3", "deepseek-chat"]),
+    );
+    // Wait past the debounce + fetch; an unavailable source must not clobber the presets.
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(datalistValues()).toEqual(["kimi-for-coding", "k3", "deepseek-chat"]);
+  });
+
+  it("does not fetch models when server default provider is selected", async () => {
+    let modelsRequested = false;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/sessions")) {
+          return Promise.resolve(jsonResponse({ sessions: [] }));
+        }
+        if (url.includes("/providers/")) {
+          modelsRequested = true;
+          return Promise.resolve(
+            jsonResponse({ provider: "kimi-code", models: [], source: "unavailable" }),
+          );
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    fireEvent.change(screen.getByTitle("provider"), { target: { value: "" } });
+    // Wait past the debounce window; no models request may be issued.
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(modelsRequested).toBe(false);
+    expect(datalistValues()).toEqual(["kimi-for-coding", "k3", "deepseek-chat"]);
+  });
+});

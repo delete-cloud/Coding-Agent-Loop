@@ -76,6 +76,7 @@ from coding_agent.environment import (
     workspace_patch_from_config,
     workspace_provider_capabilities_from_config,
 )
+from coding_agent.core.config import ProviderName
 from coding_agent.executors.external import ExecutorRunRecord, PGExecutorRunStore
 from coding_agent.observability import (
     prometheus_metrics_text,
@@ -206,6 +207,7 @@ from coding_agent.runs import (
     RuntimeTurnSessionState,
     run_target_from_dict,
 )
+from coding_agent.server.provider_models import list_provider_models
 from coding_agent.server.rate_limit import RateLimits, limiter
 from coding_agent.server.schemas import (
     ApprovalResponseSchema,
@@ -226,6 +228,8 @@ from coding_agent.server.schemas import (
     PromptRequest,
     PublishSessionRequest,
     PublishSessionResponse,
+    ProviderModelSchema,
+    ProviderModelsResponse,
     ReadinessResponse,
     ResolveInteractionRequest,
     ResumeSessionRequest,
@@ -2453,6 +2457,40 @@ async def readiness_check(request: Request, response: Response) -> ReadinessResp
     return ReadinessResponse(
         status="ready" if ready else "not_ready",
         checks=checks,
+    )
+
+
+@app.get("/providers/{provider}/models", response_model=ProviderModelsResponse)
+@limiter.limit(RateLimits.GET_SESSION)
+async def list_provider_models_endpoint(
+    request: Request,
+    provider: ProviderName,
+    api_key: str | None = Depends(verify_api_key),
+) -> ProviderModelsResponse:
+    """List available models for a provider.
+
+    Never fails on provider-side errors (missing API key, network, unsupported
+    provider): returns ``source="unavailable"`` with an empty model list so the
+    client can fall back to its presets.
+    """
+    del request, api_key
+    try:
+        model_ids = await list_provider_models(provider)
+    except Exception:
+        logger.info(
+            "Provider model listing unavailable provider=%s",
+            provider,
+            exc_info=True,
+        )
+        model_ids = []
+    if not model_ids:
+        return ProviderModelsResponse(
+            provider=provider, models=[], source="unavailable"
+        )
+    return ProviderModelsResponse(
+        provider=provider,
+        models=[ProviderModelSchema(id=model_id) for model_id in model_ids],
+        source="live",
     )
 
 

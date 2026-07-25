@@ -1,3 +1,5 @@
+import { useEffect, useState } from "react";
+import type { AgentClient } from "../lib/api";
 import type { ApprovalPolicy } from "../lib/types";
 
 interface Config {
@@ -22,6 +24,7 @@ const PROVIDERS = [
   "codex",
 ] as const;
 
+// Fallback datalist options, used when the server has no live model list.
 const MODEL_PRESETS = ["kimi-for-coding", "k3", "deepseek-chat"] as const;
 
 interface Props {
@@ -31,6 +34,9 @@ interface Props {
   onShowDiff: () => void;
   sessionId: string | null;
   status: string;
+  client: AgentClient;
+  theme: "dark" | "light";
+  onToggleTheme: () => void;
 }
 
 export default function Header({
@@ -40,7 +46,37 @@ export default function Header({
   onShowDiff,
   sessionId,
   status,
+  client,
+  theme,
+  onToggleTheme,
 }: Props) {
+  // Live model ids for the selected provider; null = use MODEL_PRESETS.
+  const [liveModels, setLiveModels] = useState<string[] | null>(null);
+
+  useEffect(() => {
+    const provider = config.provider.trim();
+    if (!provider) {
+      setLiveModels(null);
+      return;
+    }
+    const ctrl = new AbortController();
+    // Debounce rapid provider switches; the abort drops superseded requests.
+    const timer = setTimeout(() => {
+      client
+        .listProviderModels(provider, ctrl.signal)
+        .then((res) => {
+          setLiveModels(res.source === "live" && res.models.length > 0 ? res.models : null);
+        })
+        .catch(() => setLiveModels(null));
+    }, 250);
+    return () => {
+      clearTimeout(timer);
+      ctrl.abort();
+    };
+  }, [client, config.provider]);
+
+  const modelOptions = liveModels ?? MODEL_PRESETS;
+
   return (
     <header className="flex flex-wrap items-center gap-2 border-b border-border bg-surface-1 px-4 py-2.5">
       <input
@@ -77,15 +113,15 @@ export default function Header({
       </select>
       <input
         className="w-44 rounded-lg border border-border bg-surface-0 px-3 py-1.5 text-sm text-fg placeholder:text-muted focus:border-accent focus:outline-none disabled:opacity-40"
-        list="model-presets"
+        list="model-options"
         placeholder="model (e.g. kimi-for-coding)"
         title="model"
         value={config.model}
         disabled={!config.provider}
         onChange={(e) => onConfigChange({ model: e.target.value })}
       />
-      <datalist id="model-presets">
-        {MODEL_PRESETS.map((m) => (
+      <datalist id="model-options">
+        {modelOptions.map((m) => (
           <option key={m} value={m} />
         ))}
       </datalist>
@@ -113,6 +149,15 @@ export default function Header({
         onClick={onShowDiff}
       >
         Diff
+      </button>
+      <button
+        type="button"
+        className="rounded-lg border border-border px-3 py-1.5 text-sm text-fg transition-colors hover:border-border-active"
+        onClick={onToggleTheme}
+        aria-label="toggle theme"
+        title={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+      >
+        {theme === "dark" ? "☀️" : "🌙"}
       </button>
       <span className="ml-auto text-xs text-muted">
         {sessionId ? status : "no session"}

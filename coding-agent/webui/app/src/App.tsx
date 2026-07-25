@@ -28,6 +28,8 @@ import DiffPanel from "./components/DiffPanel";
 import MemoryPanel, { extractRecallHits } from "./components/MemoryPanel";
 
 const LS_KEY = "coding-agent-webui-config";
+const THEME_LS_KEY = "coding-agent-webui-theme";
+type Theme = "dark" | "light";
 type Config = {
   baseUrl: string;
   apiKey: string;
@@ -63,8 +65,17 @@ function loadConfig(): Config {
   return defaults;
 }
 
+function loadTheme(): Theme {
+  try {
+    return localStorage.getItem(THEME_LS_KEY) === "light" ? "light" : "dark";
+  } catch {
+    return "dark";
+  }
+}
+
 export default function App() {
   const [config, setConfig] = useState<Config>(loadConfig);
+  const [theme, setTheme] = useState<Theme>(loadTheme);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessionMode, setSessionMode] = useState<"prompt" | "resume">("prompt");
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -95,6 +106,19 @@ export default function App() {
     () => new AgentClient({ baseUrl: config.baseUrl, apiKey: config.apiKey }),
     [config.baseUrl, config.apiKey],
   );
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    try {
+      localStorage.setItem(THEME_LS_KEY, theme);
+    } catch {
+      /* ignore */
+    }
+  }, [theme]);
+
+  const toggleTheme = useCallback(() => {
+    setTheme((t) => (t === "dark" ? "light" : "dark"));
+  }, []);
 
   const patchConfig = useCallback((p: Partial<Config>) => {
     setConfig((c) => {
@@ -461,6 +485,9 @@ export default function App() {
         onShowDiff={showDiff}
         sessionId={sessionId}
         status={status}
+        client={client}
+        theme={theme}
+        onToggleTheme={toggleTheme}
       />
       <div className="min-h-0 flex flex-1 flex-col md:flex-row">
         <SessionList

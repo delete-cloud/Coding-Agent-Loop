@@ -4,6 +4,7 @@ import type {
   ApprovalScope,
   DisplayStreamEvent,
   MemoryReviewRecord,
+  ProviderModels,
   RuntimeRun,
   SessionSummary,
   SessionResult,
@@ -217,6 +218,31 @@ export class AgentClient {
       )
     ).json();
     return Array.isArray(data) ? (data as MemoryReviewRecord[]) : [];
+  }
+
+  // GET /providers/{provider}/models. Unknown providers return 422 (throws);
+  // provider-side failures return 200 with source="unavailable" and models=[].
+  async listProviderModels(provider: string, signal?: AbortSignal): Promise<ProviderModels> {
+    const r = await this.check(
+      await fetch(this.url(`/providers/${encodeURIComponent(provider)}/models`), {
+        headers: this.headers(),
+        signal,
+      }),
+    );
+    // Guard against malformed payloads: coerce to a safe shape instead of trusting it.
+    const data: unknown = await r.json().catch(() => null);
+    const raw = (data ?? {}) as { provider?: unknown; models?: unknown; source?: unknown };
+    const models = Array.isArray(raw.models)
+      ? raw.models.flatMap((m) => {
+          const id = (m as { id?: unknown } | null)?.id;
+          return typeof id === "string" && id.trim() ? [id] : [];
+        })
+      : [];
+    return {
+      provider: typeof raw.provider === "string" ? raw.provider : provider,
+      models,
+      source: raw.source === "live" ? "live" : "unavailable",
+    };
   }
 
   private async runDisplayEvents(runId: string): Promise<DisplayStreamEvent[]> {

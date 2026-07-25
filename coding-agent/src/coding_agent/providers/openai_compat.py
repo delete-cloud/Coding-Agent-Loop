@@ -263,6 +263,11 @@ class OpenAICompatProvider:
         if last_exception:
             raise last_exception
 
+    async def list_models(self) -> list[str]:
+        """Return model ids from the provider's ``GET /models`` endpoint."""
+        page = await self._client.models.list()
+        return [model.id for model in page.data]
+
     async def close(self) -> None:
         if self._http_client:
             await self._http_client.aclose()

@@ -230,3 +230,11 @@ export interface WorkspacePatch {
   format: "unified_diff";
   patch: string;
 }
+
+// GET /providers/{provider}/models — ids are normalized to plain strings by
+// the client; source="unavailable" means the provider could not be queried.
+export interface ProviderModels {
+  provider: string;
+  models: string[];
+  source: "live" | "unavailable";
+}
