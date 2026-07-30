@@ -1354,6 +1354,88 @@ describe("right rail", () => {
   });
 });
 
+describe("session result refresh", () => {
+  beforeEach(() => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+      clear: () => storage.clear(),
+      removeItem: (key: string) => storage.delete(key),
+    });
+    Element.prototype.scrollIntoView = vi.fn();
+    localStorage.setItem(
+      "coding-agent-webui-config",
+      JSON.stringify({ baseUrl: "http://127.0.0.1:18080", apiKey: "" }),
+    );
+  });
+
+  afterEach(() => {
+    cleanup();
+    localStorage.clear();
+    vi.restoreAllMocks();
+  });
+
+  it("retries an empty terminal result after the prompt stream closes", async () => {
+    const active = session("session-result-retry-0001", "model-result");
+    let resultCalls = 0;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/sessions")) {
+          return Promise.resolve(jsonResponse({ sessions: [active] }));
+        }
+        if (url.endsWith(`/sessions/${active.session_id}`)) {
+          return Promise.resolve(jsonResponse(active));
+        }
+        if (url.endsWith(`/sessions/${active.session_id}/runs`)) {
+          return Promise.resolve(jsonResponse({ session_id: active.session_id, runs: [] }));
+        }
+        if (url.includes(`/sessions/${active.session_id}/memory/reviews`)) {
+          return Promise.resolve(jsonResponse([]));
+        }
+        if (url.endsWith(`/sessions/${active.session_id}/result`)) {
+          resultCalls += 1;
+          const visible = resultCalls >= 3;
+          return Promise.resolve(
+            jsonResponse({
+              session_id: active.session_id,
+              status: "failed",
+              turn_status: "failed",
+              turn_id: "turn-result",
+              workspace_id: null,
+              origin: null,
+              provider_name: "test",
+              model_name: active.model_name,
+              final_answer: null,
+              verification_summary: null,
+              failure_details: visible ? "delayed failure details" : null,
+            }),
+          );
+        }
+        if (url.includes(`/sessions/${active.session_id}/prompt?event_format=display`)) {
+          return Promise.resolve(new Response("", { status: 200 }));
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /model-result/i }));
+    await screen.findByText("idle");
+    fireEvent.change(screen.getByPlaceholderText(/ask the agent/i), {
+      target: { value: "run" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(await screen.findByText("delayed failure details")).toBeTruthy();
+    expect(resultCalls).toBe(3);
+  });
+});
+
 
 describe("thinking toggle", () => {
   beforeEach(() => {

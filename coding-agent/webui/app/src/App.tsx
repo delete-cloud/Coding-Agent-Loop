@@ -36,6 +36,7 @@ import ResultPanel, { hasResultContent } from "./components/ResultPanel";
 const LS_KEY = "coding-agent-webui-config";
 const THEME_LS_KEY = "coding-agent-webui-theme";
 const THINKING_LS_KEY = "coding-agent-webui-show-thinking";
+const RESULT_RETRY_DELAYS_MS = [0, 250, 500, 1_000, 2_000, 4_000] as const;
 type Theme = "dark" | "light";
 type Config = {
   baseUrl: string;
@@ -240,16 +241,22 @@ export default function App() {
 
   // Session result (final_answer / verification / failure). Same seq-guard
   // pattern as refreshMemory; failures just keep the previous result hidden.
-  const refreshResult = useCallback(async (id: string) => {
+  const refreshResult = useCallback(async (id: string, retryEmpty = false) => {
     if (activeSessionRef.current !== id) return;
     const resultSeq = ++resultSeqRef.current;
-    try {
-      const result = await client.result(id);
+    const delays = retryEmpty ? RESULT_RETRY_DELAYS_MS : RESULT_RETRY_DELAYS_MS.slice(0, 1);
+    for (const delay of delays) {
+      if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
       if (activeSessionRef.current !== id || resultSeqRef.current !== resultSeq) return;
-      setResultState(result);
-    } catch {
-      // A failed refresh keeps the previous result rather than clobbering it.
-      return;
+      try {
+        const result = await client.result(id);
+        if (activeSessionRef.current !== id || resultSeqRef.current !== resultSeq) return;
+        setResultState(result);
+        if (hasResultContent(result)) return;
+      } catch {
+        // A failed refresh keeps the previous result rather than clobbering it.
+        return;
+      }
     }
   }, [client]);
 
@@ -495,7 +502,8 @@ export default function App() {
       void refreshSessions();
       if (activeSessionRef.current === sessionId) {
         void refreshMemory(sessionId);
-        void refreshResult(sessionId);
+        // The stream can close just before terminal result details are durable.
+        void refreshResult(sessionId, true);
       }
     }
   }, [client, prompt, sessionId, sessionMode, streaming, refreshSessions, refreshMemory, refreshResult]);
