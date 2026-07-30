@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AgentClient } from "./lib/api";
+import { AgentClient, type RuntimeConfigPatch } from "./lib/api";
 import type {
   ApprovalPolicy,
+  ApprovalScope,
   ContextPackItem,
   DisplayEventEnvelope,
   DisplayStreamEvent,
   FinalResultPayload,
   MemoryReviewRecord,
   ProgressPayload,
+  SessionResult,
   SessionSummary,
   WorkspaceDiff,
   WorkspacePatch,
@@ -26,9 +28,14 @@ import Composer from "./components/Composer";
 import SessionList from "./components/SessionList";
 import DiffPanel from "./components/DiffPanel";
 import MemoryPanel, { extractRecallHits } from "./components/MemoryPanel";
+import RightRail, { type RailPanel } from "./components/RightRail";
+import SettingsPanel from "./components/SettingsPanel";
+import CheckpointsPanel from "./components/CheckpointsPanel";
+import ResultPanel, { hasResultContent } from "./components/ResultPanel";
 
 const LS_KEY = "coding-agent-webui-config";
 const THEME_LS_KEY = "coding-agent-webui-theme";
+const THINKING_LS_KEY = "coding-agent-webui-show-thinking";
 type Theme = "dark" | "light";
 type Config = {
   baseUrl: string;
@@ -73,6 +80,21 @@ function loadTheme(): Theme {
   }
 }
 
+function loadShowThinking(): boolean {
+  try {
+    return localStorage.getItem(THINKING_LS_KEY) !== "0";
+  } catch {
+    return true;
+  }
+}
+
+function initialSidebarOpen(): boolean {
+  return (
+    typeof window.matchMedia !== "function" ||
+    !window.matchMedia("(max-width: 767px)").matches
+  );
+}
+
 export default function App() {
   const [config, setConfig] = useState<Config>(loadConfig);
   const [theme, setTheme] = useState<Theme>(loadTheme);
@@ -95,10 +117,16 @@ export default function App() {
     memories: MemoryReviewRecord[];
     error: string | null;
   } | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(initialSidebarOpen);
+  const [railPanel, setRailPanel] = useState<RailPanel>(null);
+  const [showThinking, setShowThinking] = useState<boolean>(loadShowThinking);
+  const [resultState, setResultState] = useState<SessionResult | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const followAbortRef = useRef<AbortController | null>(null);
   const loadSeqRef = useRef(0);
   const memorySeqRef = useRef(0);
+  const resultSeqRef = useRef(0);
+  const diffSeqRef = useRef(0);
   const activeSessionRef = useRef<string | null>(null);
   const sessionLoadingRef = useRef(false);
 
@@ -120,6 +148,17 @@ export default function App() {
     setTheme((t) => (t === "dark" ? "light" : "dark"));
   }, []);
 
+  const toggleThinking = useCallback(() => {
+    setShowThinking((v) => {
+      try {
+        localStorage.setItem(THINKING_LS_KEY, v ? "0" : "1");
+      } catch {
+        /* ignore */
+      }
+      return !v;
+    });
+  }, []);
+
   const patchConfig = useCallback((p: Partial<Config>) => {
     setConfig((c) => {
       const next = { ...c, ...p };
@@ -130,20 +169,29 @@ export default function App() {
       }
       return next;
     });
-    const activeSessionId = activeSessionRef.current;
-    if (p.approval !== undefined && activeSessionId) {
-      void client.updateRuntimeConfig(activeSessionId, { approval: p.approval }).catch((e) => {
-        setItems((prev) => [
-          ...prev,
-          {
-            id: `e${Date.now()}`,
-            kind: "error",
-            text: `approval policy update failed: ${msg(e)}`,
-          },
-        ]);
-      });
-    }
-  }, [client]);
+  }, []);
+
+  // Per-session runtime settings (model/provider/thinking/approval). Approval
+  // changes also update the persisted new-session default.
+  const updateSessionRuntime = useCallback(
+    async (id: string, patch: RuntimeConfigPatch) => {
+      const updated = await client.updateRuntimeConfig(id, patch);
+      setSessions((current) =>
+        current.map((entry) => {
+          if (entry.session_id !== id) return entry;
+          return {
+            ...entry,
+            provider_name:
+              patch.provider !== undefined ? updated.provider_name : entry.provider_name,
+            model_name: patch.model !== undefined ? updated.model_name : entry.model_name,
+            base_url: patch.baseUrl !== undefined ? updated.base_url : entry.base_url,
+          };
+        }),
+      );
+      if (patch.approval !== undefined) patchConfig({ approval: patch.approval });
+    },
+    [client, patchConfig],
+  );
 
   const setSessionLoadingState = useCallback((value: boolean) => {
     sessionLoadingRef.current = value;
@@ -190,6 +238,21 @@ export default function App() {
     }
   }, [client]);
 
+  // Session result (final_answer / verification / failure). Same seq-guard
+  // pattern as refreshMemory; failures just keep the previous result hidden.
+  const refreshResult = useCallback(async (id: string) => {
+    if (activeSessionRef.current !== id) return;
+    const resultSeq = ++resultSeqRef.current;
+    try {
+      const result = await client.result(id);
+      if (activeSessionRef.current !== id || resultSeqRef.current !== resultSeq) return;
+      setResultState(result);
+    } catch {
+      // A failed refresh keeps the previous result rather than clobbering it.
+      return;
+    }
+  }, [client]);
+
   useEffect(() => {
     void refreshSessions();
     // Config edits can pass through incomplete URLs; refresh explicitly after edits.
@@ -228,6 +291,8 @@ export default function App() {
       setItems([]);
       setDiffState(null);
       setMemoryState(null);
+      setResultState(null);
+      setRailPanel(null);
       setStatus("idle");
       void refreshSessions();
       void refreshMemory(id);
@@ -263,6 +328,8 @@ export default function App() {
         setItems([]);
         setDiffState(null);
         setMemoryState(null);
+        setResultState(null);
+        setRailPanel(null);
         setStreaming(false);
         setSessionLoadingState(false);
         setStatus("no session");
@@ -300,8 +367,9 @@ export default function App() {
       if (followAbortRef.current === ctrl) followAbortRef.current = null;
       void refreshSessions();
       void refreshMemory(id);
+      void refreshResult(id);
     }
-  }, [client, refreshSessions, refreshMemory]);
+  }, [client, refreshSessions, refreshMemory, refreshResult]);
 
   const loadSession = useCallback(async (id: string) => {
     const loadSeq = loadSeqRef.current + 1;
@@ -318,6 +386,8 @@ export default function App() {
     setItems([]);
     setDiffState(null);
     setMemoryState(null);
+    setResultState(null);
+    setRailPanel(null);
     setStatus("loading history…");
     try {
       const [summary, events] = await Promise.all([
@@ -331,6 +401,7 @@ export default function App() {
       setItems(replayEvents([], events));
       setStatus(summary.turn_in_progress ? "reconnected" : "idle");
       void refreshMemory(id);
+      void refreshResult(id);
       if (summary.turn_in_progress) void followSession(id);
     } catch (e) {
       if (loadSeqRef.current !== loadSeq || activeSessionRef.current !== id) return;
@@ -347,7 +418,7 @@ export default function App() {
       // shows an error (or recovered data) instead of loading forever.
       void refreshMemory(id);
     }
-  }, [client, followSession, refreshMemory, setSessionLoadingState]);
+  }, [client, followSession, refreshMemory, refreshResult, setSessionLoadingState]);
 
   async function reconcileSession(id: string, errorText: string) {
     try {
@@ -422,21 +493,36 @@ export default function App() {
         abortRef.current = null;
       }
       void refreshSessions();
-      if (activeSessionRef.current === sessionId) void refreshMemory(sessionId);
+      if (activeSessionRef.current === sessionId) {
+        void refreshMemory(sessionId);
+        void refreshResult(sessionId);
+      }
     }
-  }, [client, prompt, sessionId, sessionMode, streaming, refreshSessions, refreshMemory]);
+  }, [client, prompt, sessionId, sessionMode, streaming, refreshSessions, refreshMemory, refreshResult]);
 
   const onApprove = useCallback(
-    async (requestId: string, approved: boolean, feedback: string) => {
+    async (
+      requestId: string,
+      approved: boolean,
+      feedback: string,
+      scope: ApprovalScope,
+    ) => {
       if (!sessionId) return;
+      const approvalSessionId = sessionId;
       setItems((prev) =>
         resolveApproval(prev, requestId, approved ? "approved" : "denied"),
       );
       try {
-        await client.approve(sessionId, requestId, approved, feedback);
+        await client.approve(approvalSessionId, requestId, approved, feedback, scope);
       } catch (e) {
+        if (activeSessionRef.current !== approvalSessionId) return;
         setItems((prev) => [
-          ...prev,
+          // Roll back the optimistic resolve so the card is actionable again.
+          ...prev.map((it) =>
+            it.kind === "approval" && it.requestId === requestId
+              ? { ...it, resolved: undefined }
+              : it,
+          ),
           {
             id: `e${Date.now()}`,
             kind: "error",
@@ -450,6 +536,10 @@ export default function App() {
 
   const showDiff = useCallback(async () => {
     if (!sessionId) return;
+    // Skip work for sessions that are no longer active, and let only the
+    // latest fetch apply. Same seq-guard pattern as refreshMemory/refreshResult.
+    if (activeSessionRef.current !== sessionId) return;
+    const diffSeq = ++diffSeqRef.current;
     try {
       const d = await client.diff(sessionId);
       let patch: WorkspacePatch | null = null;
@@ -458,8 +548,10 @@ export default function App() {
       } catch {
         patch = null;
       }
+      if (activeSessionRef.current !== sessionId || diffSeqRef.current !== diffSeq) return;
       setDiffState({ diff: d, patch });
     } catch (e) {
+      if (activeSessionRef.current !== sessionId || diffSeqRef.current !== diffSeq) return;
       setItems((prev) => [
         ...prev,
         {
@@ -476,56 +568,161 @@ export default function App() {
     if (sessionId) void client.cancel(sessionId);
   }, [client, sessionId]);
 
+  const toggleRail = useCallback(
+    (panel: Exclude<RailPanel, null>) => {
+      if (railPanel === panel) {
+        setRailPanel(null);
+        return;
+      }
+      setRailPanel(panel);
+      // The diff is fetched on demand when its panel opens; memory data is
+      // kept fresh by the normal session lifecycle.
+      if (panel === "diff") void showDiff();
+    },
+    [railPanel, showDiff],
+  );
+
+  // After a checkpoint restore, replay the restored session through the same
+  // load path used for session select, then reopen the checkpoints panel.
+  const reloadAfterRestore = useCallback(async (id: string) => {
+    if (activeSessionRef.current !== id) return;
+    await loadSession(id);
+    // loadSession no-ops when the user switched sessions mid-restore; don't
+    // reopen the checkpoints panel for a session that is no longer active.
+    if (activeSessionRef.current !== id) return;
+    setRailPanel("checkpoints");
+  }, [loadSession]);
+
+  const selectSession = useCallback(
+    (id: string) => {
+      // On small screens the sidebar is an overlay; close it after picking.
+      if (
+        typeof window.matchMedia === "function" &&
+        window.matchMedia("(max-width: 767px)").matches
+      ) {
+        setSidebarOpen(false);
+      }
+      void loadSession(id);
+    },
+    [loadSession],
+  );
+
+  const activeSession = useMemo(
+    () => sessions.find((s) => s.session_id === sessionId) ?? null,
+    [sessions, sessionId],
+  );
+
   return (
-    <div className="flex h-screen flex-col">
-      <Header
-        config={config}
-        onConfigChange={patchConfig}
-        onNewSession={newSession}
-        onShowDiff={showDiff}
-        sessionId={sessionId}
-        status={status}
-        client={client}
-        theme={theme}
-        onToggleTheme={toggleTheme}
-      />
-      <div className="min-h-0 flex flex-1 flex-col md:flex-row">
-        <SessionList
-          sessions={sessions}
-          activeSessionId={sessionId}
-          loading={sessionsLoading}
-          error={sessionsError}
-          onRefresh={refreshSessions}
-          onSelect={loadSession}
-          onDelete={deleteSession}
+    <div className="flex h-screen w-full overflow-hidden">
+      {sidebarOpen && (
+        <div
+          className="fixed inset-0 z-30 bg-black/50 md:hidden"
+          aria-hidden
+          onClick={() => setSidebarOpen(false)}
         />
-        <main className="flex min-w-0 flex-1 flex-col">
-          <Timeline items={items} onApprove={onApprove} />
-          {diffState && (
+      )}
+      <SessionList
+        sessions={sessions}
+        activeSessionId={sessionId}
+        loading={sessionsLoading}
+        error={sessionsError}
+        open={sidebarOpen}
+        onRefresh={refreshSessions}
+        onSelect={selectSession}
+        onDelete={deleteSession}
+        onNewSession={newSession}
+      />
+      <div className="mr-11 flex min-w-0 flex-1 flex-col md:mr-0">
+        <Header
+          config={config}
+          onConfigChange={patchConfig}
+          onNewSession={newSession}
+          onToggleSidebar={() => setSidebarOpen((v) => !v)}
+          sessionId={sessionId}
+          status={status}
+          client={client}
+          theme={theme}
+          onToggleTheme={toggleTheme}
+          showThinking={showThinking}
+          onToggleThinking={toggleThinking}
+        />
+        <main className="flex min-h-0 flex-1 flex-col">
+          {resultState && hasResultContent(resultState) && (
+            <ResultPanel key={sessionId ?? "none"} result={resultState} />
+          )}
+          <Timeline items={items} onApprove={onApprove} showThinking={showThinking} />
+          <Composer
+            prompt={prompt}
+            onPromptChange={setPrompt}
+            onSend={send}
+            onCancel={cancel}
+            disabled={!sessionId || streaming || sessionLoading}
+            streaming={streaming}
+          />
+        </main>
+      </div>
+      <RightRail panel={railPanel} onToggle={toggleRail}>
+        {railPanel === "diff" ? (
+          diffState ? (
             <DiffPanel
               diff={diffState.diff}
               patch={diffState.patch}
-              onClose={() => setDiffState(null)}
+              onClose={() => {
+                setDiffState(null);
+                setRailPanel(null);
+              }}
             />
-          )}
-          {sessionId && (
+          ) : (
+            <RailPlaceholder text={sessionId ? "Loading diff…" : "No active session"} />
+          )
+        ) : railPanel === "memory" ? (
+          sessionId ? (
             <MemoryPanel
               hits={memoryState?.hits ?? []}
               memories={memoryState?.memories ?? []}
               loading={memoryState === null}
               error={memoryState?.error ?? null}
+              client={client}
+              sessionId={sessionId}
+              onReviewsChanged={() => void refreshMemory(sessionId)}
             />
-          )}
-        </main>
-      </div>
-      <Composer
-        prompt={prompt}
-        onPromptChange={setPrompt}
-        onSend={send}
-        onCancel={cancel}
-        disabled={!sessionId || streaming || sessionLoading}
-        streaming={streaming}
-      />
+          ) : (
+            <RailPlaceholder text="No active session" />
+          )
+        ) : railPanel === "checkpoints" ? (
+          sessionId ? (
+            <CheckpointsPanel
+              key={sessionId}
+              client={client}
+              sessionId={sessionId}
+              onRestored={() => reloadAfterRestore(sessionId)}
+              onCaptured={() => void refreshSessions()}
+            />
+          ) : (
+            <RailPlaceholder text="No active session" />
+          )
+        ) : railPanel === "settings" ? (
+          sessionId ? (
+            <SettingsPanel
+              key={sessionId}
+              sessionId={sessionId}
+              providerName={activeSession?.provider_name ?? null}
+              modelName={activeSession?.model_name ?? null}
+              onUpdate={(patch) => updateSessionRuntime(sessionId, patch)}
+            />
+          ) : (
+            <RailPlaceholder text="No active session" />
+          )
+        ) : null}
+      </RightRail>
+    </div>
+  );
+}
+
+function RailPlaceholder({ text }: { text: string }) {
+  return (
+    <div className="flex h-full items-center justify-center px-4 text-sm text-muted">
+      {text}
     </div>
   );
 }

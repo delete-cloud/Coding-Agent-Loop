@@ -642,7 +642,10 @@ describe("App session switching", () => {
                 arguments: { cmd: "pwd" },
               },
             },
-            created_at: "2026-06-12T00:00:00Z",
+            // Live-streamed prompt: created_at must be "now" so the approval
+            // countdown deadline (created_at + timeout_seconds) is not already
+            // expired when the card mounts.
+            created_at: new Date().toISOString(),
           };
           return new Response(
             new ReadableStream({
@@ -897,6 +900,8 @@ describe("App session switching", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: /model-memory/i }));
     await screen.findByText("idle");
+    // The memory panel lives in the right rail now; open it to observe state.
+    fireEvent.click(screen.getByRole("button", { name: "Toggle memory panel" }));
     // loadSession's refreshMemory (seq 1) is now in flight.
     await waitFor(() => expect(refreshRuns).toHaveLength(1));
 
@@ -947,6 +952,7 @@ describe("App session switching", () => {
     render(<App />);
 
     fireEvent.click(await screen.findByRole("button", { name: /model-broken/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Toggle memory panel" }));
 
     expect(await screen.findByText("restore failed")).toBeTruthy();
     expect(await screen.findByText(/memory load failed/)).toBeTruthy();
@@ -1209,5 +1215,965 @@ describe("provider model list", () => {
     await new Promise((resolve) => setTimeout(resolve, 400));
     expect(modelsRequested).toBe(false);
     expect(datalistValues()).toEqual(["kimi-for-coding", "k3", "deepseek-chat"]);
+  });
+});
+
+describe("right rail", () => {
+  beforeEach(() => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+      clear: () => storage.clear(),
+      removeItem: (key: string) => storage.delete(key),
+    });
+    Element.prototype.scrollIntoView = vi.fn();
+    localStorage.setItem(
+      "coding-agent-webui-config",
+      JSON.stringify({ baseUrl: "http://127.0.0.1:18080", apiKey: "" }),
+    );
+  });
+
+  afterEach(() => {
+    cleanup();
+    localStorage.clear();
+    vi.restoreAllMocks();
+  });
+
+  const stubRailFetch = (active: ReturnType<typeof session>) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/sessions")) {
+          return Promise.resolve(jsonResponse({ sessions: [active] }));
+        }
+        if (url.endsWith(`/sessions/${active.session_id}`)) {
+          return Promise.resolve(jsonResponse(active));
+        }
+        if (url.endsWith(`/sessions/${active.session_id}/runs`)) {
+          return Promise.resolve(jsonResponse({ session_id: active.session_id, runs: [] }));
+        }
+        if (url.includes(`/sessions/${active.session_id}/memory/reviews`)) {
+          return Promise.resolve(jsonResponse([]));
+        }
+        if (url.endsWith(`/sessions/${active.session_id}/workspace/diff`)) {
+          return Promise.resolve(
+            jsonResponse({ session_id: active.session_id, files: [], additions: 0, deletions: 0 }),
+          );
+        }
+        if (url.endsWith(`/sessions/${active.session_id}/workspace/patch`)) {
+          return Promise.resolve(
+            jsonResponse({ session_id: active.session_id, format: "unified_diff", patch: "" }),
+          );
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      }),
+    );
+  };
+
+  it("opens, switches, and collapses rail panels", async () => {
+    const active = session("session-rail-0001", "model-rail");
+    stubRailFetch(active);
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /model-rail/i }));
+    await screen.findByText("idle");
+
+    const memoryToggle = screen.getByRole("button", { name: "Toggle memory panel" });
+    const diffToggle = screen.getByRole("button", { name: "Toggle diff panel" });
+
+    // Open memory panel.
+    fireEvent.click(memoryToggle);
+    expect(await screen.findByText("Recall hits")).toBeTruthy();
+    expect(memoryToggle.getAttribute("aria-pressed")).toBe("true");
+
+    // Switch to diff: memory closes, diff opens (fetched on demand).
+    fireEvent.click(diffToggle);
+    expect(await screen.findByText(/Workspace diff/)).toBeTruthy();
+    expect(screen.queryByText("Recall hits")).toBeNull();
+    expect(diffToggle.getAttribute("aria-pressed")).toBe("true");
+    expect(memoryToggle.getAttribute("aria-pressed")).toBe("false");
+
+    // Clicking the active icon collapses the panel.
+    fireEvent.click(diffToggle);
+    expect(screen.queryByText(/Workspace diff/)).toBeNull();
+    expect(diffToggle.getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("shows a placeholder instead of panels when there is no active session", async () => {
+    const active = session("session-rail-0002", "model-rail");
+    stubRailFetch(active);
+
+    render(<App />);
+    await screen.findByRole("button", { name: /model-rail/i });
+
+    fireEvent.click(screen.getByRole("button", { name: "Toggle memory panel" }));
+    expect(await screen.findByText("No active session")).toBeTruthy();
+  });
+
+  it("collapses and restores the sidebar via the header toggle", async () => {
+    const active = session("session-rail-0003", "model-rail");
+    stubRailFetch(active);
+
+    render(<App />);
+    await screen.findByRole("button", { name: /model-rail/i });
+
+    const sidebar = screen.getByLabelText("Sessions");
+    expect(sidebar.className).not.toContain("hidden");
+
+    fireEvent.click(screen.getByRole("button", { name: "toggle sidebar" }));
+    expect(sidebar.className).toContain("hidden");
+
+    fireEvent.click(screen.getByRole("button", { name: "toggle sidebar" }));
+    expect(sidebar.className).not.toContain("hidden");
+  });
+
+  it("starts with the sidebar closed on small screens", async () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn(() => ({
+        matches: true,
+        media: "(max-width: 767px)",
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    );
+    const active = session("session-rail-0004", "model-rail");
+    stubRailFetch(active);
+
+    render(<App />);
+    await screen.findByRole("button", { name: /model-rail/i });
+
+    expect(screen.getByLabelText("Sessions").className).toContain("hidden");
+  });
+});
+
+
+describe("thinking toggle", () => {
+  beforeEach(() => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+      clear: () => storage.clear(),
+      removeItem: (key: string) => storage.delete(key),
+    });
+    Element.prototype.scrollIntoView = vi.fn();
+    localStorage.setItem(
+      "coding-agent-webui-config",
+      JSON.stringify({ baseUrl: "http://127.0.0.1:18080", apiKey: "" }),
+    );
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/sessions")) {
+          return Promise.resolve(jsonResponse({ sessions: [] }));
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      }),
+    );
+  });
+
+  afterEach(() => {
+    cleanup();
+    localStorage.clear();
+    vi.restoreAllMocks();
+  });
+
+  it("defaults to showing thinking and persists the toggle", async () => {
+    render(<App />);
+
+    const btn = screen.getByRole("button", { name: "toggle thinking" });
+    expect(btn.getAttribute("aria-pressed")).toBe("true");
+
+    fireEvent.click(btn);
+    expect(btn.getAttribute("aria-pressed")).toBe("false");
+    expect(localStorage.getItem("coding-agent-webui-show-thinking")).toBe("0");
+
+    fireEvent.click(btn);
+    expect(btn.getAttribute("aria-pressed")).toBe("true");
+    expect(localStorage.getItem("coding-agent-webui-show-thinking")).toBe("1");
+  });
+});
+
+describe("approval scope", () => {
+  beforeEach(() => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+      clear: () => storage.clear(),
+      removeItem: (key: string) => storage.delete(key),
+    });
+    Element.prototype.scrollIntoView = vi.fn();
+    localStorage.setItem(
+      "coding-agent-webui-config",
+      JSON.stringify({ baseUrl: "http://127.0.0.1:18080", apiKey: "", approval: "auto" }),
+    );
+  });
+
+  afterEach(() => {
+    cleanup();
+    localStorage.clear();
+    vi.restoreAllMocks();
+  });
+
+  it("sends scope=session when choosing always allow", async () => {
+    const active = session("session-approval-0002", "model-approval");
+    let approveBody: Record<string, unknown> | null = null;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/sessions")) {
+          return jsonResponse({ sessions: [active] });
+        }
+        if (url.endsWith(`/sessions/${active.session_id}`)) {
+          return jsonResponse(active);
+        }
+        if (url.endsWith(`/sessions/${active.session_id}/runs`)) {
+          return jsonResponse({ session_id: active.session_id, runs: [] });
+        }
+        if (url.includes(`/sessions/${active.session_id}/prompt?event_format=display`)) {
+          const payload = {
+            source_event_id: "event-approval",
+            run_id: "run-approval",
+            sequence: 1,
+            display_kind: "approval_prompt",
+            payload: {
+              agent_id: "",
+              request_id: "approval-9",
+              timeout_seconds: 60,
+              tool_call: {
+                call_id: "call-1",
+                tool_name: "bash",
+                arguments: { cmd: "pwd" },
+              },
+            },
+            // Live-streamed prompt: created_at must be "now" so the approval
+            // countdown deadline (created_at + timeout_seconds) is not already
+            // expired when the card mounts.
+            created_at: new Date().toISOString(),
+          };
+          return new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(
+                  new TextEncoder().encode(
+                    `event: approval_prompt\ndata: ${JSON.stringify(payload)}\n\n`,
+                  ),
+                );
+                controller.close();
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "text/event-stream" } },
+          );
+        }
+        if (url.endsWith(`/sessions/${active.session_id}/approve`)) {
+          approveBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return jsonResponse({
+            status: "approved",
+            request_id: "approval-9",
+            decision: "approved",
+          });
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /model-approval/i }));
+    await screen.findByText("idle");
+    fireEvent.change(screen.getByPlaceholderText(/ask the agent/i), {
+      target: { value: "run a tool" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(await screen.findByText("Approval Required")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Always allow (this session)" }));
+
+    await waitFor(() =>
+      expect(approveBody).toEqual({
+        request_id: "approval-9",
+        approved: true,
+        feedback: null,
+        scope: "session",
+      }),
+    );
+    expect(screen.getByText("→ approved")).toBeTruthy();
+  });
+});
+
+describe("session settings panel", () => {
+  beforeEach(() => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+      clear: () => storage.clear(),
+      removeItem: (key: string) => storage.delete(key),
+    });
+    Element.prototype.scrollIntoView = vi.fn();
+    localStorage.setItem(
+      "coding-agent-webui-config",
+      JSON.stringify({ baseUrl: "http://127.0.0.1:18080", apiKey: "", approval: "auto" }),
+    );
+  });
+
+  afterEach(() => {
+    cleanup();
+    localStorage.clear();
+    vi.restoreAllMocks();
+  });
+
+  it("patches runtime config when session settings change", async () => {
+    const active = session("session-settings-0001", "model-settings");
+    const patches: Array<{ method: string | undefined; body: Record<string, unknown> }> = [];
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/sessions")) {
+          return Promise.resolve(jsonResponse({ sessions: [active] }));
+        }
+        if (url.endsWith(`/sessions/${active.session_id}/runtime-config`)) {
+          const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          patches.push({
+            method: init?.method,
+            body,
+          });
+          return Promise.resolve(
+            jsonResponse({
+              session_id: active.session_id,
+              provider_name: (body.provider as string | undefined) ?? active.provider_name,
+              model_name: (body.model as string | undefined) ?? active.model_name,
+              base_url: null,
+            }),
+          );
+        }
+        if (url.endsWith(`/sessions/${active.session_id}`)) {
+          return Promise.resolve(jsonResponse(active));
+        }
+        if (url.endsWith(`/sessions/${active.session_id}/runs`)) {
+          return Promise.resolve(jsonResponse({ session_id: active.session_id, runs: [] }));
+        }
+        if (url.includes(`/sessions/${active.session_id}/memory/reviews`)) {
+          return Promise.resolve(jsonResponse([]));
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /model-settings/i }));
+    await screen.findByText("idle");
+    fireEvent.click(screen.getByRole("button", { name: "Toggle settings panel" }));
+    expect(await screen.findByText("Session settings")).toBeTruthy();
+
+    fireEvent.change(screen.getByTitle("session approval policy"), {
+      target: { value: "yolo" },
+    });
+    await waitFor(() =>
+      expect(patches).toContainEqual({ method: "PATCH", body: { approval: "yolo" } }),
+    );
+    // Approval changes also update the persisted new-session default.
+    expect(
+      (JSON.parse(localStorage.getItem("coding-agent-webui-config") ?? "{}") as { approval?: string })
+        .approval,
+    ).toBe("yolo");
+
+    fireEvent.change(screen.getByTitle("thinking effort"), {
+      target: { value: "high" },
+    });
+    await waitFor(() =>
+      expect(patches).toContainEqual({
+        method: "PATCH",
+        body: { thinking: { enabled: true, effort: "high" } },
+      }),
+    );
+
+    fireEvent.change(screen.getByTitle("session model"), {
+      target: { value: "model-override" },
+    });
+    fireEvent.blur(screen.getByTitle("session model"));
+    await waitFor(() =>
+      expect(patches).toContainEqual({ method: "PATCH", body: { model: "model-override" } }),
+    );
+
+    expect(await screen.findByText("Saved")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Toggle settings panel" }));
+    fireEvent.click(screen.getByRole("button", { name: "Toggle settings panel" }));
+    expect((await screen.findByTitle("session model") as HTMLInputElement).value).toBe(
+      "model-override",
+    );
+  });
+
+  it("keeps queued settings updates bound to their originating session", async () => {
+    const first = session("session-settings-0002", "model-settings-a");
+    const second = session("session-settings-0003", "model-settings-b");
+    const firstPatch = deferred<Response>();
+    const patchUrls: string[] = [];
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/sessions")) {
+          return Promise.resolve(jsonResponse({ sessions: [first, second] }));
+        }
+        if (url.endsWith(`/sessions/${first.session_id}/runtime-config`)) {
+          patchUrls.push(url);
+          if (patchUrls.length === 1) return firstPatch.promise;
+          return Promise.resolve(
+            jsonResponse({
+              session_id: first.session_id,
+              provider_name: first.provider_name,
+              model_name: first.model_name,
+              base_url: null,
+            }),
+          );
+        }
+        if (url.endsWith(`/sessions/${second.session_id}/runtime-config`)) {
+          patchUrls.push(url);
+          return Promise.resolve(
+            jsonResponse({
+              session_id: second.session_id,
+              provider_name: second.provider_name,
+              model_name: second.model_name,
+              base_url: null,
+            }),
+          );
+        }
+        if (url.endsWith(`/sessions/${first.session_id}`)) {
+          return Promise.resolve(jsonResponse(first));
+        }
+        if (url.endsWith(`/sessions/${second.session_id}`)) {
+          return Promise.resolve(jsonResponse(second));
+        }
+        if (url.endsWith(`/sessions/${first.session_id}/runs`)) {
+          return Promise.resolve(jsonResponse({ session_id: first.session_id, runs: [] }));
+        }
+        if (url.endsWith(`/sessions/${second.session_id}/runs`)) {
+          return Promise.resolve(jsonResponse({ session_id: second.session_id, runs: [] }));
+        }
+        if (url.includes(`/sessions/${first.session_id}/memory/reviews`)) {
+          return Promise.resolve(jsonResponse([]));
+        }
+        if (url.includes(`/sessions/${second.session_id}/memory/reviews`)) {
+          return Promise.resolve(jsonResponse([]));
+        }
+        throw new Error(`unexpected fetch ${url} ${init?.method ?? "GET"}`);
+      }),
+    );
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /model-settings-a/i }));
+    await screen.findByText("idle");
+    fireEvent.click(screen.getByRole("button", { name: "Toggle settings panel" }));
+    const approval = await screen.findByTitle("session approval policy");
+
+    fireEvent.change(approval, { target: { value: "yolo" } });
+    await waitFor(() => expect(patchUrls).toHaveLength(1));
+    fireEvent.change(approval, { target: { value: "interactive" } });
+
+    fireEvent.click(screen.getByRole("button", { name: /model-settings-b/i }));
+    await screen.findByText("idle");
+
+    firstPatch.resolve(
+      jsonResponse({
+        session_id: first.session_id,
+        provider_name: first.provider_name,
+        model_name: first.model_name,
+        base_url: null,
+      }),
+    );
+
+    await waitFor(() => expect(patchUrls).toHaveLength(2));
+    expect(patchUrls).toEqual([
+      expect.stringContaining(`/sessions/${first.session_id}/runtime-config`),
+      expect.stringContaining(`/sessions/${first.session_id}/runtime-config`),
+    ]);
+  });
+
+  it("shows a placeholder when there is no active session", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/sessions")) {
+          return Promise.resolve(jsonResponse({ sessions: [] }));
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Toggle settings panel" }));
+    expect(await screen.findByText("No active session")).toBeTruthy();
+  });
+});
+
+describe("P2 race guards", () => {
+  beforeEach(() => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+      clear: () => storage.clear(),
+      removeItem: (key: string) => storage.delete(key),
+    });
+    Element.prototype.scrollIntoView = vi.fn();
+    localStorage.setItem(
+      "coding-agent-webui-config",
+      JSON.stringify({
+        baseUrl: "http://127.0.0.1:18080",
+        apiKey: "",
+        repoPath: "",
+        approval: "auto",
+      }),
+    );
+  });
+
+  afterEach(() => {
+    cleanup();
+    localStorage.clear();
+    vi.restoreAllMocks();
+  });
+
+  it("applies only the active session's diff when fetches resolve out of order", async () => {
+    const first = session("session-diff-0001", "model-diff-a");
+    const second = session("session-diff-0002", "model-diff-b");
+    const diffA = deferred<Response>();
+    const diffB = deferred<Response>();
+    const patchA = deferred<Response>();
+    const patchB = deferred<Response>();
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/sessions")) {
+          return Promise.resolve(jsonResponse({ sessions: [first, second] }));
+        }
+        if (url.endsWith(`/sessions/${first.session_id}`)) {
+          return Promise.resolve(jsonResponse(first));
+        }
+        if (url.endsWith(`/sessions/${second.session_id}`)) {
+          return Promise.resolve(jsonResponse(second));
+        }
+        if (url.endsWith(`/sessions/${first.session_id}/runs`)) {
+          return Promise.resolve(jsonResponse({ session_id: first.session_id, runs: [] }));
+        }
+        if (url.endsWith(`/sessions/${second.session_id}/runs`)) {
+          return Promise.resolve(jsonResponse({ session_id: second.session_id, runs: [] }));
+        }
+        if (url.includes(`/sessions/${first.session_id}/memory/reviews`)) {
+          return Promise.resolve(jsonResponse([]));
+        }
+        if (url.includes(`/sessions/${second.session_id}/memory/reviews`)) {
+          return Promise.resolve(jsonResponse([]));
+        }
+        if (url.endsWith(`/sessions/${first.session_id}/workspace/diff`)) {
+          return diffA.promise;
+        }
+        if (url.endsWith(`/sessions/${second.session_id}/workspace/diff`)) {
+          return diffB.promise;
+        }
+        if (url.endsWith(`/sessions/${first.session_id}/workspace/patch`)) {
+          return patchA.promise;
+        }
+        if (url.endsWith(`/sessions/${second.session_id}/workspace/patch`)) {
+          return patchB.promise;
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /model-diff-a/i }));
+    await screen.findByText("idle");
+    // Open the diff panel in session A; its fetch stays in flight.
+    fireEvent.click(screen.getByRole("button", { name: "Toggle diff panel" }));
+
+    // Switch to session B before A's fetch resolves, then open its diff panel.
+    fireEvent.click(screen.getByRole("button", { name: /model-diff-b/i }));
+    await screen.findByText("idle");
+    fireEvent.click(screen.getByRole("button", { name: "Toggle diff panel" }));
+
+    // B's diff resolves first and applies.
+    diffB.resolve(
+      jsonResponse({
+        session_id: second.session_id,
+        files: [{ path: "b-file.ts", status: "modified", additions: 1, deletions: 0 }],
+        additions: 1,
+        deletions: 0,
+      }),
+    );
+    patchB.resolve(
+      jsonResponse({ session_id: second.session_id, format: "unified_diff", patch: "" }),
+    );
+    expect(await screen.findByText("b-file.ts")).toBeTruthy();
+
+    // A's stale fetch resolves last and must not clobber B's panel.
+    diffA.resolve(
+      jsonResponse({
+        session_id: first.session_id,
+        files: [{ path: "a-file.ts", status: "modified", additions: 9, deletions: 9 }],
+        additions: 9,
+        deletions: 9,
+      }),
+    );
+    patchA.resolve(
+      jsonResponse({ session_id: first.session_id, format: "unified_diff", patch: "" }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.getByText("b-file.ts")).toBeTruthy();
+    expect(screen.queryByText("a-file.ts")).toBeNull();
+  });
+
+  it("does not reopen the checkpoints panel when the session changes mid-restore", async () => {
+    const first = session("session-restore-0001", "model-restore-a", { checkpoint_count: 1 });
+    const second = session("session-restore-0002", "model-restore-b");
+    const checkpoint = {
+      checkpoint_id: "cp-1",
+      tape_id: "tape-1",
+      session_id: first.session_id,
+      entry_count: 3,
+      window_start: 0,
+      created_at: "2026-06-12T00:00:00Z",
+      label: "before-refactor",
+    };
+    const reloadSummary = deferred<Response>();
+    let firstSummaryCalls = 0;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/sessions")) {
+          return Promise.resolve(jsonResponse({ sessions: [first, second] }));
+        }
+        if (url.endsWith(`/sessions/${first.session_id}/checkpoints`)) {
+          return Promise.resolve(jsonResponse({ checkpoints: [checkpoint] }));
+        }
+        if (url.endsWith(`/sessions/${first.session_id}/checkpoints/cp-1/restore`)) {
+          return Promise.resolve(jsonResponse({}));
+        }
+        if (url.endsWith(`/sessions/${first.session_id}`)) {
+          firstSummaryCalls += 1;
+          // The reload after restore stays in flight until we switch sessions.
+          if (firstSummaryCalls > 1) return reloadSummary.promise;
+          return Promise.resolve(jsonResponse(first));
+        }
+        if (url.endsWith(`/sessions/${second.session_id}`)) {
+          return Promise.resolve(jsonResponse(second));
+        }
+        if (url.endsWith(`/sessions/${first.session_id}/runs`)) {
+          return Promise.resolve(jsonResponse({ session_id: first.session_id, runs: [] }));
+        }
+        if (url.endsWith(`/sessions/${second.session_id}/runs`)) {
+          return Promise.resolve(jsonResponse({ session_id: second.session_id, runs: [] }));
+        }
+        if (url.includes(`/sessions/${first.session_id}/memory/reviews`)) {
+          return Promise.resolve(jsonResponse([]));
+        }
+        if (url.includes(`/sessions/${second.session_id}/memory/reviews`)) {
+          return Promise.resolve(jsonResponse([]));
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /model-restore-a/i }));
+    await screen.findByText("idle");
+
+    // Open the checkpoints panel and restore the checkpoint.
+    fireEvent.click(screen.getByRole("button", { name: "Toggle checkpoints panel" }));
+    expect(await screen.findByText("before-refactor")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm restore" }));
+
+    // The restore triggers a reload of session A that is still in flight.
+    await waitFor(() => expect(firstSummaryCalls).toBe(2));
+
+    // Switch to session B before A's reload resolves.
+    fireEvent.click(screen.getByRole("button", { name: /model-restore-b/i }));
+    await screen.findByText("idle");
+
+    // A's stale reload resolves now; it must not reopen the checkpoints panel.
+    reloadSummary.resolve(jsonResponse(first));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.queryByText(/Checkpoints ·/)).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Toggle checkpoints panel" }).getAttribute("aria-pressed"),
+    ).toBe("false");
+  });
+
+  it("does not reload the new active session when an old checkpoint restore finishes", async () => {
+    const first = session("session-restore-0003", "model-restore-c", { checkpoint_count: 1 });
+    const second = session("session-restore-0004", "model-restore-d");
+    const restoreResponse = deferred<Response>();
+    let secondSummaryCalls = 0;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/sessions")) {
+          return Promise.resolve(jsonResponse({ sessions: [first, second] }));
+        }
+        if (url.endsWith(`/sessions/${first.session_id}/checkpoints`)) {
+          return Promise.resolve(
+            jsonResponse({
+              checkpoints: [
+                {
+                  checkpoint_id: "cp-2",
+                  tape_id: "tape-2",
+                  session_id: first.session_id,
+                  entry_count: 4,
+                  window_start: 0,
+                  created_at: "2026-06-12T00:00:00Z",
+                  label: "before-switch",
+                },
+              ],
+            }),
+          );
+        }
+        if (url.endsWith(`/sessions/${first.session_id}/checkpoints/cp-2/restore`)) {
+          return restoreResponse.promise;
+        }
+        if (url.endsWith(`/sessions/${first.session_id}`)) {
+          return Promise.resolve(jsonResponse(first));
+        }
+        if (url.endsWith(`/sessions/${second.session_id}`)) {
+          secondSummaryCalls += 1;
+          return Promise.resolve(jsonResponse(second));
+        }
+        if (url.endsWith(`/sessions/${first.session_id}/runs`)) {
+          return Promise.resolve(jsonResponse({ session_id: first.session_id, runs: [] }));
+        }
+        if (url.endsWith(`/sessions/${second.session_id}/runs`)) {
+          return Promise.resolve(jsonResponse({ session_id: second.session_id, runs: [] }));
+        }
+        if (url.includes(`/sessions/${first.session_id}/memory/reviews`)) {
+          return Promise.resolve(jsonResponse([]));
+        }
+        if (url.includes(`/sessions/${second.session_id}/memory/reviews`)) {
+          return Promise.resolve(jsonResponse([]));
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /model-restore-c/i }));
+    await screen.findByText("idle");
+    fireEvent.click(screen.getByRole("button", { name: "Toggle checkpoints panel" }));
+    expect(await screen.findByText("before-switch")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Restore" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm restore" }));
+
+    fireEvent.click(screen.getByRole("button", { name: /model-restore-d/i }));
+    await screen.findByText("idle");
+    expect(secondSummaryCalls).toBe(1);
+
+    restoreResponse.resolve(jsonResponse({ status: "restored" }));
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Toggle checkpoints panel" }).getAttribute(
+          "aria-pressed",
+        ),
+      ).toBe("false"),
+    );
+    expect(secondSummaryCalls).toBe(1);
+  });
+
+  it("rolls back the optimistic resolve when posting an approval fails", async () => {
+    const active = session("session-approval-fail", "model-approval-fail");
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/sessions")) {
+          return jsonResponse({ sessions: [active] });
+        }
+        if (url.endsWith(`/sessions/${active.session_id}`)) {
+          return jsonResponse(active);
+        }
+        if (url.endsWith(`/sessions/${active.session_id}/runs`)) {
+          return jsonResponse({ session_id: active.session_id, runs: [] });
+        }
+        if (url.includes(`/sessions/${active.session_id}/memory/reviews`)) {
+          return jsonResponse([]);
+        }
+        if (url.includes(`/sessions/${active.session_id}/prompt?event_format=display`)) {
+          const payload = {
+            source_event_id: "event-approval",
+            run_id: "run-approval",
+            sequence: 1,
+            display_kind: "approval_prompt",
+            payload: {
+              agent_id: "",
+              request_id: "approval-1",
+              timeout_seconds: 60,
+              tool_call: {
+                call_id: "call-1",
+                tool_name: "bash",
+                arguments: { cmd: "pwd" },
+              },
+            },
+            // Live-streamed prompt: created_at must be "now" so the approval
+            // countdown deadline is not already expired when the card mounts.
+            created_at: new Date().toISOString(),
+          };
+          return new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(
+                  new TextEncoder().encode(
+                    `event: approval_prompt\ndata: ${JSON.stringify(payload)}\n\n`,
+                  ),
+                );
+                controller.close();
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "text/event-stream" } },
+          );
+        }
+        if (url.endsWith(`/sessions/${active.session_id}/approve`)) {
+          return new Response("boom", { status: 500 });
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /model-approval-fail/i }));
+    await screen.findByText("idle");
+    fireEvent.change(screen.getByPlaceholderText(/ask the agent/i), {
+      target: { value: "run a tool" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(await screen.findByText("Approval Required")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+
+    // The failure is surfaced and the optimistic "approved" state is rolled
+    // back so the card becomes actionable again.
+    expect(await screen.findByText(/approve failed/)).toBeTruthy();
+    expect(screen.queryByText("→ approved")).toBeNull();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Deny" })).toBeTruthy();
+  });
+
+  it("does not write an old session's approval failure into the new session", async () => {
+    const first = session("session-approval-fail-a", "model-approval-a");
+    const second = session("session-approval-fail-b", "model-approval-b");
+    const approvalResponse = deferred<Response>();
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/sessions")) {
+          return jsonResponse({ sessions: [first, second] });
+        }
+        if (url.endsWith(`/sessions/${first.session_id}`)) {
+          return jsonResponse(first);
+        }
+        if (url.endsWith(`/sessions/${second.session_id}`)) {
+          return jsonResponse(second);
+        }
+        if (url.endsWith(`/sessions/${first.session_id}/runs`)) {
+          return jsonResponse({ session_id: first.session_id, runs: [] });
+        }
+        if (url.endsWith(`/sessions/${second.session_id}/runs`)) {
+          return jsonResponse({ session_id: second.session_id, runs: [] });
+        }
+        if (url.includes(`/sessions/${first.session_id}/memory/reviews`)) {
+          return jsonResponse([]);
+        }
+        if (url.includes(`/sessions/${second.session_id}/memory/reviews`)) {
+          return jsonResponse([]);
+        }
+        if (url.includes(`/sessions/${first.session_id}/prompt?event_format=display`)) {
+          const payload = {
+            source_event_id: "event-approval-stale",
+            run_id: "run-approval-stale",
+            sequence: 1,
+            display_kind: "approval_prompt",
+            payload: {
+              agent_id: "",
+              request_id: "approval-stale",
+              timeout_seconds: 60,
+              tool_call: {
+                call_id: "call-stale",
+                tool_name: "bash",
+                arguments: { cmd: "pwd" },
+              },
+            },
+            created_at: new Date().toISOString(),
+          };
+          return new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(
+                  new TextEncoder().encode(
+                    `event: approval_prompt\ndata: ${JSON.stringify(payload)}\n\n`,
+                  ),
+                );
+                controller.close();
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "text/event-stream" } },
+          );
+        }
+        if (url.endsWith(`/sessions/${first.session_id}/approve`)) {
+          return approvalResponse.promise;
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /model-approval-a/i }));
+    await screen.findByText("idle");
+    fireEvent.change(screen.getByPlaceholderText(/ask the agent/i), {
+      target: { value: "run a tool" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(await screen.findByText("Approval Required")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+
+    fireEvent.click(screen.getByRole("button", { name: /model-approval-b/i }));
+    await screen.findByText("idle");
+
+    approvalResponse.resolve(new Response("boom", { status: 500 }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(screen.queryByText(/approve failed/)).toBeNull();
   });
 });

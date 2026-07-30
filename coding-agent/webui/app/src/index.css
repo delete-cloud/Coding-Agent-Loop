@@ -1,30 +1,31 @@
 @import "tailwindcss";
 
 @theme {
-  --color-surface-0: #0a0c10;
-  --color-surface-1: #12141a;
-  --color-surface-2: #1a1d26;
-  --color-border: #2a2e3a;
-  --color-border-active: #3d4355;
-  --color-fg: #e4e6ea;
-  --color-muted: #7c829a;
+  --color-surface-0: #0f1011;
+  --color-surface-1: #131417;
+  --color-surface-2: #16181d;
+  --color-border: #26282e;
+  --color-border-active: #3a3d47;
+  --color-fg: #e3e5e9;
+  --color-muted: #7d8189;
   --color-accent: #5b8def;
   --color-accent-hover: #6e9cf5;
   --color-ok: #3fb950;
   --color-err: #f85149;
   --color-warn: #d29922;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 /* Light theme overrides the same custom properties; applied when
    <html data-theme="light"> is set (default is dark). */
 :root[data-theme="light"] {
-  --color-surface-0: #f5f6f8;
+  --color-surface-0: #f6f7f8;
   --color-surface-1: #ffffff;
-  --color-surface-2: #e9ecf1;
-  --color-border: #d3d7de;
-  --color-border-active: #9aa3b2;
-  --color-fg: #1c1f27;
-  --color-muted: #5f6678;
+  --color-surface-2: #eef0f2;
+  --color-border: #e0e2e6;
+  --color-border-active: #b9bec7;
+  --color-fg: #1d2026;
+  --color-muted: #62676f;
   --color-accent: #2f6bd8;
   --color-accent-hover: #255cb8;
   --color-ok: #1a7f37;

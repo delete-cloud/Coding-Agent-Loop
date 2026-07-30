@@ -1,15 +1,22 @@
+import type { AgentClient } from "../lib/api";
 import type {
   ContextPack,
   ContextPackItem,
   MemoryReviewRecord,
   RuntimeRun,
 } from "../lib/types";
+import ReviewQueue from "./ReviewQueue";
 
 interface Props {
   hits: ContextPackItem[];
   memories: MemoryReviewRecord[];
   loading: boolean;
   error: string | null;
+  // When provided, the static accepted list is replaced by the interactive
+  // review queue (status tabs + accept/reject transitions).
+  client?: AgentClient;
+  sessionId?: string;
+  onReviewsChanged?: () => void;
 }
 
 // Flatten every run's metadata.context_pack sections into a single hit list.
@@ -29,9 +36,17 @@ export function extractRecallHits(runs: RuntimeRun[]): ContextPackItem[] {
   return hits;
 }
 
-export default function MemoryPanel({ hits, memories, loading, error }: Props) {
+export default function MemoryPanel({
+  hits,
+  memories,
+  loading,
+  error,
+  client,
+  sessionId,
+  onReviewsChanged,
+}: Props) {
   return (
-    <section className="border-t border-border bg-surface-1">
+    <section className="flex h-full min-h-0 flex-col bg-surface-1">
       <div className="flex items-center justify-between border-b border-border px-4 py-2">
         <div className="text-sm font-semibold text-fg">
           Memory · {hits.length} recall {hits.length === 1 ? "hit" : "hits"} ·{" "}
@@ -39,8 +54,8 @@ export default function MemoryPanel({ hits, memories, loading, error }: Props) {
         </div>
         {error && <div className="text-xs text-err">{error}</div>}
       </div>
-      <div className="grid max-h-80 overflow-hidden md:grid-cols-2">
-        <div className="overflow-auto border-b border-border md:border-r md:border-b-0">
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div className="flex min-h-0 flex-1 flex-col overflow-auto border-b border-border">
           <div className="border-b border-border px-4 py-1.5 text-xs font-semibold uppercase tracking-wide text-muted">
             Recall hits
           </div>
@@ -70,7 +85,10 @@ export default function MemoryPanel({ hits, memories, loading, error }: Props) {
             ))
           )}
         </div>
-        <div className="overflow-auto">
+        {client && sessionId && onReviewsChanged && (
+          <ReviewQueue client={client} sessionId={sessionId} onChanged={onReviewsChanged} />
+        )}
+        <div className="flex min-h-0 flex-1 flex-col overflow-auto">
           <div className="border-b border-border px-4 py-1.5 text-xs font-semibold uppercase tracking-wide text-muted">
             Accepted memories
           </div>

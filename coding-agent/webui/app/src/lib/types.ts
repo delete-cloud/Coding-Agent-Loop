@@ -121,6 +121,13 @@ export type DisplayStreamEvent =
 export type ApprovalPolicy = "auto" | "interactive" | "yolo";
 export type ApprovalScope = "once" | "session";
 
+// Mirrors ThinkingConfigSchema in src/coding_agent/server/schemas.py.
+export type ThinkingEffort = "low" | "medium" | "high";
+export interface ThinkingConfig {
+  enabled: boolean;
+  effort: ThinkingEffort;
+}
+
 export interface SessionSummary {
   session_id: string;
   id: string;
@@ -203,9 +210,26 @@ export interface ContextPack {
 export interface SessionResult {
   session_id: string;
   status: string;
+  turn_status?: string;
+  turn_id?: string | null;
+  provider_name?: string | null;
+  model_name?: string | null;
   final_answer: string | null;
   verification_summary: string | null;
   failure_details: string | null;
+}
+
+// POST /sessions/{id}/memory/reviews/{candidate_id} — target statuses.
+export type MemoryReviewTransitionStatus = "accepted" | "rejected" | "archived";
+
+export interface CheckpointMetadata {
+  checkpoint_id: string;
+  tape_id: string;
+  session_id: string | null;
+  entry_count: number;
+  window_start: number;
+  created_at: string;
+  label: string | null;
 }
 
 export interface DiffFile {

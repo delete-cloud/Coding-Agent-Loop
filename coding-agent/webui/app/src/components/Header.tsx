@@ -12,7 +12,7 @@ interface Config {
 }
 
 // Mirrors ProviderName in src/coding_agent/server/schemas.py.
-const PROVIDERS = [
+export const PROVIDERS = [
   "openai",
   "anthropic",
   "copilot",
@@ -31,24 +31,28 @@ interface Props {
   config: Config;
   onConfigChange: (patch: Partial<Config>) => void;
   onNewSession: () => void;
-  onShowDiff: () => void;
+  onToggleSidebar: () => void;
   sessionId: string | null;
   status: string;
   client: AgentClient;
   theme: "dark" | "light";
   onToggleTheme: () => void;
+  showThinking: boolean;
+  onToggleThinking: () => void;
 }
 
 export default function Header({
   config,
   onConfigChange,
   onNewSession,
-  onShowDiff,
+  onToggleSidebar,
   sessionId,
   status,
   client,
   theme,
   onToggleTheme,
+  showThinking,
+  onToggleThinking,
 }: Props) {
   // Live model ids for the selected provider; null = use MODEL_PRESETS.
   const [liveModels, setLiveModels] = useState<string[] | null>(null);
@@ -78,65 +82,70 @@ export default function Header({
   const modelOptions = liveModels ?? MODEL_PRESETS;
 
   return (
-    <header className="flex flex-wrap items-center gap-2 border-b border-border bg-surface-1 px-4 py-2.5">
+    <header className="flex min-w-0 flex-wrap items-center gap-2 border-b border-border bg-surface-1 px-3 py-2.5 sm:px-4">
+      <button
+        type="button"
+        className="rounded-lg border border-border px-2.5 py-1.5 text-sm text-fg transition-colors hover:border-border-active"
+        onClick={onToggleSidebar}
+        aria-label="toggle sidebar"
+        title="Toggle sidebar"
+      >
+        ☰
+      </button>
       <input
-        className="w-48 rounded-lg border border-border bg-surface-0 px-3 py-1.5 text-sm text-fg placeholder:text-muted focus:border-accent focus:outline-none"
+        className="min-w-0 flex-1 rounded-lg border border-border bg-surface-0 px-3 py-1.5 text-sm text-fg placeholder:text-muted focus:border-accent focus:outline-none sm:w-48 sm:flex-none"
         value={config.baseUrl}
         title="Server base URL"
         onChange={(e) => onConfigChange({ baseUrl: e.target.value })}
       />
       <input
-        className="w-36 rounded-lg border border-border bg-surface-0 px-3 py-1.5 text-sm text-fg placeholder:text-muted focus:border-accent focus:outline-none"
+        className="w-full rounded-lg border border-border bg-surface-0 px-3 py-1.5 text-sm text-fg placeholder:text-muted focus:border-accent focus:outline-none sm:w-36"
         type="password"
         placeholder="X-API-Key"
         value={config.apiKey}
         onChange={(e) => onConfigChange({ apiKey: e.target.value })}
       />
       <input
-        className="w-52 rounded-lg border border-border bg-surface-0 px-3 py-1.5 text-sm text-fg placeholder:text-muted focus:border-accent focus:outline-none"
+        className="w-full rounded-lg border border-border bg-surface-0 px-3 py-1.5 text-sm text-fg placeholder:text-muted focus:border-accent focus:outline-none sm:w-52"
         placeholder="repo path (optional)"
         value={config.repoPath}
         onChange={(e) => onConfigChange({ repoPath: e.target.value })}
       />
-      <select
-        className="rounded-lg border border-border bg-surface-0 px-3 py-1.5 text-sm text-fg focus:border-accent focus:outline-none"
-        value={config.provider}
-        title="provider"
-        onChange={(e) => onConfigChange({ provider: e.target.value })}
+      <div
+        className="grid w-full min-w-0 grid-cols-1 gap-1.5 sm:flex sm:w-auto sm:flex-nowrap sm:items-center"
+        title="Defaults applied when creating a new session (per-session overrides live in the Settings panel)"
       >
-        <option value="">server default</option>
-        {PROVIDERS.map((p) => (
-          <option key={p} value={p}>
-            {p}
-          </option>
-        ))}
-      </select>
-      <input
-        className="w-44 rounded-lg border border-border bg-surface-0 px-3 py-1.5 text-sm text-fg placeholder:text-muted focus:border-accent focus:outline-none disabled:opacity-40"
-        list="model-options"
-        placeholder="model (e.g. kimi-for-coding)"
-        title="model"
-        value={config.model}
-        disabled={!config.provider}
-        onChange={(e) => onConfigChange({ model: e.target.value })}
-      />
-      <datalist id="model-options">
-        {modelOptions.map((m) => (
-          <option key={m} value={m} />
-        ))}
-      </datalist>
-      <select
-        className="rounded-lg border border-border bg-surface-0 px-3 py-1.5 text-sm text-fg focus:border-accent focus:outline-none"
-        value={config.approval}
-        title="approval policy"
-        onChange={(e) =>
-          onConfigChange({ approval: e.target.value as ApprovalPolicy })
-        }
-      >
-        <option value="auto">auto</option>
-        <option value="interactive">interactive</option>
-        <option value="yolo">yolo</option>
-      </select>
+        <span className="text-[10px] font-medium tracking-wide text-muted uppercase">
+          new session defaults
+        </span>
+        <select
+          className="w-full min-w-0 rounded-lg border border-border bg-surface-0 px-3 py-1.5 text-sm text-fg focus:border-accent focus:outline-none sm:w-auto"
+          value={config.provider}
+          title="provider"
+          onChange={(e) => onConfigChange({ provider: e.target.value })}
+        >
+          <option value="">server default</option>
+          {PROVIDERS.map((p) => (
+            <option key={p} value={p}>
+              {p}
+            </option>
+          ))}
+        </select>
+        <input
+          className="w-full min-w-0 rounded-lg border border-border bg-surface-0 px-3 py-1.5 font-mono text-sm text-fg placeholder:text-muted focus:border-accent focus:outline-none disabled:opacity-40 sm:w-44"
+          list="model-options"
+          placeholder="model (e.g. kimi-for-coding)"
+          title="model"
+          value={config.model}
+          disabled={!config.provider}
+          onChange={(e) => onConfigChange({ model: e.target.value })}
+        />
+        <datalist id="model-options">
+          {modelOptions.map((m) => (
+            <option key={m} value={m} />
+          ))}
+        </datalist>
+      </div>
       <button
         className="rounded-lg bg-accent px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-accent-hover"
         onClick={onNewSession}
@@ -144,11 +153,18 @@ export default function Header({
         New session
       </button>
       <button
-        className="rounded-lg border border-border px-4 py-1.5 text-sm text-fg transition-colors hover:border-border-active disabled:opacity-40"
-        disabled={!sessionId}
-        onClick={onShowDiff}
+        type="button"
+        className={`rounded-lg border px-3 py-1.5 text-sm transition-colors ${
+          showThinking
+            ? "border-accent/50 text-accent"
+            : "border-border text-muted hover:border-border-active"
+        }`}
+        onClick={onToggleThinking}
+        aria-label="toggle thinking"
+        aria-pressed={showThinking}
+        title={showThinking ? "Hide thinking blocks" : "Show thinking blocks"}
       >
-        Diff
+        💭
       </button>
       <button
         type="button"
@@ -159,7 +175,7 @@ export default function Header({
       >
         {theme === "dark" ? "☀️" : "🌙"}
       </button>
-      <span className="ml-auto text-xs text-muted">
+      <span className="ml-auto w-full max-w-full truncate text-right text-xs text-muted sm:w-auto">
         {sessionId ? status : "no session"}
       </span>
     </header>
