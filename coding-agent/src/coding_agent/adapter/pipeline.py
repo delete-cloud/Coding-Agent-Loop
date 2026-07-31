@@ -21,7 +21,7 @@ from agentkit.providers.models import (
 from agentkit.runtime.pipeline import Pipeline, PipelineContext
 from agentkit.tape.models import Entry
 
-from coding_agent.adapter.types import StopReason, TurnOutcome
+from coding_agent.adapter.types import StopReason, TurnOutcome, exception_error_message
 from coding_agent.observability.agent import AgentObservationRecorder
 from coding_agent.plugins.metrics import SessionMetricsPlugin
 from coding_agent.redaction import redact_sensitive_text
@@ -233,7 +233,9 @@ class PipelineAdapter:
             raise
         except Exception as exc:
             self._ensure_user_message(user_entry)
-            return await self._finish(StopReason.ERROR, error=str(exc))
+            return await self._finish(
+                StopReason.ERROR, error=exception_error_message(exc)
+            )
 
         stop_reason = self._determine_stop_reason()
         return await self._finish(

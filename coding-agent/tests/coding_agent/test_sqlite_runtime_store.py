@@ -114,3 +114,37 @@ async def test_sqlite_runtime_store_persists_runtime_records_across_instances(
     assert [item.interaction_id for item in interactions] == ["interaction-1"]
     assert interactions[0].status == "approved"
     assert interactions[0].response_payload == {"approved": True}
+
+
+@pytest.mark.asyncio
+async def test_sqlite_runtime_store_normalizes_blank_error_to_none(tmp_path) -> None:
+    """Defense-in-depth: a blank error must persist as NULL, never raise."""
+    store = SQLiteRuntimeStore(tmp_path / "runtime.sqlite3")
+    await store.create_agent_run(
+        AgentRunRecord(
+            run_id="run-1",
+            session_id="session-1",
+            tape_id=None,
+            parent_run_id=None,
+            agent_id=None,
+            status="running",
+            started_at=datetime(2026, 6, 1, 12, 0, tzinfo=UTC),
+            metadata={},
+            result={},
+            error=None,
+        )
+    )
+
+    updated = await store.update_agent_run(
+        "run-1",
+        status="failed",
+        ended_at=datetime(2026, 6, 1, 12, 1, tzinfo=UTC),
+        metadata={},
+        result={},
+        error="",
+    )
+    assert updated.error is None
+
+    loaded = await store.load_agent_run("run-1")
+    assert loaded is not None
+    assert loaded.error is None

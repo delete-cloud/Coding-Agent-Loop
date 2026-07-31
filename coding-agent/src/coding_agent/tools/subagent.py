@@ -15,7 +15,7 @@ from agentkit.tools import FatalToolExecutionError
 from agentkit.tools import tool
 
 from coding_agent.adapter import PipelineAdapter
-from coding_agent.adapter.types import StopReason, TurnOutcome
+from coding_agent.adapter.types import StopReason, TurnOutcome, exception_error_message
 from coding_agent.core.agent_identity import effective_agent_id, legacy_agent_id_str
 from coding_agent.wire.protocol import ToolCallDelta, WireMessage
 
@@ -312,7 +312,10 @@ def build_subagent_tool(child_pipeline_builder: ChildPipelineBuilder):
         except FatalToolExecutionError:
             raise
         except Exception as exc:
-            outcome = TurnOutcome(stop_reason=StopReason.ERROR, error=str(exc))
+            outcome = TurnOutcome(
+                stop_reason=StopReason.ERROR,
+                error=exception_error_message(exc),
+            )
         finally:
             saved_cancel: asyncio.CancelledError | None = None
             try:

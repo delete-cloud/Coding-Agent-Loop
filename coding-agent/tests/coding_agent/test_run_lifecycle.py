@@ -8,8 +8,16 @@ from typing import Any, cast
 
 import pytest
 
-from coding_agent.adapter.types import StopReason, TurnOutcome
-from coding_agent.stores.runtime_store import AgentRunRecord, JSONObject
+from coding_agent.adapter.types import (
+    StopReason,
+    TurnOutcome,
+    exception_error_message,
+)
+from coding_agent.stores.runtime_store import (
+    AgentRunRecord,
+    JSONObject,
+    SQLiteRuntimeStore,
+)
 from coding_agent.runs import (
     RuntimeCloser,
     RuntimeRunLifecycle,
@@ -1295,6 +1303,98 @@ async def test_runtime_turn_error_handler_records_generic_failure() -> None:
     assert notifications == [("session-1", "boom")]
     assert [update["status"] for update in store.updated] == ["running", "failed"]
     assert store.updated[-1]["error"] == "boom"
+
+
+@pytest.mark.asyncio
+async def test_runtime_turn_error_handler_records_generic_failure_with_empty_message() -> (
+    None
+):
+    """An exception with empty str() must still persist a non-empty error."""
+    store = RecordingRuntimeStore()
+    lifecycle = RuntimeRunLifecycle(
+        store=store,
+        metadata_for_session=lambda session, *, resume_context=None: {
+            "session_id": session.id,
+        },
+    )
+    tracker = RuntimeTurnRunTracker(
+        lifecycle=lifecycle,
+        run_id="run-1",
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    session = FakeTurnSession(id="session-1", tape_id="tape-1")
+
+    async def close_runtime(session: FakeTurnSession) -> None:
+        del session
+
+    async def notify_generic_error(
+        session: FakeTurnSession,
+        exc: Exception,
+    ) -> None:
+        del session, exc
+
+    await tracker.ensure_started(session)
+    handler = RuntimeTurnErrorHandler(
+        turn_run=tracker,
+        close_runtime=close_runtime,
+        notify_generic_error=notify_generic_error,
+    )
+
+    await handler.handle_generic(session, RuntimeError())
+
+    assert session.turn_status == "failed"
+    assert store.updated[-1]["error"] == "RuntimeError"
+    assert session.last_failure_details == "HTTP session turn failed: RuntimeError"
+
+
+@pytest.mark.asyncio
+async def test_turn_failure_with_empty_exception_message_finishes_run(
+    tmp_path,
+) -> None:
+    """Reproduce the original incident end to end at run level.
+
+    A provider exception whose str() is empty must finish the run with a
+    non-empty, informative error; the runtime store must not raise
+    ValueError("error must be non-empty") and mask the failure.
+    """
+    store = SQLiteRuntimeStore(tmp_path / "runtime.sqlite3")
+    persistence = RuntimeRunPersistenceService(
+        run_store=store,
+        checkpoint_store=None,
+        metadata_for_session=lambda session, *, resume_context=None: {
+            "session_id": session.id,
+        },
+    )
+    session = FakeTurnSession(id="session-1", tape_id=None)
+    await persistence.lifecycle().start(
+        session,
+        run_id="run-1",
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    persisted: list[FakeTurnSession] = []
+
+    async def persist_session(session: FakeTurnSession) -> None:
+        persisted.append(session)
+
+    finalizer = persistence.turn_finalizer(persist_session=persist_session)
+    outcome = TurnOutcome(
+        stop_reason=StopReason.ERROR,
+        error=exception_error_message(RuntimeError()),
+    )
+
+    await finalizer.complete(
+        session,
+        ctx=FakeRuntimeContext("tape-1"),
+        outcome=outcome,
+        run_id="run-1",
+    )
+
+    record = await store.load_agent_run("run-1")
+    assert record is not None
+    assert record.status == "failed"
+    assert record.error == "RuntimeError"
+    assert session.last_failure_details == "Agent turn failed: RuntimeError"
+    assert persisted == [session]
 
 
 @pytest.mark.asyncio

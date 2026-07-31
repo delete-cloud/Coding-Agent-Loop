@@ -1,7 +1,11 @@
 """Tests for adapter_types module."""
 
-import pytest
-from coding_agent.adapter.types import TurnOutcome, StopReason
+import httpx
+from coding_agent.adapter.types import (
+    StopReason,
+    TurnOutcome,
+    exception_error_message,
+)
 
 
 class TestStopReasonEnum:
@@ -82,3 +86,36 @@ class TestTurnOutcomeDataclass:
         )
         assert outcome.stop_reason == StopReason.DOOM_LOOP
         assert outcome.steps_taken == 100
+
+
+class TestExceptionErrorMessage:
+    """Pin the empty-error masking fix: str(exc) must never yield ""."""
+
+    def test_returns_message_when_non_empty(self):
+        assert exception_error_message(RuntimeError("boom")) == "boom"
+
+    def test_falls_back_to_type_name_when_message_empty(self):
+        assert exception_error_message(RuntimeError()) == "RuntimeError"
+
+    def test_falls_back_to_type_name_when_message_whitespace_only(self):
+        assert exception_error_message(ValueError("   ")) == "ValueError"
+
+    def test_preserves_message_content_verbatim(self):
+        assert exception_error_message(RuntimeError(" boom ")) == " boom "
+
+    def test_unwraps_cause_when_wrapper_message_empty(self):
+        cause = RuntimeError()
+        wrapper = ValueError()
+        wrapper.__cause__ = cause
+        assert exception_error_message(wrapper) == "ValueError: RuntimeError"
+
+    def test_http_status_error_keeps_informative_message(self):
+        request = httpx.Request("POST", "https://auth.openai.com/oauth/token")
+        response = httpx.Response(403, request=request)
+        exc = httpx.HTTPStatusError(
+            "Client error '403 Forbidden' for url "
+            "'https://auth.openai.com/oauth/token'",
+            request=request,
+            response=response,
+        )
+        assert "403 Forbidden" in exception_error_message(exc)
