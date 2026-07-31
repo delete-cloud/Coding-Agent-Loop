@@ -592,6 +592,26 @@ class TestStopReasonMapping:
         assert outcome.error is not None
         assert "boom" in outcome.error
 
+    @pytest.mark.asyncio
+    async def test_error_on_pipeline_exception_with_empty_message(self):
+        """Exception with empty str() → non-empty, informative outcome error.
+
+        Regression: bare str(exc) produced error="", which tripped the runtime
+        store's non-empty validation and masked the real failure with
+        "error must be non-empty".
+        """
+
+        async def empty_message_stream(messages, tools=None, **kw):
+            raise RuntimeError()
+            yield  # pragma: no cover
+
+        pipeline, ctx, _ = _make_pipeline_and_ctx(empty_message_stream)
+        adapter = PipelineAdapter(pipeline=pipeline, ctx=ctx)
+
+        outcome = await adapter.run_turn("hello")
+        assert outcome.stop_reason == StopReason.ERROR
+        assert outcome.error == "PipelineError: RuntimeError"
+
 
 class TestEventToWireMessage:
     @pytest.mark.asyncio

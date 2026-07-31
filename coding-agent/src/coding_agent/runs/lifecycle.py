@@ -8,7 +8,7 @@ from inspect import isawaitable
 from types import TracebackType
 from typing import Any, Protocol, cast
 
-from coding_agent.adapter.types import StopReason, TurnOutcome
+from coding_agent.adapter.types import StopReason, TurnOutcome, exception_error_message
 from coding_agent.stores.runtime_store import AgentRunRecord, JSONObject
 from coding_agent.stores import RuntimeRunLifecycleStore
 from coding_agent.topics.context_pack import merged_context_pack_stash
@@ -629,10 +629,12 @@ class RuntimeTurnErrorHandler:
             session,
             status="failed",
             result={},
-            error=str(exc),
+            error=exception_error_message(exc),
         )
         session.turn_status = "failed"
-        session.last_failure_details = f"Fatal tool execution failed: {exc}"
+        session.last_failure_details = (
+            f"Fatal tool execution failed: {exception_error_message(exc)}"
+        )
         await self.close_runtime(session)
 
     async def handle_cancelled(self, session: RuntimeTurnErrorSession) -> None:
@@ -661,10 +663,12 @@ class RuntimeTurnErrorHandler:
             session,
             status="failed",
             result={},
-            error=str(exc),
+            error=exception_error_message(exc),
         )
         session.turn_status = "failed"
-        session.last_failure_details = f"HTTP session turn failed: {exc}"
+        session.last_failure_details = (
+            f"HTTP session turn failed: {exception_error_message(exc)}"
+        )
         await self.close_runtime(session)
         await self.notify_generic_error(session, exc)
 
