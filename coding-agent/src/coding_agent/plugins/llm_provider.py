@@ -120,20 +120,22 @@ class LLMProviderPlugin:
                 api_key=api_key,
                 base_url=self._base_url or "https://api.stepfun.com/v1",
             )
-        elif self._provider_name == "codex":
+        elif self._provider_name == "codex" or self._provider_name.startswith("codex:"):
             from coding_agent.oauth.codex import CODEX_BASE_URL
             from coding_agent.oauth.store import OAuthStore
             from coding_agent.providers.codex_responses import CodexResponsesProvider
 
+            provider_key = self._provider_name
             store = OAuthStore()
-            record = store.get_provider("codex")
+            record = store.get_provider(provider_key)
             if record is None:
                 raise RuntimeError(
-                    "Codex OAuth provider is not logged in. "
-                    "Run `coding-agent oauth login codex` first."
+                    f"codex account not connected: {provider_key}. "
+                    "Connect via POST /oauth/codex/start or run "
+                    "`coding-agent oauth login codex` first."
                 )
 
-            token_source = StoreBackedCodexTokenSource(store)
+            token_source = StoreBackedCodexTokenSource(store, provider_key)
             base_url = self._base_url or CODEX_BASE_URL
 
             self._instance = CodexResponsesProvider(
@@ -150,14 +152,15 @@ class LLMProviderPlugin:
 class StoreBackedCodexTokenSource:
     """Small adapter that avoids constructing network clients until refresh."""
 
-    def __init__(self, store: Any) -> None:
+    def __init__(self, store: Any, provider_key: str = "codex") -> None:
         self._store = store
+        self._provider_key = provider_key
 
     async def get_token(self) -> Any:
         from coding_agent.oauth.store import StoreBackedTokenSource
 
         return await StoreBackedTokenSource(
-            "codex",
+            self._provider_key,
             store=self._store,
             refresh_provider=self._refresh_record,
         ).get_token()
@@ -166,7 +169,7 @@ class StoreBackedCodexTokenSource:
         from coding_agent.oauth.store import StoreBackedTokenSource
 
         return await StoreBackedTokenSource(
-            "codex",
+            self._provider_key,
             store=self._store,
             refresh_provider=self._refresh_record,
         ).refresh_token()

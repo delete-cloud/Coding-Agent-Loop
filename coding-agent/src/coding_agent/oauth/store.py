@@ -22,6 +22,21 @@ T = TypeVar("T")
 DEFAULT_AUTH_DIR = Path.home() / ".coding-agent" / "oauth"
 DEFAULT_AUTH_PATH = DEFAULT_AUTH_DIR / "auth.json"
 
+AUTH_PATH_ENV = "CODING_AGENT_OAUTH_AUTH_PATH"
+
+
+def default_auth_path() -> Path:
+    """Resolve the OAuth auth file path.
+
+    The ``CODING_AGENT_OAUTH_AUTH_PATH`` environment variable takes priority
+    (used by deployments that persist OAuth records to a data volume);
+    otherwise the per-user default ``~/.coding-agent/oauth/auth.json`` is used.
+    """
+    override = os.environ.get(AUTH_PATH_ENV)
+    if override is not None and override.strip():
+        return Path(override.strip()).expanduser()
+    return DEFAULT_AUTH_PATH
+
 
 class FileLock:
     """Cross-platform advisory file lock."""
@@ -83,7 +98,7 @@ class OAuthStore:
     """File-backed OAuth credential store with process-level locking."""
 
     def __init__(self, path: Path | str | None = None) -> None:
-        self.path = Path(path).expanduser() if path is not None else DEFAULT_AUTH_PATH
+        self.path = Path(path).expanduser() if path is not None else default_auth_path()
         self.lock_path = self.path.with_suffix(self.path.suffix + ".lock")
 
     def load(self) -> AuthFile:

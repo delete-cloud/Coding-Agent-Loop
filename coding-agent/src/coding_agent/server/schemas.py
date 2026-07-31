@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, get_args
 
 from pydantic import (
     AliasChoices,
@@ -17,6 +18,27 @@ from pydantic import (
 )
 
 from coding_agent.core.config import ProviderName
+
+CODEX_ACCOUNT_LABEL_PATTERN = r"^[a-z0-9][a-z0-9-]{0,30}$"
+
+_PROVIDER_NAME_VALUES = frozenset(get_args(ProviderName))
+
+
+def validate_provider_value(value: str | None) -> str | None:
+    """Allow ProviderName literals plus multi-account ``codex:<label>`` keys."""
+    if value is None or value in _PROVIDER_NAME_VALUES:
+        return value
+    if value.startswith("codex:"):
+        label = value.removeprefix("codex:")
+        if re.fullmatch(CODEX_ACCOUNT_LABEL_PATTERN, label):
+            return value
+        raise ValueError(
+            f"codex account label must match {CODEX_ACCOUNT_LABEL_PATTERN}: {value!r}"
+        )
+    raise ValueError(
+        f"provider must be one of {sorted(_PROVIDER_NAME_VALUES)} "
+        f"or 'codex:<label>', got {value!r}"
+    )
 
 
 class DockerWorkspaceSourceRequest(BaseModel):
@@ -62,10 +84,15 @@ class CreateSessionRequest(BaseModel):
     run_target: dict[str, Any] | None = None
     workspace_source: WorkspaceSourceRequest | None = None
     approval_policy: str = Field("auto", pattern="^(yolo|interactive|auto)$")
-    provider: ProviderName | None = None
+    provider: str | None = None
     model: str | None = Field(None, min_length=1, max_length=200)
     base_url: str | None = Field(None, min_length=1, max_length=500)
     max_steps: int | None = Field(None, ge=0)
+
+    @field_validator("provider")
+    @classmethod
+    def _validate_provider(cls, value: str | None) -> str | None:
+        return validate_provider_value(value)
 
 
 class ThinkingConfigSchema(BaseModel):
@@ -611,6 +638,63 @@ class ProviderModelsResponse(BaseModel):
     provider: ProviderName
     models: list[ProviderModelSchema]
     source: Literal["live", "unavailable"]
+
+
+class CodexOAuthStartRequest(BaseModel):
+    """Request schema for starting a codex device-flow login."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    label: str | None = Field(None, pattern=CODEX_ACCOUNT_LABEL_PATTERN)
+
+
+class CodexOAuthStartResponse(BaseModel):
+    """Response schema for a started codex OAuth flow."""
+
+    flow_id: str
+    verification_url: str
+    user_code: str
+    expires_in: int
+
+
+class CodexOAuthFlowResponse(BaseModel):
+    """Response schema for one codex OAuth flow."""
+
+    flow_id: str
+    state: Literal["pending", "authorized", "error", "expired", "cancelled"]
+    verification_url: str | None = None
+    user_code: str | None = None
+    account_label: str | None = None
+    error: str | None = None
+
+
+class CodexOAuthFlowListResponse(BaseModel):
+    """Response schema for listing codex OAuth flows."""
+
+    flows: list[CodexOAuthFlowResponse]
+
+
+class CodexOAuthAccountResponse(BaseModel):
+    """Response schema for one connected codex account."""
+
+    provider: str
+    label: str
+    email: str | None = None
+    plan: str | None = None
+    connected_at: datetime | None = None
+
+
+class CodexOAuthAccountListResponse(BaseModel):
+    """Response schema for listing connected codex accounts."""
+
+    accounts: list[CodexOAuthAccountResponse]
+
+
+class CodexOAuthAccountDeleteResponse(BaseModel):
+    """Response schema for disconnecting a codex account."""
+
+    status: str
+    provider: str
 
 
 class WorkspaceArchiveResponse(BaseModel):

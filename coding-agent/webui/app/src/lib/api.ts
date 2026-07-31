@@ -3,9 +3,12 @@ import type {
   ApprovalPolicy,
   ApprovalScope,
   CheckpointMetadata,
+  CodexFlow,
+  CodexFlowStart,
   DisplayStreamEvent,
   MemoryReviewRecord,
   MemoryReviewTransitionStatus,
+  OAuthAccount,
   ProviderModels,
   RuntimeRun,
   SessionSummary,
@@ -328,6 +331,101 @@ export class AgentClient {
     };
   }
 
+  // Codex OAuth device flow (multi-account). All parsers coerce defensively —
+  // these endpoints may be served by an older server (404) or return partial
+  // payloads while the contract settles.
+  async startCodexOAuth(label?: string): Promise<CodexFlowStart> {
+    const body: Record<string, unknown> = {};
+    if (label?.trim()) body.label = label.trim();
+    const r = await this.check(
+      await fetch(this.url("/oauth/codex/start"), {
+        method: "POST",
+        headers: this.headers(true),
+        body: JSON.stringify(body),
+      }),
+    );
+    const raw = ((await r.json().catch(() => null)) ?? {}) as Record<string, unknown>;
+    if (typeof raw.flow_id !== "string" || !raw.flow_id) {
+      throw new Error("codex oauth start response missing flow_id");
+    }
+    return {
+      flow_id: raw.flow_id,
+      verification_url: typeof raw.verification_url === "string" ? raw.verification_url : "",
+      user_code: typeof raw.user_code === "string" ? raw.user_code : "",
+      expires_in: typeof raw.expires_in === "number" ? raw.expires_in : 0,
+    };
+  }
+
+  async listCodexFlows(): Promise<CodexFlow[]> {
+    const r = await this.check(
+      await fetch(this.url("/oauth/codex/flows"), { headers: this.headers() }),
+    );
+    const data: unknown = await r.json().catch(() => null);
+    // Accept either a bare array or a { flows: [...] } envelope.
+    const items = Array.isArray(data)
+      ? data
+      : Array.isArray((data as { flows?: unknown } | null)?.flows)
+        ? (data as { flows: unknown[] }).flows
+        : [];
+    return items.flatMap(parseCodexFlow);
+  }
+
+  async getCodexFlow(flowId: string): Promise<CodexFlow> {
+    const r = await this.check(
+      await fetch(this.url(`/oauth/codex/flows/${encodeURIComponent(flowId)}`), {
+        headers: this.headers(),
+      }),
+    );
+    const data: unknown = await r.json().catch(() => null);
+    const parsed = parseCodexFlow(data);
+    if (parsed.length === 0) throw new Error("codex oauth flow response missing flow_id");
+    return parsed[0];
+  }
+
+  async cancelCodexFlow(flowId: string): Promise<void> {
+    await this.check(
+      await fetch(this.url(`/oauth/codex/flows/${encodeURIComponent(flowId)}/cancel`), {
+        method: "POST",
+        headers: this.headers(),
+      }),
+    );
+  }
+
+  async listOAuthAccounts(): Promise<OAuthAccount[]> {
+    const r = await this.check(
+      await fetch(this.url("/oauth/accounts"), { headers: this.headers() }),
+    );
+    const data: unknown = await r.json().catch(() => null);
+    const items = Array.isArray(data)
+      ? data
+      : Array.isArray((data as { accounts?: unknown } | null)?.accounts)
+        ? (data as { accounts: unknown[] }).accounts
+        : [];
+    return items.flatMap((item) => {
+      const raw = (item ?? {}) as Record<string, unknown>;
+      if (typeof raw.provider !== "string" || !raw.provider) return [];
+      return [
+        {
+          provider: raw.provider,
+          label: typeof raw.label === "string" ? raw.label : raw.provider,
+          email: typeof raw.email === "string" ? raw.email : undefined,
+          plan: typeof raw.plan === "string" ? raw.plan : undefined,
+          connected_at: typeof raw.connected_at === "string" ? raw.connected_at : undefined,
+        } satisfies OAuthAccount,
+      ];
+    });
+  }
+
+  // provider_key contains ":" for named accounts ("codex:work") — URL-encode it.
+  async deleteOAuthAccount(providerKey: string): Promise<void> {
+    await this.check(
+      await fetch(this.url(`/oauth/accounts/${encodeURIComponent(providerKey)}`), {
+        method: "DELETE",
+        headers: this.headers(),
+      }),
+    );
+  }
+
   private async runDisplayEvents(runId: string): Promise<DisplayStreamEvent[]> {
     const events: DisplayStreamEvent[] = [];
     let lastEventId: string | null = null;
@@ -370,6 +468,23 @@ export class AgentClient {
     );
     yield* readDisplayStream(r, signal);
   }
+}
+
+function parseCodexFlow(item: unknown): CodexFlow[] {
+  const raw = (item ?? {}) as Record<string, unknown>;
+  if (typeof raw.flow_id !== "string" || !raw.flow_id) return [];
+  return [
+    {
+      flow_id: raw.flow_id,
+      state: typeof raw.state === "string" ? raw.state : "pending",
+      verification_url:
+        typeof raw.verification_url === "string" ? raw.verification_url : undefined,
+      user_code: typeof raw.user_code === "string" ? raw.user_code : undefined,
+      account_label: typeof raw.account_label === "string" ? raw.account_label : undefined,
+      error: typeof raw.error === "string" ? raw.error : undefined,
+      created_at: typeof raw.created_at === "string" ? raw.created_at : undefined,
+    },
+  ];
 }
 
 async function* readDisplayStream(

@@ -166,3 +166,39 @@ def test_redact_record_removes_token_values() -> None:
     assert safe["tokens"]["access_token"] == "<redacted>"
     assert safe["tokens"]["refresh_token"] == "<redacted>"
     assert "secret-access" not in str(safe)
+
+
+def test_default_auth_path_prefers_env_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from coding_agent.oauth.store import default_auth_path
+
+    override = tmp_path / "pvc" / "auth.json"
+    monkeypatch.setenv("CODING_AGENT_OAUTH_AUTH_PATH", str(override))
+
+    assert default_auth_path() == override
+    assert OAuthStore().path == override
+
+
+def test_default_auth_path_falls_back_to_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import coding_agent.oauth.store as store_module
+
+    monkeypatch.delenv("CODING_AGENT_OAUTH_AUTH_PATH", raising=False)
+    fallback = Path.home() / "custom-home" / "auth.json"
+    monkeypatch.setattr(store_module, "DEFAULT_AUTH_PATH", fallback)
+
+    assert store_module.default_auth_path() == fallback
+    assert OAuthStore().path == fallback
+
+
+def test_default_auth_path_ignores_blank_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from coding_agent.oauth.store import DEFAULT_AUTH_PATH, default_auth_path
+
+    monkeypatch.setenv("CODING_AGENT_OAUTH_AUTH_PATH", "   ")
+
+    assert default_auth_path() == DEFAULT_AUTH_PATH

@@ -26,6 +26,11 @@ export const PROVIDERS = [
 
 // Fallback datalist options, used when the server has no live model list.
 const MODEL_PRESETS = ["kimi-for-coding", "k3", "deepseek-chat"] as const;
+// Codex uses the Responses API, which has no models endpoint — the model
+// input stays manual with these presets as datalist suggestions.
+const CODEX_MODEL_PRESETS = ["gpt-5.5", "gpt-5.4", "gpt-5.2"] as const;
+
+const isCodexProvider = (p: string) => p === "codex" || p.startsWith("codex:");
 
 interface Props {
   config: Config;
@@ -56,10 +61,29 @@ export default function Header({
 }: Props) {
   // Live model ids for the selected provider; null = use MODEL_PRESETS.
   const [liveModels, setLiveModels] = useState<string[] | null>(null);
+  // Connected codex OAuth account keys ("codex", "codex:<label>") appended to
+  // the static provider list; empty when the server lacks the endpoints.
+  const [oauthProviders, setOauthProviders] = useState<string[]>([]);
+
+  useEffect(() => {
+    let alive = true;
+    client
+      .listOAuthAccounts()
+      .then((accounts) => {
+        if (alive) setOauthProviders(accounts.map((a) => a.provider));
+      })
+      .catch(() => {
+        if (alive) setOauthProviders([]);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [client]);
 
   useEffect(() => {
     const provider = config.provider.trim();
-    if (!provider) {
+    if (!provider || isCodexProvider(provider)) {
+      // Codex has no live models list — keep the static codex presets.
       setLiveModels(null);
       return;
     }
@@ -79,7 +103,10 @@ export default function Header({
     };
   }, [client, config.provider]);
 
-  const modelOptions = liveModels ?? MODEL_PRESETS;
+  const modelOptions = isCodexProvider(config.provider.trim())
+    ? CODEX_MODEL_PRESETS
+    : (liveModels ?? MODEL_PRESETS);
+  const providerOptions = [...new Set([...PROVIDERS, ...oauthProviders])];
 
   return (
     <header className="flex min-w-0 flex-wrap items-center gap-2 border-b border-border bg-surface-1 px-3 py-2.5 sm:px-4">
@@ -125,7 +152,7 @@ export default function Header({
           onChange={(e) => onConfigChange({ provider: e.target.value })}
         >
           <option value="">server default</option>
-          {PROVIDERS.map((p) => (
+          {providerOptions.map((p) => (
             <option key={p} value={p}>
               {p}
             </option>

@@ -262,3 +262,41 @@ export interface ProviderModels {
   models: string[];
   source: "live" | "unavailable";
 }
+
+// Codex OAuth device-flow endpoints (docs/superpowers/specs/2026-07-31-webui-codex-oauth-design.md).
+export type CodexFlowState =
+  | "pending"
+  | "authorized"
+  | "error"
+  | "expired"
+  | "cancelled"
+  | string;
+
+// POST /oauth/codex/start response.
+export interface CodexFlowStart {
+  flow_id: string;
+  verification_url: string;
+  user_code: string;
+  expires_in: number;
+}
+
+// GET /oauth/codex/flows[/{flow_id}] item.
+export interface CodexFlow {
+  flow_id: string;
+  state: CodexFlowState;
+  verification_url?: string;
+  user_code?: string;
+  account_label?: string;
+  error?: string;
+  created_at?: string;
+}
+
+// GET /oauth/accounts item. provider is the store key: "codex" (default
+// account) or "codex:<label>" for named accounts.
+export interface OAuthAccount {
+  provider: string;
+  label: string;
+  email?: string;
+  plan?: string;
+  connected_at?: string;
+}
