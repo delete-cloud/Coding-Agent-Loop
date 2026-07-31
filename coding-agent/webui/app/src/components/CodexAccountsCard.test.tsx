@@ -204,6 +204,38 @@ describe("CodexAccountsCard", () => {
     expect(screen.getByTitle("retry flow flow-exp")).toBeTruthy();
   });
 
+  it("stops polling and marks the flow expired when the server 404s it", async () => {
+    let polls = 0;
+    stubFetch((url) => {
+      if (url.endsWith("/oauth/accounts")) return Promise.resolve(jsonResponse([]));
+      if (url.endsWith("/oauth/codex/flows/flow-lost")) {
+        polls += 1;
+        return Promise.resolve(jsonResponse({ detail: "flow not found" }, 404));
+      }
+      if (url.endsWith("/oauth/codex/flows")) {
+        return Promise.resolve(
+          jsonResponse([
+            {
+              flow_id: "flow-lost",
+              state: "pending",
+              verification_url: "https://example.com/device",
+              user_code: "LOST-1111",
+            },
+          ]),
+        );
+      }
+      return undefined;
+    });
+
+    render(<CodexAccountsCard client={client} pollMs={10} />);
+
+    // The flow shows up as pending, then the first 404 poll flips it to expired
+    // with the server-lost message instead of polling forever.
+    await screen.findByText("server lost this login flow; start a new one");
+    await new Promise((r) => setTimeout(r, 50));
+    expect(polls).toBeLessThanOrEqual(2);
+  });
+
   it("resumes showing a pending flow recovered from the flows list on mount", async () => {
     let cancelled = false;
     stubFetch((url) => {

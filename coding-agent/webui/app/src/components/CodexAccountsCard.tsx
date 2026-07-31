@@ -31,6 +31,8 @@ export default function CodexAccountsCard({ client, pollMs = 3000 }: Props) {
   // Flows whose "authorized" transition was already handled, so a re-render
   // or an extra poll tick cannot refresh the accounts list twice.
   const handledAuthorized = useRef(new Set<string>());
+  // Consecutive poll-failure count per flow; gives up after 5 (see poll effect).
+  const pollFailures = useRef(new Map<string, number>());
 
   const refreshAccounts = useCallback(async () => {
     try {
@@ -68,6 +70,7 @@ export default function CodexAccountsCard({ client, pollMs = 3000 }: Props) {
         client
           .getCodexFlow(flow.flow_id)
           .then((next) => {
+            pollFailures.current.delete(next.flow_id);
             setFlows((prev) => prev.map((f) => (f.flow_id === next.flow_id ? next : f)));
             if (next.state === "authorized" && !handledAuthorized.current.has(next.flow_id)) {
               handledAuthorized.current.add(next.flow_id);
@@ -78,8 +81,32 @@ export default function CodexAccountsCard({ client, pollMs = 3000 }: Props) {
               void refreshAccounts();
             }
           })
-          .catch(() => {
-            // Transient poll failure — keep polling until the flow expires.
+          .catch((e) => {
+            // Server lost the flow (restart cleared the in-memory registry or
+            // TTL pruned it): stop polling it instead of retrying forever.
+            if (isNotFound(e)) {
+              setFlows((prev) =>
+                prev.map((f) =>
+                  f.flow_id === flow.flow_id
+                    ? { ...f, state: "expired" as const, error: "server lost this login flow; start a new one" }
+                    : f,
+                ),
+              );
+              return;
+            }
+            // Other errors (auth failure, network): tolerate a few transient
+            // failures, then give up instead of polling until page close.
+            const fails = (pollFailures.current.get(flow.flow_id) ?? 0) + 1;
+            pollFailures.current.set(flow.flow_id, fails);
+            if (fails >= 5) {
+              setFlows((prev) =>
+                prev.map((f) =>
+                  f.flow_id === flow.flow_id
+                    ? { ...f, state: "error" as const, error: `polling failed: ${msg(e)}` }
+                    : f,
+                ),
+              );
+            }
           });
       }
     }, pollMs);
@@ -261,7 +288,7 @@ export default function CodexAccountsCard({ client, pollMs = 3000 }: Props) {
                 <>
                   <div className="text-[11px] text-err">
                     {f.state === "expired"
-                      ? "Login flow expired before authorization."
+                      ? (f.error ?? "Login flow expired before authorization.")
                       : `Login failed: ${f.error ?? "unknown error"}`}
                   </div>
                   <div className="flex gap-1.5">
