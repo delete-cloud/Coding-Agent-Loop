@@ -43,12 +43,23 @@ Source of truth in code:
 | `GET`  | `/sessions/{id}/workspace/diff` | → `{ files[], additions, deletions }` |
 | `GET`  | `/sessions/{id}/workspace/patch` | → `{ format: "unified_diff", patch }` |
 | `GET`  | `/providers/{provider}/models` | → `ProviderModelsResponse` |
+| `POST` | `/oauth/codex/start` | `{ label? }` → `CodexOAuthStartResponse` |
+| `GET`  | `/oauth/codex/flows` | → `CodexOAuthFlowListResponse` |
+| `GET`  | `/oauth/codex/flows/{flow_id}` | → `CodexOAuthFlowResponse` |
+| `POST` | `/oauth/codex/flows/{flow_id}/cancel` | → `CodexOAuthFlowResponse` |
+| `GET`  | `/oauth/accounts` | → `CodexOAuthAccountListResponse` |
+| `DELETE` | `/oauth/accounts/{provider_key}` | → `{ status, provider }` |
 | `GET`  | `/healthz` | → `{ status, sessions, version }` |
 
 `CreateSessionRequest` (all optional unless noted):
 `repo_path`, `approval_policy` (`auto` \| `interactive` \| `yolo`, default `auto`),
 `provider`, `model`, `base_url`, `max_steps`, `run_target`,
 `default_run_target`, `workspace_source`.
+
+`provider` accepts the `ProviderName` literals plus `codex:<label>` for a named
+codex account (label must match `^[a-z0-9][a-z0-9-]{0,30}$`). Creating a session
+with an unconnected `codex:<label>` fails with `400` and points at
+`POST /oauth/codex/start`.
 
 `repo_path` is a shortcut for a local `default_run_target`. New clients must not
 send `execution_binding`; the server rejects it. Stored legacy session payloads
@@ -83,6 +94,43 @@ context.
   global, not per-session) → `SemanticMemoryRebuildResponse` (`scope`,
   `topic_count`, `reviewed_memory_count`, `indexed_count`, `skipped_count`,
   `deleted_count`, `indexed_ids[]`, `deleted_ids[]`).
+
+## Codex OAuth login & multi-account
+
+The server can run codex device-code logins headlessly and keep multiple
+ChatGPT accounts connected side by side. Storage keys: `codex` (default
+account, written by the CLI login) and `codex:<label>` (named accounts).
+
+- `POST /oauth/codex/start` — body `{ label? }`; requests a device code and
+  starts a background poll → `CodexOAuthStartResponse`
+  (`flow_id`, `verification_url`, `user_code`, `expires_in`). `502` when the
+  device-code request to OpenAI fails (no flow is created). `label` must match
+  `^[a-z0-9][a-z0-9-]{0,30}$`; when omitted, the label is derived from the
+  id_token after login (email first, then a short `chatgpt_account_id` code,
+  with `-2`/`-3`... appended on conflicts). Logging in again with the same
+  explicit label overwrites that account's record.
+- `GET /oauth/codex/flows` — all in-flight and recently finished flows.
+  Flows are in-memory only: a server restart clears them; finished flows stay
+  queryable for the flow TTL (10 minutes).
+- `GET /oauth/codex/flows/{flow_id}` — `CodexOAuthFlowResponse`:
+  `state` is `pending` \| `authorized` \| `error` \| `expired` \| `cancelled`;
+  `verification_url`/`user_code` are always present, `account_label` is set
+  once `authorized`, `error` carries the failure message on `error`.
+  Poll timeout / no user authorization → `expired` (client may retry);
+  token-exchange failure → `error`. `404` for unknown flow ids.
+- `POST /oauth/codex/flows/{flow_id}/cancel` — aborts polling and marks the
+  flow `cancelled`; `404` for unknown flow ids.
+- `GET /oauth/accounts` — connected codex accounts:
+  `{ accounts: [{ provider, label, email?, plan?, connected_at }] }` where
+  `provider` is `codex` or `codex:<label>` and the default account's `label`
+  is `"default"`.
+- `DELETE /oauth/accounts/{provider_key}` — deletes the local record only
+  (**no remote revoke**; use the CLI `oauth logout codex --revoke` or the
+  OpenAI account settings page for a full cleanup). `404` when the key is not
+  connected, `400` for non-codex keys.
+
+Clients pick an account at session creation by sending
+`provider: "codex:<label>"`; `provider: "codex"` uses the default account.
 
 ## Provider model listing
 

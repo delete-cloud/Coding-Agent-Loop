@@ -9,7 +9,7 @@ from pathlib import Path
 import click
 
 from coding_agent.oauth.codex import CodexOAuthClient, redact_record
-from coding_agent.oauth.store import DEFAULT_AUTH_PATH, OAuthStore
+from coding_agent.oauth.store import OAuthStore, default_auth_path
 
 
 @click.group(name="oauth")
@@ -148,7 +148,7 @@ def logout(provider: str, auth_file: Path | None, revoke: bool) -> None:
 )
 def doctor(auth_file: Path | None) -> None:
     """Inspect OAuth store health without printing tokens."""
-    path = (auth_file or DEFAULT_AUTH_PATH).expanduser()
+    path = (auth_file or default_auth_path()).expanduser()
     store = OAuthStore(path)
     auth = store.load()
     click.echo(f"Auth file: {path}")

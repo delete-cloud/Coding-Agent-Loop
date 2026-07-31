@@ -87,6 +87,70 @@ class TestLLMProviderPlugin:
         assert result.model_name == "codex-mini"
         assert result._base_url == "https://chatgpt.com/backend-api/codex"
 
+    def test_codex_label_provider_requires_connected_account(
+        self, monkeypatch, tmp_path
+    ):
+        import coding_agent.oauth.store as store_module
+
+        monkeypatch.setattr(store_module, "DEFAULT_AUTH_PATH", tmp_path / "auth.json")
+        plugin = LLMProviderPlugin(provider="codex:work", model="gpt-5.5", api_key="")
+
+        with pytest.raises(
+            RuntimeError, match="codex account not connected: codex:work"
+        ):
+            plugin.provide_llm()
+
+    def test_codex_label_provider_routes_to_labelled_record(
+        self, monkeypatch, tmp_path
+    ):
+        import coding_agent.oauth.store as store_module
+        from coding_agent.oauth.types import OAuthAccount
+
+        auth_path = tmp_path / "auth.json"
+        monkeypatch.setattr(store_module, "DEFAULT_AUTH_PATH", auth_path)
+        OAuthStore(auth_path).set_provider(
+            "codex:work",
+            OAuthProviderRecord(
+                issuer="https://auth.openai.com",
+                client_id="codex-client",
+                token_endpoint="https://auth.openai.com/oauth/token",
+                base_url="https://chatgpt.com/backend-api/codex",
+                tokens=OAuthTokens(access_token="work-access-token"),
+                account=OAuthAccount(chatgpt_account_id="account-work"),
+            ),
+        )
+        plugin = LLMProviderPlugin(provider="codex:work", model="gpt-5.5", api_key="")
+
+        result = plugin.provide_llm()
+
+        assert isinstance(result, CodexResponsesProvider)
+        assert result.model_name == "gpt-5.5"
+
+    def test_codex_label_token_source_uses_labelled_key(self, tmp_path):
+        import asyncio
+
+        from coding_agent.oauth.types import OAuthAccount
+        from coding_agent.plugins.llm_provider import StoreBackedCodexTokenSource
+
+        auth_path = tmp_path / "auth.json"
+        store = OAuthStore(auth_path)
+        store.set_provider(
+            "codex:work",
+            OAuthProviderRecord(
+                issuer="https://auth.openai.com",
+                client_id="codex-client",
+                token_endpoint="https://auth.openai.com/oauth/token",
+                tokens=OAuthTokens(access_token="work-access-token"),
+                account=OAuthAccount(chatgpt_account_id="account-work"),
+            ),
+        )
+        source = StoreBackedCodexTokenSource(store, "codex:work")
+
+        snapshot = asyncio.run(source.get_token())
+
+        assert snapshot.provider_name == "codex:work"
+        assert snapshot.access_token == "work-access-token"
+
 
 class TestKimiProvider:
     def test_kimi_creates_openai_compat_instance(self):
