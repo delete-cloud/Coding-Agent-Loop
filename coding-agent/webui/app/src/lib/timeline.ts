@@ -24,6 +24,8 @@ export type TimelineItem =
       args: Record<string, unknown>;
       result?: string;
       isError?: boolean;
+      startedAt?: string;
+      finishedAt?: string;
     }
   | {
       id: string;
@@ -32,6 +34,8 @@ export type TimelineItem =
       requestId: string;
       toolName: string;
       args: Record<string, unknown>;
+      timeoutSeconds?: number;
+      promptedAt?: string;
       resolved?: "approved" | "denied";
     }
   | { id: string; kind: "turnEnd"; status: string }
@@ -112,6 +116,7 @@ export function applyEvent(
           callId: d.call_id ?? envelope.source_event_id,
           toolName: d.tool_name ?? "",
           args: d.arguments ?? {},
+          startedAt: envelope.created_at,
         },
       ];
     }
@@ -120,7 +125,7 @@ export function applyEvent(
       const d = envelope.payload;
       return items.map((it) =>
         it.kind === "tool" && it.callId === d.call_id
-          ? { ...it, result: resultText(d), isError: d.is_error }
+          ? { ...it, result: resultText(d), isError: d.is_error, finishedAt: envelope.created_at }
           : it,
       );
     }
@@ -136,6 +141,8 @@ export function applyEvent(
           requestId: d.request_id ?? envelope.source_event_id,
           toolName: d.tool_call?.tool_name ?? "",
           args: d.tool_call?.arguments ?? {},
+          timeoutSeconds: d.timeout_seconds,
+          promptedAt: envelope.created_at,
         },
       ];
     }
@@ -183,4 +190,65 @@ export function isRootTurnEnd(ev: DisplayStreamEvent): boolean {
     ev.event === "final_result" &&
     !envelope.payload.agent_id
   );
+}
+
+const SUMMARY_KEYS = [
+  "path",
+  "file_path",
+  "filePath",
+  "filename",
+  "cmd",
+  "command",
+  "pattern",
+  "query",
+  "url",
+  "goal",
+  "prompt",
+];
+
+// One-line argument summary for tool cards: prefer well-known path/command
+// keys, fall back to the first scalar argument, truncated to one line.
+export function toolArgSummary(
+  _toolName: string,
+  args: Record<string, unknown>,
+): string {
+  let raw: string | null = null;
+  for (const key of SUMMARY_KEYS) {
+    const v = args[key];
+    if (typeof v === "string" && v.trim()) {
+      raw = v;
+      break;
+    }
+  }
+  if (raw === null) {
+    for (const v of Object.values(args)) {
+      if (typeof v === "string" && v.trim()) {
+        raw = v;
+        break;
+      }
+      if (typeof v === "number" || typeof v === "boolean") {
+        raw = String(v);
+        break;
+      }
+    }
+  }
+  if (raw === null) return "";
+  const oneLine = raw.replace(/\s+/g, " ").trim();
+  return oneLine.length > 80 ? `${oneLine.slice(0, 79)}…` : oneLine;
+}
+
+// Duration between tool_call and tool_result timestamps, e.g. "1.2s".
+// Returns null when either timestamp is missing or unparseable.
+export function toolDuration(item: {
+  startedAt?: string;
+  finishedAt?: string;
+}): string | null {
+  if (!item.startedAt || !item.finishedAt) return null;
+  const ms = new Date(item.finishedAt).getTime() - new Date(item.startedAt).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  const m = Math.floor(ms / 60_000);
+  const s = Math.round((ms % 60_000) / 1000);
+  return `${m}m${s}s`;
 }

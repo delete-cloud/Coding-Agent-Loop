@@ -2,15 +2,35 @@ import { parseSSE } from "./sse";
 import type {
   ApprovalPolicy,
   ApprovalScope,
+  CheckpointMetadata,
   DisplayStreamEvent,
   MemoryReviewRecord,
+  MemoryReviewTransitionStatus,
   ProviderModels,
   RuntimeRun,
   SessionSummary,
   SessionResult,
+  ThinkingConfig,
   WorkspaceDiff,
   WorkspacePatch,
 } from "./types";
+
+// PATCH /sessions/{id}/runtime-config — omitted fields stay unchanged.
+// Mirrors RuntimeConfigUpdateRequest in src/coding_agent/server/schemas.py.
+export interface RuntimeConfigPatch {
+  model?: string;
+  provider?: string;
+  baseUrl?: string;
+  approval?: ApprovalPolicy;
+  thinking?: ThinkingConfig;
+}
+
+export interface RuntimeConfigUpdateResponse {
+  session_id: string;
+  provider_name: string | null;
+  model_name: string | null;
+  base_url: string | null;
+}
 
 export interface ClientConfig {
   baseUrl: string;
@@ -62,17 +82,23 @@ export class AgentClient {
 
   async updateRuntimeConfig(
     sessionId: string,
-    opts: { approval?: ApprovalPolicy },
-  ): Promise<void> {
+    opts: RuntimeConfigPatch,
+  ): Promise<RuntimeConfigUpdateResponse> {
     const body: Record<string, unknown> = {};
+    if (opts.model !== undefined) body.model = opts.model;
+    if (opts.provider !== undefined) body.provider = opts.provider;
+    if (opts.baseUrl !== undefined) body.base_url = opts.baseUrl;
     if (opts.approval !== undefined) body.approval = opts.approval;
-    await this.check(
+    if (opts.thinking !== undefined) body.thinking = opts.thinking;
+    return (
+      await this.check(
       await fetch(this.url(`/sessions/${sessionId}/runtime-config`), {
-        method: "POST",
+        method: "PATCH",
         headers: this.headers(true),
         body: JSON.stringify(body),
       }),
-    );
+      )
+    ).json();
   }
 
   async listSessions(): Promise<SessionSummary[]> {
@@ -218,6 +244,63 @@ export class AgentClient {
       )
     ).json();
     return Array.isArray(data) ? (data as MemoryReviewRecord[]) : [];
+  }
+
+  // POST /sessions/{id}/memory/reviews/{candidate_id} — accept/reject/archive.
+  // reason must be null or non-empty (schema: min_length 1).
+  async transitionMemoryReview(
+    sessionId: string,
+    candidateId: string,
+    status: MemoryReviewTransitionStatus,
+    reason?: string,
+  ): Promise<void> {
+    const trimmed = reason?.trim();
+    await this.check(
+      await fetch(
+        this.url(`/sessions/${sessionId}/memory/reviews/${encodeURIComponent(candidateId)}`),
+        {
+          method: "POST",
+          headers: this.headers(true),
+          body: JSON.stringify({ status, reason: trimmed ? trimmed : null }),
+        },
+      ),
+    );
+  }
+
+  async listCheckpoints(sessionId: string): Promise<CheckpointMetadata[]> {
+    const data = await (
+      await this.check(
+        await fetch(this.url(`/sessions/${sessionId}/checkpoints`), {
+          headers: this.headers(),
+        }),
+      )
+    ).json() as { checkpoints: CheckpointMetadata[] };
+    return Array.isArray(data.checkpoints) ? data.checkpoints : [];
+  }
+
+  async captureCheckpoint(sessionId: string, label?: string): Promise<CheckpointMetadata> {
+    const trimmed = label?.trim();
+    return (
+      await this.check(
+        await fetch(this.url(`/sessions/${sessionId}/checkpoints`), {
+          method: "POST",
+          headers: this.headers(true),
+          body: JSON.stringify(trimmed ? { label: trimmed } : {}),
+        }),
+      )
+    ).json();
+  }
+
+  // Restore rewinds session history/runtime config; workspace files are unchanged.
+  async restoreCheckpoint(sessionId: string, checkpointId: string): Promise<void> {
+    await this.check(
+      await fetch(
+        this.url(
+          `/sessions/${sessionId}/checkpoints/${encodeURIComponent(checkpointId)}/restore`,
+        ),
+        { method: "POST", headers: this.headers() },
+      ),
+    );
   }
 
   // GET /providers/{provider}/models. Unknown providers return 422 (throws);

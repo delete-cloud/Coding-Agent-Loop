@@ -8,7 +8,7 @@ interface Props {
 
 export default function DiffPanel({ diff, patch, onClose }: Props) {
   return (
-    <section className="border-t border-border bg-surface-1">
+    <section className="flex h-full min-h-0 flex-col bg-surface-1">
       <div className="flex items-center justify-between border-b border-border px-4 py-2">
         <div className="text-sm font-semibold text-fg">
           Workspace diff · +{diff.additions} -{diff.deletions}
@@ -20,8 +20,8 @@ export default function DiffPanel({ diff, patch, onClose }: Props) {
           Close
         </button>
       </div>
-      <div className="grid max-h-80 overflow-hidden md:grid-cols-[18rem_minmax(0,1fr)]">
-        <div className="overflow-auto border-b border-border md:border-r md:border-b-0">
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div className="max-h-[40%] overflow-auto border-b border-border">
           {diff.files.length === 0 ? (
             <div className="px-4 py-3 text-sm text-muted">No changes</div>
           ) : (
@@ -31,7 +31,7 @@ export default function DiffPanel({ diff, patch, onClose }: Props) {
                 className="grid grid-cols-[4.5rem_1fr] gap-2 border-b border-border px-4 py-2 text-xs"
               >
                 <span className={statusColor(file.status)}>{file.status}</span>
-                <span className="truncate text-fg" title={file.path}>
+                <span className="truncate font-mono text-fg" title={file.path}>
                   {file.path}
                 </span>
                 <span className="text-muted">
@@ -44,7 +44,7 @@ export default function DiffPanel({ diff, patch, onClose }: Props) {
             ))
           )}
         </div>
-        <pre className="overflow-auto bg-surface-0 px-4 py-3 text-xs leading-relaxed">
+        <pre className="min-h-0 flex-1 overflow-auto bg-surface-0 px-4 py-3 text-xs leading-relaxed">
           {patch?.patch
             ? patch.patch.split("\n").map((line, index) => (
                 <div key={`${index}:${line}`} className={lineColor(line)}>

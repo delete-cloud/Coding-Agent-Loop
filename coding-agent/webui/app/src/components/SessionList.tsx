@@ -5,9 +5,11 @@ interface Props {
   activeSessionId: string | null;
   loading: boolean;
   error: string | null;
+  open: boolean;
   onRefresh: () => void;
   onSelect: (sessionId: string) => void;
   onDelete: (sessionId: string) => void;
+  onNewSession: () => void;
 }
 
 export default function SessionList({
@@ -15,23 +17,38 @@ export default function SessionList({
   activeSessionId,
   loading,
   error,
+  open,
   onRefresh,
   onSelect,
   onDelete,
+  onNewSession,
 }: Props) {
   return (
-    <aside className="flex w-full flex-col border-r border-border bg-surface-1 md:w-72">
+    <aside
+      className={`fixed inset-y-0 left-0 z-40 w-[260px] shrink-0 flex-col border-r border-border bg-surface-1 md:static md:z-auto ${
+        open ? "flex" : "hidden"
+      }`}
+      aria-label="Sessions"
+    >
       <div className="flex items-center justify-between border-b border-border px-3 py-2.5">
         <div className="text-xs font-semibold tracking-wide text-muted uppercase">
           Sessions
         </div>
-        <button
-          className="rounded-md border border-border px-2 py-1 text-xs text-fg transition-colors hover:border-border-active disabled:opacity-40"
-          disabled={loading}
-          onClick={onRefresh}
-        >
-          Refresh
-        </button>
+        <div className="flex items-center gap-1.5">
+          <button
+            className="rounded-md border border-border px-2 py-1 text-xs text-fg transition-colors hover:border-border-active"
+            onClick={onNewSession}
+          >
+            + New
+          </button>
+          <button
+            className="rounded-md border border-border px-2 py-1 text-xs text-fg transition-colors hover:border-border-active disabled:opacity-40"
+            disabled={loading}
+            onClick={onRefresh}
+          >
+            Refresh
+          </button>
+        </div>
       </div>
       {error && (
         <div className="border-b border-err/30 bg-err/5 px-3 py-2 text-xs text-err">
@@ -75,21 +92,29 @@ function SessionRow({
       }`}
     >
       <button
-        className="block min-w-0 flex-1 px-3 py-3 text-left"
+        className="block min-w-0 flex-1 px-3 py-2.5 text-left"
         onClick={() => onSelect(session.session_id)}
       >
         <div className="flex items-center gap-2">
           <StatusDot status={session.status} pending={session.pending_approval} />
-          <span className="truncate text-sm font-medium text-fg">
+          <span className="truncate font-mono text-sm font-medium text-fg">
             {shortId(session.session_id)}
           </span>
+          {session.checkpoint_count > 0 && (
+            <span
+              className="shrink-0 rounded border border-border px-1 py-0.5 text-[10px] leading-none text-muted"
+              title={`${session.checkpoint_count} checkpoint${session.checkpoint_count === 1 ? "" : "s"}`}
+            >
+              ⎘ {session.checkpoint_count}
+            </span>
+          )}
           {session.turn_in_progress && (
-            <span className="rounded bg-warn/10 px-1.5 py-0.5 text-[10px] font-medium text-warn">
+            <span className="shrink-0 rounded bg-accent/10 px-1.5 py-0.5 text-[10px] font-medium text-accent">
               running
             </span>
           )}
         </div>
-        <div className="mt-1 truncate text-xs text-muted">
+        <div className="mt-1 truncate font-mono text-xs text-muted">
           {formatModel(session)}
         </div>
         <div className="mt-1 text-[11px] text-muted">
@@ -113,6 +138,15 @@ function formatModel(session: SessionSummary) {
   return parts.length ? parts.join(" / ") : "model ?";
 }
 
+type StatusSemantic = "running" | "pending" | "failed" | "idle";
+
+function statusSemantic(status: SessionSummary["status"], pending: boolean): StatusSemantic {
+  if (pending) return "pending";
+  if (status === "failed") return "failed";
+  if (status === "running" || status === "waiting_approval") return "running";
+  return "idle";
+}
+
 function StatusDot({
   status,
   pending,
@@ -120,16 +154,21 @@ function StatusDot({
   status: SessionSummary["status"];
   pending: boolean;
 }) {
-  const color = pending
-    ? "bg-warn"
-    : status === "failed"
-      ? "bg-err"
-      : status === "running"
-        ? "bg-accent"
-        : status === "completed"
-          ? "bg-ok"
+  const semantic = statusSemantic(status, pending);
+  const color =
+    semantic === "pending"
+      ? "bg-warn"
+      : semantic === "failed"
+        ? "bg-err"
+        : semantic === "running"
+          ? "bg-accent animate-pulse"
           : "bg-muted";
-  return <span className={`h-2 w-2 shrink-0 rounded-full ${color}`} />;
+  return (
+    <span
+      className={`h-2 w-2 shrink-0 rounded-full ${color}`}
+      title={`status: ${semantic}`}
+    />
+  );
 }
 
 function shortId(id: string) {
