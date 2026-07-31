@@ -141,8 +141,7 @@ class JSONLRuntimeStore:
             _require_datetime("ended_at", ended_at)
         _require_json_object("metadata", metadata)
         _require_json_object("result", result)
-        if error is not None:
-            _require_non_empty("error", error)
+        error = _normalize_optional_error(error)
         existing = await self.load_agent_run(run_id)
         if existing is None:
             raise KeyError(f"agent run not found: {run_id}")
@@ -556,8 +555,7 @@ class SQLiteRuntimeStore:
             _require_datetime("ended_at", ended_at)
         _require_json_object("metadata", metadata)
         _require_json_object("result", result)
-        if error is not None:
-            _require_non_empty("error", error)
+        error = _normalize_optional_error(error)
         with self._lock, self._connect() as connection:
             existing_row = connection.execute(
                 "SELECT * FROM agent_runs WHERE run_id = ?",
@@ -1184,8 +1182,7 @@ class PGRuntimeStore:
             _require_datetime("ended_at", ended_at)
         _require_json_object("metadata", metadata)
         _require_json_object("result", result)
-        if error is not None:
-            _require_non_empty("error", error)
+        error = _normalize_optional_error(error)
         pool = await self._ensure_schema()
         row = await pool.fetchrow(
             self._UPDATE_RUN_SQL,
@@ -2056,6 +2053,18 @@ def _required_payload_message_list(payload: JSONObject, key: str) -> list[JSONOb
 def _require_non_empty(field_name: str, value: str) -> None:
     if not value:
         raise ValueError(f"{field_name} must be non-empty")
+
+
+def _normalize_optional_error(error: str | None) -> str | None:
+    """Treat empty/whitespace-only error text as absent (None).
+
+    Defense-in-depth: a blank error string is semantically "no error" and must
+    never be persisted, otherwise the non-empty invariant on AgentRunRecord
+    turns a write/read into a ValueError that masks the real failure.
+    """
+    if error is None or not error.strip():
+        return None
+    return error
 
 
 def _require_datetime(field_name: str, value: datetime) -> None:

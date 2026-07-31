@@ -28,3 +28,22 @@ class TurnOutcome:
     final_message: str | None = None
     steps_taken: int = 0
     error: str | None = None
+
+
+def exception_error_message(exc: BaseException) -> str:
+    """Return a non-empty, user-informative message for an exception.
+
+    Some exceptions (e.g. bare ``RuntimeError()`` or framework wrappers) have
+    an empty ``str()``. Persisting that empty string as a run/turn error trips
+    the runtime store's non-empty validation and masks the real failure, so
+    fall back to the exception type name (plus the wrapped cause, when the
+    exception chains one) when the message is blank.
+    """
+
+    message = str(exc)
+    if message.strip():
+        return message
+    cause = exc.__cause__
+    if cause is not None:
+        return f"{type(exc).__name__}: {exception_error_message(cause)}"
+    return type(exc).__name__

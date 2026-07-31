@@ -641,3 +641,31 @@ patterns:
   - direct
   - push
   - verification
+- id: PM-0026
+  title: Never persist blank exception messages as run errors
+  path: patterns/PM-0026-never-persist-blank-exception-messages-as-run-errors.md
+  severity: high
+  confidence: high
+  subsystems:
+  - runtime
+  - adapter
+  related_files:
+  - src/coding_agent/adapter/types.py
+  - src/coding_agent/adapter/pipeline.py
+  - src/coding_agent/runs/lifecycle.py
+  - src/coding_agent/tools/subagent.py
+  - src/coding_agent/stores/runtime_store.py
+  - tests/coding_agent/test_adapter_types.py
+  - tests/coding_agent/test_pipeline_adapter.py
+  - tests/coding_agent/test_run_lifecycle.py
+  - tests/coding_agent/test_sqlite_runtime_store.py
+  - tests/coding_agent/test_jsonl_runtime_store.py
+  related_commits: []
+  keywords:
+  - empty
+  - error
+  - masking
+  - exception
+  - message
+  - run
+  - persistence
