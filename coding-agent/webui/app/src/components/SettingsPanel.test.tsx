@@ -2,21 +2,31 @@
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { RuntimeConfigPatch } from "../lib/api";
+import { AgentClient, type RuntimeConfigPatch } from "../lib/api";
 import SettingsPanel from "./SettingsPanel";
 
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
+const client = new AgentClient({ baseUrl: "http://test" });
+
 function renderPanel(onUpdate: (patch: RuntimeConfigPatch) => Promise<void>) {
+  // The CodexAccountsCard fires OAuth requests on mount; answer 404 so it
+  // degrades to its "not supported" note and stays out of these tests' way.
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(() => Promise.resolve(new Response("not found", { status: 404 }))),
+  );
   return render(
     <SettingsPanel
       sessionId="s1"
       providerName="kimi"
       modelName="kimi-for-coding"
       onUpdate={onUpdate}
+      client={client}
     />,
   );
 }

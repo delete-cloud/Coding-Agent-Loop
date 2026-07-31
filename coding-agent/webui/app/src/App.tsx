@@ -717,6 +717,7 @@ export default function App() {
               providerName={activeSession?.provider_name ?? null}
               modelName={activeSession?.model_name ?? null}
               onUpdate={(patch) => updateSessionRuntime(sessionId, patch)}
+              client={client}
             />
           ) : (
             <RailPlaceholder text="No active session" />

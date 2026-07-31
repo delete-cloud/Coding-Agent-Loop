@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import type { RuntimeConfigPatch } from "../lib/api";
+import type { AgentClient, RuntimeConfigPatch } from "../lib/api";
 import type { ApprovalPolicy, ThinkingEffort } from "../lib/types";
+import CodexAccountsCard from "./CodexAccountsCard";
 import { PROVIDERS } from "./Header";
 
 interface Props {
@@ -8,6 +9,7 @@ interface Props {
   providerName: string | null;
   modelName: string | null;
   onUpdate: (patch: RuntimeConfigPatch) => Promise<void>;
+  client: AgentClient;
 }
 
 type Feedback = { kind: "saved" | "error"; text: string } | null;
@@ -22,6 +24,7 @@ export default function SettingsPanel({
   providerName,
   modelName,
   onUpdate,
+  client,
 }: Props) {
   const [provider, setProvider] = useState(providerName ?? "");
   const [model, setModel] = useState(modelName ?? "");
@@ -190,6 +193,7 @@ export default function SettingsPanel({
           The current policy is not exposed by the server. Selecting a policy
           applies it immediately and also saves it as the default for new sessions.
         </p>
+        <CodexAccountsCard client={client} />
       </div>
     </section>
   );
