@@ -37,7 +37,7 @@ o6n 部署的 coding agent 支持 provider=codex(ChatGPT OAuth),但:
 | GET | `/oauth/codex/flows/{flow_id}` | `{state: pending|authorized|error|expired|cancelled, verification_url?, user_code?, account_label?, error?}` |
 | POST | `/oauth/codex/flows/{flow_id}/cancel` | 中止轮询,标记 cancelled |
 | GET | `/oauth/accounts` | 已连接账号列表:`[{provider: "codex"|"codex:<label>", label, email?, plan?, connected_at}]`(读 OAuthStore,解析 id_token claims) |
-| DELETE | `/oauth/accounts/{provider_key}` | 删除该 key 的本地记录(不远端 revoke) |
+| DELETE | `/oauth/accounts/{provider_key}` | 删除该 key 的本地记录(**不做远端 revoke**:token 随记录删除,换账号/重登录无影响;需在 OpenAI 账号侧彻底清理时用 CLI `oauth logout codex --revoke` 或账号设置页) |
 
 ### Flow 管理器(新模块 `server/oauth_flows.py`)
 
