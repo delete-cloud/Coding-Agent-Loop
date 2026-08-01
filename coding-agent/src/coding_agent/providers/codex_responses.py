@@ -34,7 +34,6 @@ class CodexResponsesProvider:
     CONTEXT_SIZES: dict[str, int] = {
         "gpt-5.5": 400000,
         "gpt-5.4": 400000,
-        "gpt-5.2": 400000,
     }
 
     def __init__(
@@ -235,6 +234,12 @@ class CodexResponsesProvider:
                 "Codex Responses requests require a system instruction message"
             )
 
+        extra = dict(extra)
+        # The pipeline passes our internal thinking_config through; the Codex
+        # backend rejects it verbatim ("Unsupported parameter"), so translate
+        # it to the Responses API reasoning shape instead.
+        thinking = extra.pop("thinking_config", None)
+
         body: dict[str, Any] = {
             "model": self._model,
             "instructions": instructions,
@@ -248,6 +253,8 @@ class CodexResponsesProvider:
         if converted_tools:
             body["tools"] = converted_tools
         body.update(extra)
+        if isinstance(thinking, dict) and thinking.get("enabled"):
+            body["reasoning"] = {"effort": thinking.get("effort", "medium")}
         return body
 
     async def close(self) -> None:

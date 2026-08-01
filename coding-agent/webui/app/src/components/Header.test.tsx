@@ -108,7 +108,7 @@ describe("Header provider dropdown", () => {
     const values = Array.from(
       container.querySelectorAll<HTMLOptionElement>("#model-options option"),
     ).map((o) => o.value);
-    expect(values).toEqual(["gpt-5.5", "gpt-5.4", "gpt-5.2"]);
+    expect(values).toEqual(["gpt-5.5", "gpt-5.4"]);
     // The Responses API has no models endpoint — no live-list fetch may fire.
     await new Promise((r) => setTimeout(r, 300));
     expect(
