@@ -28,7 +28,7 @@ export const PROVIDERS = [
 const MODEL_PRESETS = ["kimi-for-coding", "k3", "deepseek-chat"] as const;
 // Codex uses the Responses API, which has no models endpoint — the model
 // input stays manual with these presets as datalist suggestions.
-const CODEX_MODEL_PRESETS = ["gpt-5.5", "gpt-5.4", "gpt-5.2"] as const;
+const CODEX_MODEL_PRESETS = ["gpt-5.5", "gpt-5.4"] as const;
 
 const isCodexProvider = (p: string) => p === "codex" || p.startsWith("codex:");
 

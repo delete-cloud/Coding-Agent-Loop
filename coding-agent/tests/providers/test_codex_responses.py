@@ -127,6 +127,64 @@ async def test_stream_posts_to_codex_responses_with_chatgpt_headers(
 
 
 @pytest.mark.asyncio
+async def test_stream_translates_thinking_config_to_reasoning_effort() -> None:
+    """thinking_config must not reach the backend verbatim (400
+    'Unsupported parameter'); it maps to Responses reasoning.effort."""
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        body = sse_event(
+            "response.completed",
+            {"type": "response.completed", "response": {"id": "r"}},
+        )
+        return httpx.Response(200, text=body, request=request)
+
+    provider = provider_with_handler(handler)
+
+    async for _ in provider.stream(
+        [
+            {"role": "system", "content": "You are concise."},
+            {"role": "user", "content": "Hi"},
+        ],
+        thinking_config={"enabled": True, "effort": "high"},
+    ):
+        pass
+
+    body = captured["body"]
+    assert "thinking_config" not in body
+    assert body["reasoning"] == {"effort": "high"}
+
+
+@pytest.mark.asyncio
+async def test_stream_omits_reasoning_when_thinking_disabled() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        body = sse_event(
+            "response.completed",
+            {"type": "response.completed", "response": {"id": "r"}},
+        )
+        return httpx.Response(200, text=body, request=request)
+
+    provider = provider_with_handler(handler)
+
+    async for _ in provider.stream(
+        [
+            {"role": "system", "content": "You are concise."},
+            {"role": "user", "content": "Hi"},
+        ],
+        thinking_config={"enabled": False, "effort": "low"},
+    ):
+        pass
+
+    body = captured["body"]
+    assert "thinking_config" not in body
+    assert "reasoning" not in body
+
+
+@pytest.mark.asyncio
 async def test_stream_converts_function_call_output_item_done() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         body = sse_event(
