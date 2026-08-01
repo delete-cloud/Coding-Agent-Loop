@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AgentClient, type RuntimeConfigPatch } from "./lib/api";
+import {
+  activeProfile,
+  defaultBaseUrl,
+  loadProfiles,
+  saveProfiles,
+  type ProfileStore,
+} from "./lib/profiles";
 import type {
   ApprovalPolicy,
   ApprovalScope,
@@ -47,14 +54,6 @@ type Config = {
   model: string;
 };
 
-function defaultBaseUrl(): string {
-  const configured = import.meta.env.VITE_API_BASE_URL;
-  if (typeof configured === "string" && configured.trim()) {
-    return configured.trim();
-  }
-  return window.location.origin;
-}
-
 function loadConfig(): Config {
   const defaults: Config = {
     baseUrl: defaultBaseUrl(),
@@ -64,13 +63,21 @@ function loadConfig(): Config {
     provider: "kimi-code",
     model: "kimi-for-coding",
   };
+  let merged = defaults;
   try {
     const raw = localStorage.getItem(LS_KEY);
-    if (raw) return { ...defaults, ...(JSON.parse(raw) as Partial<Config>) };
+    if (raw) merged = { ...defaults, ...(JSON.parse(raw) as Partial<Config>) };
   } catch {
     /* ignore */
   }
-  return defaults;
+  // The active connection profile owns baseUrl/apiKey; the legacy config's
+  // copies are only migration input for the profiles store.
+  const active = activeProfile(loadProfiles());
+  if (active) {
+    merged.baseUrl = active.baseUrl;
+    merged.apiKey = active.apiKey;
+  }
+  return merged;
 }
 
 function loadTheme(): Theme {
@@ -98,6 +105,7 @@ function initialSidebarOpen(): boolean {
 
 export default function App() {
   const [config, setConfig] = useState<Config>(loadConfig);
+  const [profiles, setProfiles] = useState<ProfileStore>(loadProfiles);
   const [theme, setTheme] = useState<Theme>(loadTheme);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessionMode, setSessionMode] = useState<"prompt" | "resume">("prompt");
@@ -125,6 +133,7 @@ export default function App() {
   const abortRef = useRef<AbortController | null>(null);
   const followAbortRef = useRef<AbortController | null>(null);
   const loadSeqRef = useRef(0);
+  const sessionsSeqRef = useRef(0);
   const memorySeqRef = useRef(0);
   const resultSeqRef = useRef(0);
   const diffSeqRef = useRef(0);
@@ -199,20 +208,62 @@ export default function App() {
     setSessionLoading(value);
   }, []);
 
+  // Persist profile changes and, when the active connection (baseUrl/apiKey)
+  // actually changed, switch backend: drop all session state tied to the old
+  // server and push the new connection through the normal config path (which
+  // recreates the client and re-fetches the session list).
+  const handleProfilesChange = useCallback(
+    (next: ProfileStore) => {
+      saveProfiles(next);
+      setProfiles(next);
+      const active = activeProfile(next);
+      if (!active) return;
+      if (active.baseUrl === config.baseUrl && active.apiKey === config.apiKey) return;
+      loadSeqRef.current += 1;
+      // Invalidate any in-flight session list fetch from the old backend so its
+      // late response cannot overwrite the new backend's list.
+      sessionsSeqRef.current += 1;
+      abortRef.current?.abort();
+      abortRef.current = null;
+      followAbortRef.current?.abort();
+      followAbortRef.current = null;
+      activeSessionRef.current = null;
+      setSessionId(null);
+      setSessionMode("prompt");
+      setItems([]);
+      setSessions([]);
+      setDiffState(null);
+      setMemoryState(null);
+      setResultState(null);
+      setRailPanel(null);
+      setStreaming(false);
+      setSessionLoadingState(false);
+      setStatus("no session");
+      patchConfig({ baseUrl: active.baseUrl, apiKey: active.apiKey });
+    },
+    [config.baseUrl, config.apiKey, patchConfig, setSessionLoadingState],
+  );
+
   const refreshSessions = useCallback(async () => {
+    // Refreshes can resolve out of order (e.g. a slow old backend vs. a fresh
+    // fetch after a profile switch); only the latest call may apply. Same
+    // seq-guard pattern as refreshMemory/refreshResult.
+    const sessionsSeq = ++sessionsSeqRef.current;
     setSessionsLoading(true);
     setSessionsError(null);
     try {
       const listed = await client.listSessions();
+      if (sessionsSeqRef.current !== sessionsSeq) return;
       listed.sort(
         (a, b) =>
           new Date(b.last_activity).getTime() - new Date(a.last_activity).getTime(),
       );
       setSessions(listed);
     } catch (e) {
+      if (sessionsSeqRef.current !== sessionsSeq) return;
       setSessionsError(`session list failed: ${msg(e)}`);
     } finally {
-      setSessionsLoading(false);
+      if (sessionsSeqRef.current === sessionsSeq) setSessionsLoading(false);
     }
   }, [client]);
 
@@ -261,10 +312,10 @@ export default function App() {
   }, [client]);
 
   useEffect(() => {
+    // refreshSessions is keyed on the client, so this also re-fetches after a
+    // profile switch or connection edit recreates the client.
     void refreshSessions();
-    // Config edits can pass through incomplete URLs; refresh explicitly after edits.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [refreshSessions]);
 
   const newSession = useCallback(async () => {
     const loadSeq = loadSeqRef.current + 1;
@@ -644,6 +695,8 @@ export default function App() {
         <Header
           config={config}
           onConfigChange={patchConfig}
+          profiles={profiles}
+          onProfilesChange={handleProfilesChange}
           onNewSession={newSession}
           onToggleSidebar={() => setSidebarOpen((v) => !v)}
           sessionId={sessionId}
