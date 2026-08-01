@@ -534,6 +534,70 @@ def test_helm_network_policy_renders_extra_rules() -> None:
     }
 
 
+def test_helm_cilium_host_egress_disabled_by_default() -> None:
+    docs = _render()
+
+    assert not _objects_of_kind(docs, "CiliumNetworkPolicy")
+
+
+def test_helm_cilium_host_egress_renders_host_entity_rule() -> None:
+    docs = _render("--set", "networkPolicy.ciliumHostEgress.enabled=true")
+    policy = _object_named(docs, "CiliumNetworkPolicy", "-host-egress")
+
+    assert policy["apiVersion"] == "cilium.io/v2"
+    spec = policy["spec"]
+    assert spec["endpointSelector"]["matchLabels"] == {
+        "app.kubernetes.io/name": "coding-agent",
+        "app.kubernetes.io/instance": "coding-agent",
+    }
+    assert spec["egress"] == [
+        {
+            "toEntities": ["host"],
+            "toPorts": [{"ports": [{"port": "7891", "protocol": "TCP"}]}],
+        }
+    ]
+
+
+def test_helm_cilium_host_egress_renders_custom_ports() -> None:
+    docs = _render(
+        "--set",
+        "networkPolicy.ciliumHostEgress.enabled=true",
+        "--set-json",
+        "networkPolicy.ciliumHostEgress.ports=[7891,8080]",
+    )
+    policy = _object_named(docs, "CiliumNetworkPolicy", "-host-egress")
+
+    assert policy["spec"]["egress"][0]["toPorts"][0]["ports"] == [
+        {"port": "7891", "protocol": "TCP"},
+        {"port": "8080", "protocol": "TCP"},
+    ]
+
+
+def test_helm_cilium_host_egress_requires_ports_when_enabled() -> None:
+    result = subprocess.run(
+        [
+            _helm(),
+            "template",
+            "coding-agent",
+            str(CHART),
+            "--set",
+            "networkPolicy.ciliumHostEgress.enabled=true",
+            "--set-json",
+            "networkPolicy.ciliumHostEgress.ports=[]",
+        ],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    assert result.returncode != 0
+    assert (
+        "networkPolicy.ciliumHostEgress.ports must not be empty "
+        "when networkPolicy.ciliumHostEgress.enabled=true"
+    ) in result.stderr
+
+
 def test_helm_httproute_is_disabled_by_default() -> None:
     docs = _render()
 

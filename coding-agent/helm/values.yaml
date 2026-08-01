@@ -84,6 +84,17 @@ networkPolicy:
         - 127.0.0.0/8
   extraIngress: []
   extraEgress: []
+  # Optional CiliumNetworkPolicy for egress to the cluster node itself. Cilium
+  # classifies traffic to any node-local IP (for example a host-level proxy
+  # such as sing-box on port 7891) as the special "host" entity, which standard
+  # NetworkPolicy ipBlock rules never match. Enable this on Cilium clusters when
+  # the agent must reach a service listening on the node. Rendered independently
+  # of networkPolicy.enabled.
+  ciliumHostEgress:
+    enabled: false
+    # Plain TCP port numbers; each entry renders as {port: <n>, protocol: TCP}.
+    ports:
+      - 7891
 
 httpRoute:
   enabled: false
