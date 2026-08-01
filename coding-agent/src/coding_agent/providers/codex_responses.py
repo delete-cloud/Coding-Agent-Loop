@@ -112,6 +112,48 @@ class CodexResponsesProvider:
                     yield event
                 return
 
+    async def list_models(self) -> list[str]:
+        """Return the visible codex model ids, cheapest-first (priority asc).
+
+        Hits ``GET {base_url}/models``; ``client_version`` is required by the
+        backend (400 without it) and the account id header gates the list
+        (200 with an empty list without it — ``_headers`` already sets it).
+        """
+        snapshot = await self._token_source.get_token()
+        refreshed_after_unauthorized = False
+        current_snapshot = snapshot
+
+        while True:
+            headers = self._headers(current_snapshot)
+            # The SSE Accept header from _headers is meaningless for this
+            # plain JSON GET.
+            headers.pop("Accept", None)
+            response = await self._http_client.get(
+                f"{self._base_url}/models",
+                params={"client_version": "0.0.0"},
+                headers=headers,
+            )
+            if response.status_code == 401 and not refreshed_after_unauthorized:
+                refreshed_after_unauthorized = True
+                current_snapshot = await self._token_source.refresh_token()
+                continue
+
+            if response.status_code >= 400:
+                raise RuntimeError(
+                    f"Codex model listing failed with status "
+                    f"{response.status_code}: "
+                    f"{response.text}"
+                )
+
+            try:
+                payload = response.json()
+            except json.JSONDecodeError:
+                raise RuntimeError(
+                    "Codex model listing returned a non-JSON body: "
+                    f"{response.text[:200]}"
+                ) from None
+            return _parse_model_listing(payload)
+
     def _headers(self, snapshot: TokenSnapshot) -> dict[str, str]:
         account_id = snapshot.account.chatgpt_account_id
         if not account_id:
@@ -267,6 +309,33 @@ class CodexResponsesProvider:
         self, exc_type: object, exc_val: object, exc_tb: object
     ) -> None:
         await self.close()
+
+
+def _parse_model_listing(payload: object) -> list[str]:
+    """Extract visible model slugs from the ``/models`` payload, sorted by
+    ascending priority. Malformed entries are skipped."""
+    if not isinstance(payload, dict):
+        return []
+    models = payload.get("models")
+    if not isinstance(models, list):
+        return []
+
+    visible: list[tuple[int, str]] = []
+    for entry in models:
+        if not isinstance(entry, dict):
+            continue
+        slug = entry.get("slug")
+        if not isinstance(slug, str) or not slug:
+            continue
+        if entry.get("visibility") != "list":
+            continue
+        priority = entry.get("priority")
+        if not isinstance(priority, int):
+            continue
+        visible.append((priority, slug))
+
+    visible.sort(key=lambda item: item[0])
+    return [slug for _, slug in visible]
 
 
 def _convert_messages(

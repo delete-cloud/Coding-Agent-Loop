@@ -97,7 +97,39 @@ describe("Header provider dropdown", () => {
     expect(optionValues()).toEqual(["", ...PROVIDERS]);
   });
 
-  it("offers codex model presets instead of the kimi/deepseek ones for codex providers", async () => {
+  it("uses live codex model ids when the fetch succeeds", async () => {
+    const liveIds = ["gpt-9-live", "gpt-8-live"];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/oauth/accounts")) {
+          return Promise.resolve(jsonResponse([]));
+        }
+        if (url.includes("/providers/codex/models")) {
+          return Promise.resolve(
+            jsonResponse({
+              provider: "codex",
+              models: liveIds.map((id) => ({ id })),
+              source: "live",
+            }),
+          );
+        }
+        return Promise.reject(new Error(`unstubbed fetch: ${url}`));
+      }),
+    );
+
+    const { container } = renderHeader("codex");
+
+    await waitFor(() => {
+      const values = Array.from(
+        container.querySelectorAll<HTMLOptionElement>("#model-options option"),
+      ).map((o) => o.value);
+      expect(values).toEqual(liveIds);
+    });
+  });
+
+  it("falls back to codex presets when the live listing is unavailable", async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith("/oauth/accounts")) {
@@ -105,6 +137,11 @@ describe("Header provider dropdown", () => {
           jsonResponse([
             { provider: "codex:work", label: "work", connected_at: "2026-07-31T00:00:00Z" },
           ]),
+        );
+      }
+      if (url.includes("/providers/")) {
+        return Promise.resolve(
+          jsonResponse({ provider: "codex:work", models: [], source: "unavailable" }),
         );
       }
       return Promise.reject(new Error(`unstubbed fetch: ${url}`));
@@ -116,12 +153,31 @@ describe("Header provider dropdown", () => {
     const values = Array.from(
       container.querySelectorAll<HTMLOptionElement>("#model-options option"),
     ).map((o) => o.value);
-    expect(values).toEqual(["gpt-5.5", "gpt-5.4"]);
-    // The Responses API has no models endpoint — no live-list fetch may fire.
+    expect(values).toEqual([
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna",
+      "gpt-5.5",
+      "gpt-5.4",
+    ]);
+    // The server now lists codex models live — the fetch must fire.
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([url]) => String(url).includes("/providers/")),
+      ).toBe(true),
+    );
+    // Still presets after the unavailable response settles.
     await new Promise((r) => setTimeout(r, 300));
-    expect(
-      fetchMock.mock.calls.some(([url]) => String(url).includes("/providers/")),
-    ).toBe(false);
+    const settled = Array.from(
+      container.querySelectorAll<HTMLOptionElement>("#model-options option"),
+    ).map((o) => o.value);
+    expect(settled).toEqual([
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna",
+      "gpt-5.5",
+      "gpt-5.4",
+    ]);
   });
 });
 

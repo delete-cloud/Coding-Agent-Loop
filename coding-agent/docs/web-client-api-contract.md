@@ -137,17 +137,23 @@ Clients pick an account at session creation by sending
 `GET /providers/{provider}/models` returns the live model list for a provider,
 for populating a model picker in the client. `provider` must be one of the
 `ProviderName` literals (`openai`, `anthropic`, `copilot`, `kimi`, `kimi-code`,
-`kimi-code-anthropic`, `deepseek`, `stepfun`, `codex`); anything else is a
+`kimi-code-anthropic`, `deepseek`, `stepfun`, `codex`) or a multi-account
+`codex:<label>` key (same rules as session creation); anything else is a
 `422`.
 
 `ProviderModelsResponse`: `{ provider, models: [{ id }], source }` where
-`source` is `"live"` when the provider's `GET /models` listing succeeded and
+`source` is `"live"` when the provider's live listing succeeded and
 `"unavailable"` otherwise. The endpoint **never fails on provider-side
 problems** — missing API key, network error, listing timeout (10s), or a
-provider without an OpenAI-compatible listing API (anthropic, codex,
-kimi-code-anthropic, copilot) all return `200` with
-`{ models: [], source: "unavailable" }`. Clients should treat `"unavailable"`
-as "fall back to local presets", not as an error.
+provider without a live listing API (anthropic, kimi-code-anthropic, copilot)
+all return `200` with `{ models: [], source: "unavailable" }`. Clients should
+treat `"unavailable"` as "fall back to local presets", not as an error.
+
+OpenAI-compatible providers list via their `GET /models` endpoint. Codex
+providers (`codex`, `codex:<label>`) list via the ChatGPT-backed
+`GET /backend-api/codex/models?client_version=0.0.0`, filtered to
+`visibility == "list"` entries and sorted by ascending `priority`; a missing
+or expired OAuth account surfaces as `"unavailable"`.
 
 Listing reuses the same provider construction as session runs
 (`LLMProviderPlugin.provide_llm`), including env-var API-key fallbacks
