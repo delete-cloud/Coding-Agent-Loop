@@ -1,0 +1,24 @@
+{{- if .Values.networkPolicy.ciliumHostEgress.enabled }}
+{{- if not .Values.networkPolicy.ciliumHostEgress.ports }}
+{{- fail "networkPolicy.ciliumHostEgress.ports must not be empty when networkPolicy.ciliumHostEgress.enabled=true" }}
+{{- end }}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "coding-agent.fullname" . }}-host-egress
+  labels:
+    {{- include "coding-agent.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "coding-agent.selectorLabels" . | nindent 6 }}
+  egress:
+    - toEntities:
+        - host
+      toPorts:
+        - ports:
+            {{- range .Values.networkPolicy.ciliumHostEgress.ports }}
+            - port: {{ . | quote }}
+              protocol: TCP
+            {{- end }}
+{{- end }}
