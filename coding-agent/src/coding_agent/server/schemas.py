@@ -635,9 +635,16 @@ class ProviderModelSchema(BaseModel):
 class ProviderModelsResponse(BaseModel):
     """Response schema for the provider model-listing endpoint."""
 
-    provider: ProviderName
+    provider: str
     models: list[ProviderModelSchema]
     source: Literal["live", "unavailable"]
+
+    @field_validator("provider")
+    @classmethod
+    def _validate_provider(cls, value: str) -> str:
+        validated = validate_provider_value(value)
+        assert validated is not None
+        return validated
 
 
 class CodexOAuthStartRequest(BaseModel):

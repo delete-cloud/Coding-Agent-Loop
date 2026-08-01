@@ -28,9 +28,15 @@ export const PROVIDERS = [
 
 // Fallback datalist options, used when the server has no live model list.
 const MODEL_PRESETS = ["kimi-for-coding", "k3", "deepseek-chat"] as const;
-// Codex uses the Responses API, which has no models endpoint — the model
-// input stays manual with these presets as datalist suggestions.
-const CODEX_MODEL_PRESETS = ["gpt-5.5", "gpt-5.4"] as const;
+// Codex fallback when the live listing (server-side /backend-api/codex/models)
+// is unavailable.
+const CODEX_MODEL_PRESETS = [
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
+  "gpt-5.5",
+  "gpt-5.4",
+] as const;
 
 const isCodexProvider = (p: string) => p === "codex" || p.startsWith("codex:");
 
@@ -120,8 +126,7 @@ export default function Header({
 
   useEffect(() => {
     const provider = config.provider.trim();
-    if (!provider || isCodexProvider(provider)) {
-      // Codex has no live models list — keep the static codex presets.
+    if (!provider) {
       setLiveModels(null);
       return;
     }
@@ -141,9 +146,9 @@ export default function Header({
     };
   }, [client, config.provider]);
 
-  const modelOptions = isCodexProvider(config.provider.trim())
-    ? CODEX_MODEL_PRESETS
-    : (liveModels ?? MODEL_PRESETS);
+  const modelOptions =
+    liveModels ??
+    (isCodexProvider(config.provider.trim()) ? CODEX_MODEL_PRESETS : MODEL_PRESETS);
   const providerOptions = [...new Set([...PROVIDERS, ...oauthProviders])];
 
   const active = activeProfile(profiles);

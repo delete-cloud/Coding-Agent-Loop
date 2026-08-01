@@ -76,7 +76,6 @@ from coding_agent.environment import (
     workspace_patch_from_config,
     workspace_provider_capabilities_from_config,
 )
-from coding_agent.core.config import ProviderName
 from coding_agent.executors.external import ExecutorRunRecord, PGExecutorRunStore
 from coding_agent.observability import (
     prometheus_metrics_text,
@@ -269,6 +268,7 @@ from coding_agent.server.schemas import (
     WorkspaceRetentionPolicy,
     WorkspaceRetentionRequest,
     WorkspaceRetentionResponse,
+    validate_provider_value,
     WorkspaceSummarySchema,
     WorkspaceUnpinRequest,
     ExecutorListResponse,
@@ -2489,7 +2489,7 @@ async def readiness_check(request: Request, response: Response) -> ReadinessResp
 @limiter.limit(RateLimits.GET_SESSION)
 async def list_provider_models_endpoint(
     request: Request,
-    provider: ProviderName,
+    provider: str,
     api_key: str | None = Depends(verify_api_key),
 ) -> ProviderModelsResponse:
     """List available models for a provider.
@@ -2499,6 +2499,10 @@ async def list_provider_models_endpoint(
     client can fall back to its presets.
     """
     del request, api_key
+    try:
+        provider = validate_provider_value(provider)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     try:
         model_ids = await list_provider_models(provider)
     except Exception:

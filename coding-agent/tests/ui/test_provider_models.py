@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import patch
 
+import httpx
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -159,3 +160,121 @@ class TestListProviderModelsHelper:
 
         with pytest.raises(asyncio.TimeoutError):
             await list_provider_models("openai", timeout=0.05)
+
+
+class TestCodexProviderModels:
+    """Codex live listing through the endpoint and the helper."""
+
+    async def test_codex_live_listing_success(self, client, monkeypatch):
+        async def fake_list_provider_models(provider, *, timeout=10.0):
+            assert provider == "codex"
+            return ["gpt-5.6-sol", "gpt-5.5", "gpt-5.4"]
+
+        monkeypatch.setattr(
+            http_server, "list_provider_models", fake_list_provider_models
+        )
+
+        response = await client.get("/providers/codex/models")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "provider": "codex",
+            "models": [
+                {"id": "gpt-5.6-sol"},
+                {"id": "gpt-5.5"},
+                {"id": "gpt-5.4"},
+            ],
+            "source": "live",
+        }
+
+    async def test_codex_label_key_routes_to_listing(self, client, monkeypatch):
+        async def fake_list_provider_models(provider, *, timeout=10.0):
+            assert provider == "codex:work"
+            return ["gpt-5.5"]
+
+        monkeypatch.setattr(
+            http_server, "list_provider_models", fake_list_provider_models
+        )
+
+        response = await client.get("/providers/codex:work/models")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "provider": "codex:work",
+            "models": [{"id": "gpt-5.5"}],
+            "source": "live",
+        }
+
+    async def test_codex_listing_failure_returns_unavailable(self, client, monkeypatch):
+        async def failing_list_provider_models(provider, *, timeout=10.0):
+            raise RuntimeError("codex account not connected: codex")
+
+        monkeypatch.setattr(
+            http_server, "list_provider_models", failing_list_provider_models
+        )
+
+        response = await client.get("/providers/codex/models")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "provider": "codex",
+            "models": [],
+            "source": "unavailable",
+        }
+
+    async def test_invalid_codex_label_returns_422(self, client):
+        response = await client.get("/providers/codex:Bad_Label!/models")
+
+        assert response.status_code == 422
+
+
+class TestListProviderModelsCodexHelper:
+    """Helper-level codex tests: plugin routing and client cleanup."""
+
+    async def test_codex_provider_returns_ids_and_closes_client(self, monkeypatch):
+        from coding_agent.oauth.types import OAuthAccount, TokenSnapshot
+        from coding_agent.providers.codex_responses import CodexResponsesProvider
+
+        class _TokenSource:
+            async def get_token(self):
+                return TokenSnapshot(
+                    provider_name="codex:work",
+                    access_token="token",
+                    account=OAuthAccount(chatgpt_account_id="account-123"),
+                )
+
+            async def refresh_token(self):
+                raise AssertionError("refresh should not be needed")
+
+        def handler(request):
+            return httpx.Response(
+                200,
+                json={
+                    "models": [
+                        {"slug": "gpt-5.5", "visibility": "list", "priority": 2},
+                        {"slug": "gpt-5.6-sol", "visibility": "list", "priority": 1},
+                    ]
+                },
+                request=request,
+            )
+
+        instance = CodexResponsesProvider(
+            model="",
+            token_source=_TokenSource(),
+            base_url="https://chatgpt.com/backend-api/codex",
+            transport=httpx.MockTransport(handler),
+        )
+        captured: dict[str, object] = {}
+
+        def fake_provide_llm(self, **kwargs):
+            captured["provider"] = self._provider_name
+            return instance
+
+        monkeypatch.setattr(LLMProviderPlugin, "provide_llm", fake_provide_llm)
+
+        ids = await list_provider_models("codex:work")
+
+        assert captured["provider"] == "codex:work"
+        assert ids == ["gpt-5.6-sol", "gpt-5.5"]
+        # The short-lived client is closed after the call.
+        assert instance._http_client.is_closed

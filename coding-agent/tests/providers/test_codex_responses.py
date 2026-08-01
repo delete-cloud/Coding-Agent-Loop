@@ -304,3 +304,104 @@ async def test_stream_refreshes_token_once_on_unauthorized() -> None:
     assert seen_auth == ["Bearer old-token", "Bearer new-token"]
     assert token_source.refresh_count == 1
     assert events == [DoneEvent()]
+
+
+@pytest.mark.asyncio
+async def test_list_models_filters_hidden_and_sorts_by_priority() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["headers"] = dict(request.headers)
+        return httpx.Response(
+            200,
+            json={
+                "models": [
+                    {"slug": "gpt-5.5", "visibility": "list", "priority": 4},
+                    {"slug": "gpt-5.6-sol", "visibility": "list", "priority": 1},
+                    {"slug": "gpt-internal", "visibility": "hide", "priority": 0},
+                    {"slug": "gpt-5.4", "visibility": "list", "priority": 5},
+                    {"slug": "gpt-5.6-luna", "visibility": "list", "priority": 3},
+                    {"slug": "gpt-5.6-terra", "visibility": "list", "priority": 2},
+                    # Defensive: malformed entries are skipped.
+                    {"visibility": "list", "priority": 6},
+                    {"slug": "", "visibility": "list", "priority": 7},
+                    {"slug": "gpt-no-priority", "visibility": "list"},
+                    "not-a-dict",
+                ],
+            },
+            request=request,
+        )
+
+    provider = provider_with_handler(handler)
+
+    models = await provider.list_models()
+
+    assert models == [
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.5",
+        "gpt-5.4",
+    ]
+    assert captured["url"] == (
+        "https://chatgpt.com/backend-api/codex/models?client_version=0.0.0"
+    )
+    headers = captured["headers"]
+    assert isinstance(headers, dict)
+    assert headers["authorization"] == "Bearer access-token"
+    assert headers["chatgpt-account-id"] == "account-123"
+    assert headers["originator"] == "codex_cli_rs"
+
+
+@pytest.mark.asyncio
+async def test_list_models_refreshes_token_once_on_unauthorized() -> None:
+    seen_auth: list[str] = []
+    token_source = MemoryTokenSource("old-token")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_auth.append(request.headers["authorization"])
+        if len(seen_auth) == 1:
+            return httpx.Response(401, json={"detail": "expired"}, request=request)
+        return httpx.Response(
+            200,
+            json={"models": [{"slug": "gpt-5.5", "visibility": "list", "priority": 1}]},
+            request=request,
+        )
+
+    provider = provider_with_handler(handler, token_source=token_source)
+
+    models = await provider.list_models()
+
+    assert seen_auth == ["Bearer old-token", "Bearer new-token"]
+    assert token_source.refresh_count == 1
+    assert models == ["gpt-5.5"]
+
+
+@pytest.mark.asyncio
+async def test_list_models_raises_with_status_and_body_on_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="backend exploded", request=request)
+
+    provider = provider_with_handler(handler)
+
+    with pytest.raises(RuntimeError, match="500.*backend exploded"):
+        await provider.list_models()
+
+
+@pytest.mark.asyncio
+async def test_list_models_returns_empty_for_empty_or_malformed_listing() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Missing account id on the backend yields 200 with an empty list.
+        return httpx.Response(200, json={"models": []}, request=request)
+
+    provider = provider_with_handler(handler)
+
+    assert await provider.list_models() == []
+
+    def malformed_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"unexpected": "shape"}, request=request)
+
+    provider = provider_with_handler(malformed_handler)
+
+    assert await provider.list_models() == []
