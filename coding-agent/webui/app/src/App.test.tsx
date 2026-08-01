@@ -151,15 +151,131 @@ describe("App session switching", () => {
           sessionsUrl = url;
           return Promise.resolve(jsonResponse({ sessions: [] }));
         }
+        if (url.endsWith("/healthz")) {
+          return Promise.resolve(jsonResponse({ status: "ok", sessions: 0, version: "0.0.0" }));
+        }
         throw new Error(`unexpected fetch ${url}`);
       }),
     );
 
     render(<App />);
 
-    const baseUrl = screen.getByTitle("Server base URL") as HTMLInputElement;
     await waitFor(() => expect(sessionsUrl).toBe(`${window.location.origin}/sessions`));
-    expect(baseUrl.value).toBe(window.location.origin);
+    // The default same-origin profile is seeded and persisted.
+    const stored = JSON.parse(
+      localStorage.getItem("coding-agent-webui-profiles") ?? "{}",
+    ) as { profiles?: Array<{ baseUrl?: string }> };
+    expect(stored.profiles?.[0]?.baseUrl).toBe(window.location.origin);
+  });
+
+  it("switching the active profile swaps the backend and refreshes the session list", async () => {
+    const onA = session("session-a-0001", "model-a");
+    const onB = session("session-b-0002", "model-b");
+    localStorage.setItem(
+      "coding-agent-webui-profiles",
+      JSON.stringify({
+        profiles: [
+          { id: "pa", name: "backend-a", baseUrl: "http://a.test", apiKey: "" },
+          { id: "pb", name: "backend-b", baseUrl: "http://b.test", apiKey: "" },
+        ],
+        activeId: "pa",
+      }),
+    );
+    const sessionListCalls: string[] = [];
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "http://a.test/sessions") {
+          sessionListCalls.push(url);
+          return Promise.resolve(jsonResponse({ sessions: [onA] }));
+        }
+        if (url === "http://b.test/sessions") {
+          sessionListCalls.push(url);
+          return Promise.resolve(jsonResponse({ sessions: [onB] }));
+        }
+        if (url.endsWith("/healthz")) {
+          return Promise.resolve(jsonResponse({ status: "ok", sessions: 1, version: "1.0.0" }));
+        }
+        if (url.endsWith("/oauth/accounts")) {
+          return Promise.resolve(jsonResponse([]));
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    // Backend A is active on load.
+    expect(await screen.findByRole("button", { name: /model-a/i })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "connection" }).textContent).toContain(
+      "backend-a",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "connection" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Switch" }));
+
+    // The session list was cleared and re-fetched from backend B.
+    await waitFor(() => expect(sessionListCalls).toContain("http://b.test/sessions"));
+    expect(await screen.findByRole("button", { name: /model-b/i })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /model-a/i })).toBeNull();
+    expect(screen.getByRole("button", { name: "connection" }).textContent).toContain(
+      "backend-b",
+    );
+  });
+
+  it("discards a stale session list response from the old backend after a profile switch", async () => {
+    const onA = session("session-a-0001", "model-a");
+    const onB = session("session-b-0002", "model-b");
+    localStorage.setItem(
+      "coding-agent-webui-profiles",
+      JSON.stringify({
+        profiles: [
+          { id: "pa", name: "backend-a", baseUrl: "http://a.test", apiKey: "" },
+          { id: "pb", name: "backend-b", baseUrl: "http://b.test", apiKey: "" },
+        ],
+        activeId: "pa",
+      }),
+    );
+    const oldList = deferred<Response>();
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "http://a.test/sessions") {
+          // Old backend is slow: its list response is still in flight when the
+          // profile switch happens.
+          return oldList.promise;
+        }
+        if (url === "http://b.test/sessions") {
+          return Promise.resolve(jsonResponse({ sessions: [onB] }));
+        }
+        if (url.endsWith("/healthz")) {
+          return Promise.resolve(jsonResponse({ status: "ok", sessions: 1, version: "1.0.0" }));
+        }
+        if (url.endsWith("/oauth/accounts")) {
+          return Promise.resolve(jsonResponse([]));
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    // The initial list request to backend A is in flight (unresolved).
+    fireEvent.click(screen.getByRole("button", { name: "connection" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Switch" }));
+
+    // Backend B's list wins.
+    expect(await screen.findByRole("button", { name: /model-b/i })).toBeTruthy();
+
+    // The stale response from backend A resolves late and must be discarded.
+    oldList.resolve(jsonResponse({ sessions: [onA] }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.queryByRole("button", { name: /model-a/i })).toBeNull();
+    expect(screen.getByRole("button", { name: /model-b/i })).toBeTruthy();
   });
 
   it("uses prompt for completed restored sessions even when historical resume metadata remains", async () => {

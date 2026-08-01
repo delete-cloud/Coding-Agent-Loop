@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import type { AgentClient } from "../lib/api";
+import { activeProfile, type ProfileStore } from "../lib/profiles";
 import type { ApprovalPolicy } from "../lib/types";
+import ConnectionPanel from "./ConnectionPanel";
 
 interface Config {
   baseUrl: string;
@@ -35,6 +37,8 @@ const isCodexProvider = (p: string) => p === "codex" || p.startsWith("codex:");
 interface Props {
   config: Config;
   onConfigChange: (patch: Partial<Config>) => void;
+  profiles: ProfileStore;
+  onProfilesChange: (store: ProfileStore) => void;
   onNewSession: () => void;
   onToggleSidebar: () => void;
   sessionId: string | null;
@@ -49,6 +53,8 @@ interface Props {
 export default function Header({
   config,
   onConfigChange,
+  profiles,
+  onProfilesChange,
   onNewSession,
   onToggleSidebar,
   sessionId,
@@ -64,6 +70,38 @@ export default function Header({
   // Connected codex OAuth account keys ("codex", "codex:<label>") appended to
   // the static provider list; empty when the server lacks the endpoints.
   const [oauthProviders, setOauthProviders] = useState<string[]>([]);
+  const [panelOpen, setPanelOpen] = useState(false);
+  // Last background health check against the active profile's server.
+  const [health, setHealth] = useState<
+    | { state: "unknown" }
+    | { state: "ok"; version: string }
+    | { state: "failed"; error: string }
+  >({ state: "unknown" });
+
+  // Debounced background health check; re-runs when the client is recreated
+  // (profile switch or connection edit). Stale requests are aborted.
+  useEffect(() => {
+    const ctrl = new AbortController();
+    setHealth({ state: "unknown" });
+    const timer = setTimeout(() => {
+      client
+        .health(ctrl.signal)
+        .then((h) => {
+          if (!ctrl.signal.aborted) setHealth({ state: "ok", version: h.version });
+        })
+        .catch((e) => {
+          if (ctrl.signal.aborted) return;
+          setHealth({
+            state: "failed",
+            error: e instanceof Error ? e.message : String(e),
+          });
+        });
+    }, 200);
+    return () => {
+      clearTimeout(timer);
+      ctrl.abort();
+    };
+  }, [client]);
 
   useEffect(() => {
     let alive = true;
@@ -108,6 +146,14 @@ export default function Header({
     : (liveModels ?? MODEL_PRESETS);
   const providerOptions = [...new Set([...PROVIDERS, ...oauthProviders])];
 
+  const active = activeProfile(profiles);
+  const dotColor =
+    health.state === "ok" ? "bg-ok" : health.state === "failed" ? "bg-err" : "bg-muted";
+  const indicatorTitle =
+    health.state === "failed"
+      ? `connection failed: ${health.error}`
+      : (active?.baseUrl ?? config.baseUrl);
+
   return (
     <header className="flex min-w-0 flex-wrap items-center gap-2 border-b border-border bg-surface-1 px-3 py-2.5 sm:px-4">
       <button
@@ -119,19 +165,29 @@ export default function Header({
       >
         ☰
       </button>
-      <input
-        className="min-w-0 flex-1 rounded-lg border border-border bg-surface-0 px-3 py-1.5 text-sm text-fg placeholder:text-muted focus:border-accent focus:outline-none sm:w-48 sm:flex-none"
-        value={config.baseUrl}
-        title="Server base URL"
-        onChange={(e) => onConfigChange({ baseUrl: e.target.value })}
-      />
-      <input
-        className="w-full rounded-lg border border-border bg-surface-0 px-3 py-1.5 text-sm text-fg placeholder:text-muted focus:border-accent focus:outline-none sm:w-36"
-        type="password"
-        placeholder="X-API-Key"
-        value={config.apiKey}
-        onChange={(e) => onConfigChange({ apiKey: e.target.value })}
-      />
+      <div className="relative" data-connection-root>
+        <button
+          type="button"
+          className="flex items-center gap-2 rounded-lg border border-border px-2.5 py-1.5 text-sm text-fg transition-colors hover:border-border-active"
+          onClick={() => setPanelOpen((v) => !v)}
+          aria-label="connection"
+          aria-expanded={panelOpen}
+          title={indicatorTitle}
+        >
+          <span className={`h-2 w-2 shrink-0 rounded-full ${dotColor}`} />
+          <span className="max-w-40 truncate">{active?.name ?? "connection"}</span>
+          {health.state === "ok" && health.version && (
+            <span className="font-mono text-xs text-muted">v{health.version}</span>
+          )}
+        </button>
+        {panelOpen && (
+          <ConnectionPanel
+            store={profiles}
+            onChange={onProfilesChange}
+            onClose={() => setPanelOpen(false)}
+          />
+        )}
+      </div>
       <input
         className="w-full rounded-lg border border-border bg-surface-0 px-3 py-1.5 text-sm text-fg placeholder:text-muted focus:border-accent focus:outline-none sm:w-52"
         placeholder="repo path (optional)"

@@ -3,6 +3,7 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentClient } from "../lib/api";
+import type { ProfileStore } from "../lib/profiles";
 import Header, { PROVIDERS } from "./Header";
 
 afterEach(() => {
@@ -12,6 +13,11 @@ afterEach(() => {
 });
 
 const client = new AgentClient({ baseUrl: "http://test" });
+
+const profiles: ProfileStore = {
+  profiles: [{ id: "p1", name: "test-server", baseUrl: "http://test", apiKey: "" }],
+  activeId: "p1",
+};
 
 const jsonResponse = (body: unknown) =>
   new Response(JSON.stringify(body), {
@@ -32,6 +38,8 @@ function renderHeader(provider = "") {
     <Header
       config={config}
       onConfigChange={() => undefined}
+      profiles={profiles}
+      onProfilesChange={() => undefined}
       onNewSession={() => undefined}
       onToggleSidebar={() => undefined}
       sessionId={null}
@@ -114,5 +122,69 @@ describe("Header provider dropdown", () => {
     expect(
       fetchMock.mock.calls.some(([url]) => String(url).includes("/providers/")),
     ).toBe(false);
+  });
+});
+
+describe("Header connection indicator", () => {
+  it("shows the active profile name and server version after a successful health check", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/healthz")) {
+          return Promise.resolve(jsonResponse({ status: "ok", sessions: 3, version: "1.2.3" }));
+        }
+        if (url.endsWith("/oauth/accounts")) {
+          return Promise.resolve(jsonResponse([]));
+        }
+        return Promise.reject(new Error(`unstubbed fetch: ${url}`));
+      }),
+    );
+
+    renderHeader();
+
+    const indicator = screen.getByRole("button", { name: "connection" });
+    expect(indicator.textContent).toContain("test-server");
+    await waitFor(() => expect(indicator.textContent).toContain("v1.2.3"));
+  });
+
+  it("keeps the indicator without a version when the health check fails", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/healthz")) {
+          return Promise.resolve(new Response("down", { status: 502 }));
+        }
+        if (url.endsWith("/oauth/accounts")) {
+          return Promise.resolve(jsonResponse([]));
+        }
+        return Promise.reject(new Error(`unstubbed fetch: ${url}`));
+      }),
+    );
+
+    renderHeader();
+
+    const indicator = screen.getByRole("button", { name: "connection" });
+    await waitFor(() =>
+      expect(indicator.getAttribute("title")).toContain("connection failed"),
+    );
+    expect(indicator.textContent).not.toMatch(/v\d/);
+  });
+
+  it("no longer renders the always-visible base URL and API key inputs", () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.reject(new Error("offline"))),
+    );
+
+    renderHeader();
+
+    expect(screen.queryByTitle("Server base URL")).toBeNull();
+    expect(screen.queryByPlaceholderText("X-API-Key")).toBeNull();
+    // repo path / provider / model / theme controls are still there.
+    expect(screen.getByPlaceholderText(/repo path/i)).toBeTruthy();
+    expect(screen.getByTitle("provider")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "toggle theme" })).toBeTruthy();
   });
 });

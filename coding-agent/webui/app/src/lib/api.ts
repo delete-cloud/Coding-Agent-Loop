@@ -57,8 +57,8 @@ export class AgentClient {
     return r;
   }
 
-  async health(): Promise<{ status: string; sessions: number; version: string }> {
-    return (await this.check(await fetch(this.url("/healthz"), { headers: this.headers() }))).json();
+  async health(signal?: AbortSignal): Promise<{ status: string; sessions: number; version: string }> {
+    return (await this.check(await fetch(this.url("/healthz"), { headers: this.headers(), signal }))).json();
   }
 
   async createSession(opts: {
