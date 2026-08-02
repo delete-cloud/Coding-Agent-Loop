@@ -34,18 +34,21 @@ export default function RightRail({ panel, onToggle, children }: Props) {
       >
         <RailButton
           label="diff"
+          tooltip="Diff — workspace file changes"
           active={panel === "diff"}
           onClick={() => onToggle("diff")}
           icon={
             <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" className="h-4 w-4">
-              <path d="M3 3.5h10" />
-              <path d="M3 8h6.5" />
-              <path d="M3 12.5h10" />
+              <path d="M5 3.5h6" />
+              <path d="M5 8h3.5" />
+              <path d="M5 12.5h6" />
+              <path d="M2 3.5h.01M2 8h.01M2 12.5h.01" strokeWidth="2.2" />
             </svg>
           }
         />
         <RailButton
           label="memory"
+          tooltip="Memory — recall hits & review queue"
           active={panel === "memory"}
           onClick={() => onToggle("memory")}
           icon={
@@ -58,6 +61,7 @@ export default function RightRail({ panel, onToggle, children }: Props) {
         />
         <RailButton
           label="checkpoints"
+          tooltip="Checkpoints — snapshots & restore"
           active={panel === "checkpoints"}
           onClick={() => onToggle("checkpoints")}
           icon={
@@ -68,6 +72,7 @@ export default function RightRail({ panel, onToggle, children }: Props) {
         />
         <RailButton
           label="settings"
+          tooltip="Settings — session runtime & codex accounts"
           active={panel === "settings"}
           onClick={() => onToggle("settings")}
           icon={
@@ -84,11 +89,13 @@ export default function RightRail({ panel, onToggle, children }: Props) {
 
 function RailButton({
   label,
+  tooltip,
   active,
   onClick,
   icon,
 }: {
   label: string;
+  tooltip: string;
   active: boolean;
   onClick: () => void;
   icon: ReactNode;
@@ -101,7 +108,7 @@ function RailButton({
       }`}
       aria-label={`Toggle ${label} panel`}
       aria-pressed={active}
-      title={`${active ? "Close" : "Open"} ${label} panel`}
+      title={tooltip}
       onClick={onClick}
     >
       {icon}
