@@ -763,18 +763,16 @@ export default function App() {
             <RailPlaceholder text="No active session" />
           )
         ) : railPanel === "settings" ? (
-          sessionId ? (
-            <SettingsPanel
-              key={sessionId}
-              sessionId={sessionId}
-              providerName={activeSession?.provider_name ?? null}
-              modelName={activeSession?.model_name ?? null}
-              onUpdate={(patch) => updateSessionRuntime(sessionId, patch)}
-              client={client}
-            />
-          ) : (
-            <RailPlaceholder text="No active session" />
-          )
+          <SettingsPanel
+            key={sessionId ?? "global"}
+            sessionId={sessionId}
+            providerName={activeSession?.provider_name ?? null}
+            modelName={activeSession?.model_name ?? null}
+            onUpdate={(patch) =>
+              sessionId ? updateSessionRuntime(sessionId, patch) : Promise.resolve()
+            }
+            client={client}
+          />
         ) : null}
       </RightRail>
     </div>
