@@ -1907,13 +1907,16 @@ describe("session settings panel", () => {
     ]);
   });
 
-  it("shows a placeholder when there is no active session", async () => {
+  it("shows the codex accounts card when there is no active session", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn((input: RequestInfo | URL) => {
         const url = String(input);
         if (url.endsWith("/sessions")) {
           return Promise.resolve(jsonResponse({ sessions: [] }));
+        }
+        if (url.endsWith("/oauth/accounts") || url.endsWith("/oauth/codex/flows")) {
+          return Promise.resolve(jsonResponse([]));
         }
         throw new Error(`unexpected fetch ${url}`);
       }),
@@ -1922,7 +1925,9 @@ describe("session settings panel", () => {
     render(<App />);
 
     fireEvent.click(screen.getByRole("button", { name: "Toggle settings panel" }));
-    expect(await screen.findByText("No active session")).toBeTruthy();
+    expect(
+      await screen.findByText(/Select a session to edit its runtime settings/),
+    ).toBeTruthy();
   });
 });
 

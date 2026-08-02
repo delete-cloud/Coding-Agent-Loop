@@ -5,7 +5,9 @@ import CodexAccountsCard from "./CodexAccountsCard";
 import { PROVIDERS } from "./Header";
 
 interface Props {
-  sessionId: string;
+  // Null when no session is selected: session runtime controls are hidden,
+  // but the codex accounts card stays reachable (it's backend-global).
+  sessionId: string | null;
   providerName: string | null;
   modelName: string | null;
   onUpdate: (patch: RuntimeConfigPatch) => Promise<void>;
@@ -83,7 +85,7 @@ export default function SettingsPanel({
   return (
     <section
       className="flex h-full min-h-0 flex-col bg-surface-1"
-      aria-label={`settings for session ${sessionId}`}
+      aria-label={sessionId ? `settings for session ${sessionId}` : "settings"}
     >
       <div className="flex items-center justify-between border-b border-border px-4 py-2">
         <div className="text-sm font-semibold text-fg">Session settings</div>
@@ -97,6 +99,8 @@ export default function SettingsPanel({
         )}
       </div>
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto px-4 py-3">
+        {sessionId ? (
+          <>
         <p className="text-[11px] leading-relaxed text-muted">
           Runtime settings for the current session, applied immediately.
           Defaults for new sessions live in the header.
@@ -193,6 +197,13 @@ export default function SettingsPanel({
           The current policy is not exposed by the server. Selecting a policy
           applies it immediately and also saves it as the default for new sessions.
         </p>
+          </>
+        ) : (
+          <p className="text-[11px] leading-relaxed text-muted">
+            Select a session to edit its runtime settings. Codex accounts below
+            are shared across the whole backend.
+          </p>
+        )}
         <CodexAccountsCard client={client} />
       </div>
     </section>
