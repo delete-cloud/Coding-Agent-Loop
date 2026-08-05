@@ -30,6 +30,11 @@ and PostgreSQL restore, mark previously active runs for the same session whose
 the same fenced transaction that restores tape, session state, topics, and the
 checkpoint set. Existing supersession markers are not overwritten.
 
+Before the restore transaction persists the session payload, recompute
+`current_turn_id` from the latest active run at or before the checkpoint boundary.
+Persist that optional value in session metadata so restart hydration remains
+aligned with the restored timeline.
+
 Keep `list_agent_runs()` and direct run/event lookup as full audit queries. Add an
 explicit active-timeline query in the run query service that excludes superseded
 runs. Session history, latest-run selection, resume metadata, result fallback, and
@@ -56,6 +61,10 @@ durable stores.
 - Change `list_agent_runs()` to hide superseded rows everywhere: breaks audit,
   startup recovery, worker state, and developer-console consumers.
 
+Executor claim paths are control-plane consumers rather than audit queries. They
+exclude superseded requested or expired rows so rolled-back work cannot execute
+after restore.
+
 ## Acceptance Criteria
 
 - [ ] SQLite and PostgreSQL runtime schemas upgrade existing databases and round
@@ -67,6 +76,8 @@ durable stores.
 - [ ] Full run listing and direct run/event/display-event lookup retain
   superseded records for audit.
 - [ ] A run created after restore remains visible on the active timeline.
+- [ ] Superseded requested or expired runs cannot be claimed by an executor.
+- [ ] Restart hydration retains the reconciled `current_turn_id`.
 - [ ] `uv run pytest tests/coding_agent/test_sqlite_runtime_store.py tests/coding_agent/test_pg_runtime_store.py tests/coding_agent/test_sqlite_local_durable_fencing.py tests/coding_agent/test_pg_durable_fencing.py tests/coding_agent/test_runtime_query_service.py -v`
 - [ ] `uv run pytest tests/ui/test_http_server.py tests/acp/test_server.py -k "checkpoint or runtime_run or session_load or result" -v`
 - [ ] `pnpm --dir webui/app --ignore-workspace run test -- App.test.tsx`

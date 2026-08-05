@@ -402,6 +402,7 @@ class SessionRecord:
     additional_directories: list[str]
     tape_id: str | None
     last_failure_details: str | None
+    current_turn_id: str | None = None
 
     def to_store_data(self) -> dict[str, Any]:
         return {
@@ -422,6 +423,7 @@ class SessionRecord:
             "additional_directories": list(self.additional_directories),
             "tape_id": self.tape_id,
             "last_failure_details": self.last_failure_details,
+            "turn_id": self.current_turn_id,
         }
 
     @classmethod
@@ -459,6 +461,9 @@ class SessionRecord:
             last_failure_details_raw, str
         ):
             raise TypeError("session metadata has invalid last_failure_details")
+        current_turn_id_raw = data.get("turn_id")
+        if current_turn_id_raw is not None and not isinstance(current_turn_id_raw, str):
+            raise TypeError("session metadata has invalid turn_id")
         mcp_servers_raw = data.get("mcp_servers", {})
         if not isinstance(mcp_servers_raw, dict):
             raise TypeError("session metadata has invalid mcp_servers")
@@ -505,6 +510,7 @@ class SessionRecord:
             additional_directories=additional_directories,
             tape_id=tape_id_raw,
             last_failure_details=last_failure_details_raw,
+            current_turn_id=current_turn_id_raw,
         )
 
     def to_session(self) -> Session:
@@ -525,6 +531,7 @@ class SessionRecord:
             additional_directories=list(self.additional_directories),
             tape_id=self.tape_id,
             last_failure_details=self.last_failure_details,
+            current_turn_id=self.current_turn_id,
         )
 
 
@@ -762,6 +769,7 @@ class Session:
             additional_directories=list(self.additional_directories),
             tape_id=self.tape_id,
             last_failure_details=self.last_failure_details,
+            current_turn_id=self.current_turn_id,
         )
 
     @classmethod
@@ -2966,6 +2974,24 @@ class SessionManager:
         snapshot: Any,
     ) -> None:
         typed_session = cast(Session, session)
+        active_runs = (
+            []
+            if self._runtime_store is None
+            else await self._runtime_control_services.queries().list_active_runtime_runs(
+                typed_session.id
+            )
+        )
+        runs_at_checkpoint = [
+            run for run in active_runs if run.started_at <= snapshot.meta.created_at
+        ]
+        latest_run = (
+            None
+            if not runs_at_checkpoint
+            else max(runs_at_checkpoint, key=lambda run: (run.started_at, run.run_id))
+        )
+        typed_session.current_turn_id = (
+            None if latest_run is None else latest_run.run_id
+        )
         if self._local_durable_store is None and self._pg_durable_store is None:
             if typed_session.tape_id is None:
                 raise ValueError("session has no stable tape id")

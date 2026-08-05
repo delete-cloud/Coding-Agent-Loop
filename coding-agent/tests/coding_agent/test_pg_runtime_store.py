@@ -80,6 +80,11 @@ class FakePool:
                     continue
                 if metadata.get("executor_kind") != executor_kind:
                     continue
+                if (
+                    "superseded_at IS NULL" in query
+                    and row["superseded_at"] is not None
+                ):
+                    continue
                 row["status"] = "claimed"
                 row["metadata"] = {
                     **metadata,
@@ -415,6 +420,49 @@ async def test_claim_attached_executor_run_accepts_local_attached_binding(
     assert claimed.status == "claimed"
     assert claimed.metadata["executor_ref_kind"] == "local_attached"
     assert claimed.metadata["worker_id"] == "worker-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["requested", "expired"])
+async def test_claim_attached_executor_run_skips_superseded_run(
+    store: PGRuntimeStore,
+    status: str,
+) -> None:
+    started_at = _dt(9)
+    for run_id, run_started_at, superseded_at in (
+        ("run-superseded", started_at, _dt(10)),
+        ("run-active", _dt(9, 1), None),
+    ):
+        await store.create_agent_run(
+            AgentRunRecord(
+                run_id=run_id,
+                session_id="session-local-attached",
+                tape_id=None,
+                parent_run_id=None,
+                agent_id=None,
+                status=status,
+                started_at=run_started_at,
+                metadata={
+                    "executor_ref_kind": "local_attached",
+                    "executor_kind": "local_cli",
+                },
+                result={},
+                error=None,
+                superseded_by_checkpoint_id=(
+                    "checkpoint-1" if superseded_at is not None else None
+                ),
+                superseded_at=superseded_at,
+            )
+        )
+
+    claimed = await store.claim_attached_executor_run(
+        session_id="session-local-attached",
+        executor_kind="local_cli",
+        claim_metadata={"worker_id": "worker-1"},
+    )
+
+    assert claimed is not None
+    assert claimed.run_id == "run-active"
 
 
 @pytest.mark.asyncio

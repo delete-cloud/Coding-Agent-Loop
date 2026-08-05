@@ -1061,6 +1061,7 @@ class SQLiteLocalDurableStore:
                 if run.metadata.get("executor_ref_kind")
                 in {"external_worker", "local_attached"}
                 and run.metadata.get("executor_kind") == executor_kind
+                and run.superseded_at is None
             ]
             selected: AgentRunRecord | None = None
             authority: OwnerAuthority | None = None

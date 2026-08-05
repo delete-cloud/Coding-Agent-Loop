@@ -23,6 +23,8 @@ release_checks:
   - Verify session history, resume, result fallback, ACP, and WebUI use active runs only.
   - Verify direct run and event lookup still exposes superseded records for audit.
   - Verify a run created after restore remains active.
+  - Verify executor claim paths reject superseded requested and expired runs.
+  - Verify the reconciled current turn survives session reload.
 ---
 
 # Summary
@@ -43,3 +45,5 @@ apply a permanent timestamp filter that would hide new runs after restore.
 - Run runtime-query, HTTP result/session-history, ACP load, and WebUI restore tests.
 - Confirm superseded run events remain addressable by direct run id.
 - Confirm post-restore runs are not hidden.
+- Confirm superseded queued runs cannot be claimed and executed.
+- Confirm restored session persistence reloads the latest active turn id.

@@ -59,6 +59,57 @@ class FakeTapeStore:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["requested", "expired"])
+async def test_sqlite_durable_claim_skips_superseded_run(
+    tmp_path: Path,
+    status: str,
+) -> None:
+    store = SQLiteLocalDurableStore(tmp_path / "local.sqlite3")
+    owner = await store.acquire_owner("session-a", "owner-a")
+    await store.save_session(
+        owner,
+        {"id": "session-a", "session_id": "session-a", "tape_id": "tape-a"},
+    )
+    started_at = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    for run_id, run_started_at, superseded_at in (
+        ("run-superseded", started_at, started_at),
+        ("run-active", started_at + timedelta(minutes=1), None),
+    ):
+        await store.create_agent_run(
+            owner,
+            AgentRunRecord(
+                run_id=run_id,
+                session_id="session-a",
+                tape_id="tape-a",
+                parent_run_id=None,
+                agent_id=None,
+                status=status,
+                started_at=run_started_at,
+                metadata={
+                    "executor_ref_kind": "local_attached",
+                    "executor_kind": "local_cli",
+                },
+                result={},
+                error=None,
+                superseded_by_checkpoint_id=(
+                    "checkpoint-1" if superseded_at is not None else None
+                ),
+                superseded_at=superseded_at,
+            ),
+        )
+
+    claimed = await store.claim_attached_executor_run(
+        {"session-a": owner},
+        session_id="session-a",
+        executor_kind="local_cli",
+        claim_metadata={"worker_id": "worker-1"},
+    )
+
+    assert claimed is not None
+    assert claimed.run_id == "run-active"
+
+
+@pytest.mark.asyncio
 async def test_sqlite_owner_authority_renew_does_not_advance_epoch(
     tmp_path: Path,
 ) -> None:

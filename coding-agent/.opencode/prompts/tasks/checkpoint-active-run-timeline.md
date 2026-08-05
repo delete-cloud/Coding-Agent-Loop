@@ -9,6 +9,8 @@ Scope:
   transactions.
 - Add an explicit active-run query contract and use it for session history,
   latest-run/resume state, result fallback, and ACP session load.
+- Exclude superseded runs from executor claim paths and persist the reconciled
+  current turn in session metadata.
 - Add focused persistence, restore, query, HTTP, ACP, and WebUI regressions.
 - Record the recurring projection-reconciliation failure in `postmortem/`.
 
@@ -16,8 +18,8 @@ Out of scope:
 - Deleting runtime runs, events, snapshots, or interactions.
 - Atomic runtime-projection reconciliation for legacy JSONL checkpoint restore.
 - Production deployment, o6n mutation, GitOps updates, or live smoke tests.
-- Changing worker recovery, developer-console audit, or direct run-id/event
-  endpoints to hide superseded records.
+- Changing developer-console audit or direct run-id/event endpoints to hide
+  superseded records.
 - Redesigning checkpoint snapshot payloads or restore authorization.
 
 Context:
@@ -47,6 +49,7 @@ Context:
 Target tests:
 - `uv run pytest tests/coding_agent/test_sqlite_runtime_store.py tests/coding_agent/test_pg_runtime_store.py tests/coding_agent/test_sqlite_local_durable_fencing.py tests/coding_agent/test_pg_durable_fencing.py tests/coding_agent/test_runtime_query_service.py -v`
 - `uv run pytest tests/ui/test_http_server.py tests/acp/test_server.py -k "checkpoint or runtime_run or session_load or result" -v`
+- `uv run pytest tests/ui/test_session_manager_runtime.py -k "restore_durable_state" -v`
 - `uv run pytest tests/coding_agent/test_adapter_types.py tests/coding_agent/test_pipeline_adapter.py tests/coding_agent/test_run_lifecycle.py -v`
 - `pnpm --dir webui/app --ignore-workspace run test -- App.test.tsx`
 - `rg -n "str\\(exc\\)" src/coding_agent/stores/runtime_store.py src/coding_agent/stores/durable_local.py src/coding_agent/stores/durable_pg.py`

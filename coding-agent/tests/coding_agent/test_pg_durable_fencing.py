@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from collections.abc import Mapping
 from typing import Any, cast
 from unittest.mock import patch
 
@@ -379,6 +380,53 @@ class FakePGCheckpointStore:
 class FakePGRuntimeStore:
     def __init__(self, *, pool: FakePGPool) -> None:
         self.pool = pool
+
+
+@pytest.mark.asyncio
+async def test_fenced_pg_runtime_claim_uses_durable_active_claim_path() -> None:
+    pool = FakePGPool()
+    authority = OwnerAuthority("session-a", "owner-a", 7)
+    expected = AgentRunRecord(
+        run_id="run-active",
+        session_id="session-a",
+        tape_id="tape-a",
+        parent_run_id=None,
+        agent_id=None,
+        status="claimed",
+        started_at=datetime(2026, 6, 1, 12, 0, tzinfo=UTC),
+    )
+    calls: list[tuple[Mapping[str, OwnerAuthority], str | None, str]] = []
+
+    class DurableStore:
+        async def claim_attached_executor_run(
+            self,
+            authorities,
+            *,
+            session_id,
+            executor_kind,
+            claim_metadata,
+        ):
+            del claim_metadata
+            calls.append((authorities, session_id, executor_kind))
+            return expected
+
+    store = FencedPGRuntimeStore(
+        durable_store=cast(Any, DurableStore()),
+        pool=cast(Any, pool),
+        authority_for_session=lambda _: authority,
+        authorities=lambda: {authority.session_id: authority},
+    )
+
+    claimed = await store.claim_attached_executor_run(
+        session_id=authority.session_id,
+        executor_kind="local_cli",
+        claim_metadata={"worker_id": "worker-1"},
+    )
+
+    assert claimed == expected
+    assert calls == [
+        ({authority.session_id: authority}, authority.session_id, "local_cli")
+    ]
 
 
 @pytest.mark.asyncio

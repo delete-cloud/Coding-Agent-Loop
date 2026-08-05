@@ -675,6 +675,7 @@ class SQLiteRuntimeStore:
                 if run.metadata.get("executor_ref_kind")
                 in {"external_worker", "local_attached"}
                 and run.metadata.get("executor_kind") == executor_kind
+                and run.superseded_at is None
             ]
             if not candidates:
                 return None
@@ -1073,6 +1074,7 @@ class PGRuntimeStore:
           AND metadata->>'executor_ref_kind' IN ('external_worker', 'local_attached')
           AND metadata->>'executor_kind' = $2
           AND ($1::text IS NULL OR session_id = $1)
+          AND superseded_at IS NULL
         ORDER BY started_at, run_id
         LIMIT 1
         FOR UPDATE SKIP LOCKED

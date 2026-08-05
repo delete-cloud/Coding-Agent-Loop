@@ -15,6 +15,50 @@ from coding_agent.stores.runtime_store import (
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["requested", "expired"])
+async def test_sqlite_runtime_store_claim_skips_superseded_run(
+    tmp_path,
+    status: str,
+) -> None:
+    store = SQLiteRuntimeStore(tmp_path / "runtime.sqlite3")
+    started_at = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    for run_id, run_started_at, superseded_at in (
+        ("run-superseded", started_at, started_at),
+        ("run-active", started_at.replace(minute=1), None),
+    ):
+        await store.create_agent_run(
+            AgentRunRecord(
+                run_id=run_id,
+                session_id="session-1",
+                tape_id="tape-1",
+                parent_run_id=None,
+                agent_id=None,
+                status=status,
+                started_at=run_started_at,
+                metadata={
+                    "executor_ref_kind": "local_attached",
+                    "executor_kind": "local_cli",
+                },
+                result={},
+                error=None,
+                superseded_by_checkpoint_id=(
+                    "checkpoint-1" if superseded_at is not None else None
+                ),
+                superseded_at=superseded_at,
+            )
+        )
+
+    claimed = await store.claim_attached_executor_run(
+        session_id="session-1",
+        executor_kind="local_cli",
+        claim_metadata={"executor_id": "executor-1"},
+    )
+
+    assert claimed is not None
+    assert claimed.run_id == "run-active"
+
+
+@pytest.mark.asyncio
 async def test_sqlite_runtime_store_persists_runtime_records_across_instances(
     tmp_path,
 ) -> None:
