@@ -168,6 +168,10 @@ class FakeManager:
         self.calls.append(("list_runtime_runs", session_id))
         return list(self.runtime_runs)
 
+    async def list_active_runtime_runs(self, session_id: str) -> list[Any]:
+        self.calls.append(("list_active_runtime_runs", session_id))
+        return list(self.runtime_runs)
+
     async def replay_display_events(
         self,
         run_id: str,
@@ -1264,7 +1268,7 @@ async def test_session_load_replays_display_events_before_response(
             "update_session_additional_directories",
             {"session_id": "sess-1", "additional_directories": []},
         ),
-        ("list_runtime_runs", "sess-1"),
+        ("list_active_runtime_runs", "sess-1"),
         (
             "replay_display_events",
             {"run_id": "run-1", "last_event_id": None, "limit": 1000},

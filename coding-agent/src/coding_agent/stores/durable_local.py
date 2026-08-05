@@ -96,7 +96,7 @@ class SQLiteLocalDurableStore:
             connection.executescript(SQLiteSessionStore._CREATE_TABLE_SQL)
             connection.executescript(SQLiteTapeStore._CREATE_SCHEMA_SQL)
             connection.executescript(SQLiteCheckpointStore._CREATE_SCHEMA_SQL)
-            connection.executescript(SQLiteRuntimeStore._CREATE_SCHEMA_SQL)
+            SQLiteRuntimeStore._ensure_schema(connection)
             connection.executescript(SQLiteTopicStore._CREATE_SCHEMA_SQL)
             connection.executescript(self._SESSION_TAPES_SCHEMA_SQL)
 
@@ -724,9 +724,10 @@ class SQLiteLocalDurableStore:
                 """
                 INSERT INTO agent_runs (
                     run_id, session_id, tape_id, parent_run_id, agent_id, status,
-                    started_at, ended_at, metadata, result, error
+                    started_at, ended_at, metadata, result, error,
+                    superseded_by_checkpoint_id, superseded_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(run_id)
                 DO UPDATE SET
                     tape_id = excluded.tape_id,
@@ -1290,6 +1291,22 @@ class SQLiteLocalDurableStore:
                               updated_at = CURRENT_TIMESTAMP
                 """,
                 (authority.session_id, json.dumps(session_payload, sort_keys=True)),
+            )
+            connection.execute(
+                """
+                UPDATE agent_runs
+                SET superseded_by_checkpoint_id = ?,
+                    superseded_at = ?
+                WHERE session_id = ?
+                  AND julianday(started_at) > julianday(?)
+                  AND superseded_at IS NULL
+                """,
+                (
+                    meta.checkpoint_id,
+                    now,
+                    authority.session_id,
+                    _datetime_to_json(meta.created_at),
+                ),
             )
             self._reconcile_topics_after_checkpoint_restore(
                 connection,

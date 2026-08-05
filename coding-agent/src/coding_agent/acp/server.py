@@ -96,6 +96,8 @@ class AcpSessionManager(Protocol):
 
     async def list_runtime_runs(self, session_id: str) -> list[Any]: ...
 
+    async def list_active_runtime_runs(self, session_id: str) -> list[Any]: ...
+
     async def list_sessions_async(self) -> list[str]: ...
 
     async def close_session(self, session_id: str) -> None: ...
@@ -151,9 +153,7 @@ class AcpServer:
         self._model_name = model_name
         self._base_url = base_url
         self._max_steps = max_steps
-        self._modes = (
-            modes if modes is not None else default_acp_modes()
-        )
+        self._modes = modes if modes is not None else default_acp_modes()
         self._active_prompt_sessions: set[str] = set()
         self._cancelled_prompt_sessions: set[str] = set()
 
@@ -389,7 +389,7 @@ class AcpServer:
             session_id,
             additional_directories,
         )
-        runs = await self._session_manager.list_runtime_runs(session_id)
+        runs = await self._session_manager.list_active_runtime_runs(session_id)
         for run in _sort_runtime_runs(runs):
             run_id = getattr(run, "run_id", None)
             if not isinstance(run_id, str) or not run_id:
@@ -872,7 +872,8 @@ def _session_mode_state(modes: Iterable[AcpMode] | None = None) -> JSONObject:
         {
             "id": m.id,
             "name": m.name,
-            "description": m.description or f"Provider: {m.provider or 'any'}, Model: {m.model or 'any'}",
+            "description": m.description
+            or f"Provider: {m.provider or 'any'}, Model: {m.model or 'any'}",
         }
         for m in (modes or default_acp_modes())
     ]

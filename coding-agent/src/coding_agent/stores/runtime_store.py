@@ -30,6 +30,8 @@ class AgentRunRecord:
     metadata: JSONObject = field(default_factory=dict)
     result: JSONObject = field(default_factory=dict)
     error: str | None = None
+    superseded_by_checkpoint_id: str | None = None
+    superseded_at: datetime | None = None
 
     def __post_init__(self) -> None:
         _require_non_empty("run_id", self.run_id)
@@ -48,6 +50,13 @@ class AgentRunRecord:
         _require_json_object("result", self.result)
         if self.error is not None:
             _require_non_empty("error", self.error)
+        if self.superseded_by_checkpoint_id is not None:
+            _require_non_empty(
+                "superseded_by_checkpoint_id",
+                self.superseded_by_checkpoint_id,
+            )
+        if self.superseded_at is not None:
+            _require_datetime("superseded_at", self.superseded_at)
 
 
 @dataclass(frozen=True)
@@ -157,6 +166,8 @@ class JSONLRuntimeStore:
             metadata=metadata,
             result=result,
             error=error,
+            superseded_by_checkpoint_id=existing.superseded_by_checkpoint_id,
+            superseded_at=existing.superseded_at,
         )
         await self._append_jsonl("runs.jsonl", _agent_run_to_payload(updated))
         return updated
@@ -213,6 +224,8 @@ class JSONLRuntimeStore:
                 metadata=cast(JSONObject, metadata),
                 result=selected.result,
                 error=selected.error,
+                superseded_by_checkpoint_id=selected.superseded_by_checkpoint_id,
+                superseded_at=selected.superseded_at,
             )
             self._append_jsonl_sync("runs.jsonl", _agent_run_to_payload(claimed))
             return claimed
@@ -456,7 +469,9 @@ class SQLiteRuntimeStore:
         ended_at TEXT,
         metadata TEXT NOT NULL,
         result TEXT NOT NULL,
-        error TEXT
+        error TEXT,
+        superseded_by_checkpoint_id TEXT,
+        superseded_at TEXT
     );
 
     CREATE INDEX IF NOT EXISTS agent_runs_session_id_idx
@@ -506,7 +521,22 @@ class SQLiteRuntimeStore:
         self._lock = threading.Lock()
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
-            connection.executescript(self._CREATE_SCHEMA_SQL)
+            self._ensure_schema(connection)
+
+    @classmethod
+    def _ensure_schema(cls, connection: sqlite3.Connection) -> None:
+        connection.executescript(cls._CREATE_SCHEMA_SQL)
+        connection.execute("BEGIN IMMEDIATE")
+        columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(agent_runs)").fetchall()
+        }
+        if "superseded_by_checkpoint_id" not in columns:
+            connection.execute(
+                "ALTER TABLE agent_runs ADD COLUMN superseded_by_checkpoint_id TEXT"
+            )
+        if "superseded_at" not in columns:
+            connection.execute("ALTER TABLE agent_runs ADD COLUMN superseded_at TEXT")
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._path)
@@ -519,9 +549,10 @@ class SQLiteRuntimeStore:
                 """
                 INSERT INTO agent_runs (
                     run_id, session_id, tape_id, parent_run_id, agent_id, status,
-                    started_at, ended_at, metadata, result, error
+                    started_at, ended_at, metadata, result, error,
+                    superseded_by_checkpoint_id, superseded_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(run_id)
                 DO UPDATE SET
                     session_id = excluded.session_id,
@@ -916,12 +947,19 @@ class PGRuntimeStore:
         metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
         result JSONB NOT NULL DEFAULT '{}'::jsonb,
         error TEXT,
+        superseded_by_checkpoint_id TEXT,
+        superseded_at TIMESTAMPTZ,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
     CREATE INDEX IF NOT EXISTS agent_runs_session_id_idx
         ON agent_runs (session_id, started_at, run_id);
+
+    ALTER TABLE agent_runs
+        ADD COLUMN IF NOT EXISTS superseded_by_checkpoint_id TEXT;
+    ALTER TABLE agent_runs
+        ADD COLUMN IF NOT EXISTS superseded_at TIMESTAMPTZ;
 
     CREATE INDEX IF NOT EXISTS agent_runs_tape_id_idx
         ON agent_runs (tape_id, started_at, run_id)
@@ -990,9 +1028,13 @@ class PGRuntimeStore:
         ended_at,
         metadata,
         result,
-        error
+        error,
+        superseded_by_checkpoint_id,
+        superseded_at
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11)
+    VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11, $12, $13
+    )
     ON CONFLICT (run_id)
     DO UPDATE SET
         session_id = EXCLUDED.session_id,
@@ -1163,6 +1205,8 @@ class PGRuntimeStore:
             record.metadata,
             record.result,
             record.error,
+            record.superseded_by_checkpoint_id,
+            record.superseded_at,
         )
         return _agent_run_from_row(_required_row(row, "agent run insert"))
 
@@ -1484,6 +1528,12 @@ def _agent_run_sqlite_values(record: AgentRunRecord) -> tuple[object, ...]:
         _json_to_sql(record.metadata),
         _json_to_sql(record.result),
         record.error,
+        record.superseded_by_checkpoint_id,
+        (
+            None
+            if record.superseded_at is None
+            else _datetime_to_json(record.superseded_at)
+        ),
     )
 
 
@@ -1500,6 +1550,16 @@ def _agent_run_from_sqlite_row(row: sqlite3.Row) -> AgentRunRecord:
         metadata=_json_object_from_sql(row["metadata"], context="agent run metadata"),
         result=_json_object_from_sql(row["result"], context="agent run result"),
         error=_sqlite_optional_str(row, "error", context="agent run"),
+        superseded_by_checkpoint_id=_sqlite_optional_str(
+            row,
+            "superseded_by_checkpoint_id",
+            context="agent run",
+        ),
+        superseded_at=_sqlite_optional_datetime(
+            row,
+            "superseded_at",
+            context="agent run",
+        ),
     )
 
 
@@ -1613,6 +1673,16 @@ def _agent_run_from_row(row: dict[str, object]) -> AgentRunRecord:
         metadata=_required_json_object(row, "metadata", context="agent run row"),
         result=_required_json_object(row, "result", context="agent run row"),
         error=_optional_str(row, "error", context="agent run row"),
+        superseded_by_checkpoint_id=_optional_str(
+            row,
+            "superseded_by_checkpoint_id",
+            context="agent run row",
+        ),
+        superseded_at=_optional_datetime(
+            row,
+            "superseded_at",
+            context="agent run row",
+        ),
     )
 
 
@@ -1708,6 +1778,12 @@ def _agent_run_to_payload(record: AgentRunRecord) -> JSONObject:
         "metadata": record.metadata,
         "result": record.result,
         "error": record.error,
+        "superseded_by_checkpoint_id": record.superseded_by_checkpoint_id,
+        "superseded_at": (
+            None
+            if record.superseded_at is None
+            else _datetime_to_json(record.superseded_at)
+        ),
     }
 
 
@@ -1750,6 +1826,16 @@ def _agent_run_from_payload(payload: JSONObject) -> AgentRunRecord:
             context="agent run payload",
         ),
         error=_optional_payload_str(payload, "error", context="agent run payload"),
+        superseded_by_checkpoint_id=_optional_payload_str(
+            payload,
+            "superseded_by_checkpoint_id",
+            context="agent run payload",
+        ),
+        superseded_at=_optional_payload_datetime(
+            payload,
+            "superseded_at",
+            context="agent run payload",
+        ),
     )
 
 

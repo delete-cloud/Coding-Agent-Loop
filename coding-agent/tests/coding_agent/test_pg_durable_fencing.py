@@ -53,6 +53,7 @@ class FakePGConnection:
         self.checkpoint_meta_row: dict[str, object] | None = {
             "meta": {"session_id": "session-a"}
         }
+        self.agent_runs: dict[str, dict[str, object]] = {}
         self.topics: dict[str, dict[str, object]] = {}
         self.topic_anchors: list[dict[str, object]] = []
         self.topic_recall_links: list[dict[str, object]] = []
@@ -77,6 +78,19 @@ class FakePGConnection:
                 "fencing_token": args[3],
             }
             return "UPDATE 1"
+        if "UPDATE agent_runs" in query and "superseded_at IS NULL" in query:
+            session_id = cast(str, args[0])
+            checkpoint_created_at = cast(datetime, args[1])
+            checkpoint_id = cast(str, args[2])
+            for run in self.agent_runs.values():
+                if (
+                    run["session_id"] == session_id
+                    and cast(datetime, run["started_at"]) > checkpoint_created_at
+                    and run["superseded_at"] is None
+                ):
+                    run["superseded_by_checkpoint_id"] = checkpoint_id
+                    run["superseded_at"] = datetime.now(UTC)
+            return "UPDATE"
         if "INSERT INTO session_tapes" in query:
             session_id = cast(str, args[0])
             tape_id = cast(str, args[1])
@@ -669,6 +683,38 @@ async def test_pg_durable_restore_reconciles_topic_projection_with_checkpoint() 
     pool.connection.session_tape_by_session["session-a"] = "tape-a"
     pool.connection.session_by_tape["tape-a"] = "session-a"
     pool.connection.checkpoint_meta_row = {"meta": {"session_id": "session-a"}}
+    pool.connection.agent_runs = {
+        "run-before": {
+            "session_id": "session-a",
+            "started_at": checkpoint_created_at - timedelta(seconds=1),
+            "superseded_by_checkpoint_id": None,
+            "superseded_at": None,
+        },
+        "run-at-boundary": {
+            "session_id": "session-a",
+            "started_at": checkpoint_created_at,
+            "superseded_by_checkpoint_id": None,
+            "superseded_at": None,
+        },
+        "run-after": {
+            "session_id": "session-a",
+            "started_at": checkpoint_created_at + timedelta(seconds=1),
+            "superseded_by_checkpoint_id": None,
+            "superseded_at": None,
+        },
+        "run-already-superseded": {
+            "session_id": "session-a",
+            "started_at": checkpoint_created_at + timedelta(seconds=2),
+            "superseded_by_checkpoint_id": "checkpoint-original",
+            "superseded_at": checkpoint_created_at + timedelta(seconds=3),
+        },
+        "run-other-session": {
+            "session_id": "session-b",
+            "started_at": checkpoint_created_at + timedelta(seconds=1),
+            "superseded_by_checkpoint_id": None,
+            "superseded_at": None,
+        },
+    }
     pool.connection.topics = {
         "topic-keep": {
             "topic_id": "topic-keep",
@@ -810,6 +856,20 @@ async def test_pg_durable_restore_reconciles_topic_projection_with_checkpoint() 
         }
     ]
     assert set(pool.connection.topic_costs) == {"topic-other"}
+    assert pool.connection.agent_runs["run-before"]["superseded_at"] is None
+    assert pool.connection.agent_runs["run-at-boundary"]["superseded_at"] is None
+    assert (
+        pool.connection.agent_runs["run-after"]["superseded_by_checkpoint_id"]
+        == "checkpoint-keep"
+    )
+    assert pool.connection.agent_runs["run-after"]["superseded_at"] is not None
+    assert (
+        pool.connection.agent_runs["run-already-superseded"][
+            "superseded_by_checkpoint_id"
+        ]
+        == "checkpoint-original"
+    )
+    assert pool.connection.agent_runs["run-other-session"]["superseded_at"] is None
 
 
 @pytest.mark.asyncio

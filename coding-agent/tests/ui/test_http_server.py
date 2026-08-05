@@ -4769,8 +4769,17 @@ class TestPromptStreaming:
             lease_seconds=30,
         )
         assert claim is not None
+        superseded_run = replace(
+            run,
+            run_id="superseded-run",
+            started_at=run.started_at + timedelta(seconds=1),
+            superseded_by_checkpoint_id="checkpoint-1",
+            superseded_at=run.started_at + timedelta(seconds=2),
+        )
+        store.runs[superseded_run.run_id] = superseded_run
 
         response = await client.get(f"/sessions/{session_id}/runs")
+        audit_response = await client.get(f"/runs/{superseded_run.run_id}")
 
         assert response.status_code == 200
         payload = response.json()
@@ -4778,6 +4787,8 @@ class TestPromptStreaming:
         assert [item["run_id"] for item in payload["runs"]] == [run.run_id]
         assert payload["runs"][0]["metadata"]["worker_id"] == "worker-1"
         assert "claim_token_hash" not in payload["runs"][0]["metadata"]
+        assert audit_response.status_code == 200
+        assert audit_response.json()["run_id"] == superseded_run.run_id
 
     async def test_external_worker_workers_endpoint_reports_running_and_stale_workers(
         self, client, tmp_path: Path
@@ -7700,6 +7711,71 @@ class TestRemoteResultPublicationContract:
             == "Tool activity: shell_command: uv run pytest tests/foo.py -q"
         )
 
+    async def test_session_result_ignores_superseded_runtime_run(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        session_id = "result-active-timeline"
+        register_session(
+            session_id,
+            default_run_target=_local_run_target(Path.cwd()),
+            tape_id="empty-active-timeline-tape",
+        )
+        store = FakeExternalWorkerRuntimeStore()
+        active_run = AgentRunRecord(
+            run_id="run-active",
+            session_id=session_id,
+            tape_id="empty-active-timeline-tape",
+            parent_run_id=None,
+            agent_id=None,
+            status="completed",
+            started_at=datetime(2026, 1, 2, 3, 4, 5),
+            ended_at=datetime(2026, 1, 2, 3, 5, 0),
+        )
+        superseded_run = replace(
+            active_run,
+            run_id="run-superseded",
+            started_at=datetime(2026, 1, 2, 3, 6, 0),
+            ended_at=datetime(2026, 1, 2, 3, 7, 0),
+            superseded_by_checkpoint_id="checkpoint-1",
+            superseded_at=datetime(2026, 1, 2, 3, 8, 0),
+        )
+        store.runs = {
+            active_run.run_id: active_run,
+            superseded_run.run_id: superseded_run,
+        }
+        store.events = [
+            RuntimeEventRecord(
+                sequence=1,
+                event_id="event-active-text",
+                run_id=active_run.run_id,
+                event_kind="wire.StreamDelta",
+                payload={
+                    "message_type": "StreamDelta",
+                    "message": {"content": "Restored answer.", "role": "assistant"},
+                },
+                created_at=datetime(2026, 1, 2, 3, 4, 30),
+            ),
+            RuntimeEventRecord(
+                sequence=2,
+                event_id="event-superseded-text",
+                run_id=superseded_run.run_id,
+                event_kind="wire.StreamDelta",
+                payload={
+                    "message_type": "StreamDelta",
+                    "message": {"content": "Rolled back answer.", "role": "assistant"},
+                },
+                created_at=datetime(2026, 1, 2, 3, 6, 30),
+            ),
+        ]
+        session_manager.configure_runtime_store(store)
+
+        response = await client.get(f"/sessions/{session_id}/result")
+
+        assert response.status_code == 200
+        assert response.json()["turn_id"] == active_run.run_id
+        assert response.json()["final_answer"] == "Restored answer."
+
     async def test_session_result_includes_recorded_failure_details(
         self, client: AsyncClient
     ) -> None:
@@ -10466,6 +10542,116 @@ class TestCheckpointEndpoints:
             "session_id": session_id,
             "checkpoint_id": "cp-http-restore",
         }
+
+    async def test_restore_checkpoint_reconciles_summary_and_result_active_run(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        session_id = "restore-active-run-session"
+        session = register_session(session_id, tape_id="restore-active-run-tape")
+        active_run = AgentRunRecord(
+            run_id="run-active",
+            session_id=session_id,
+            tape_id=session.tape_id,
+            parent_run_id=None,
+            agent_id=None,
+            status="completed",
+            started_at=datetime(2026, 1, 2, 3, 4, 0),
+            ended_at=datetime(2026, 1, 2, 3, 5, 0),
+        )
+        superseded_run = replace(
+            active_run,
+            run_id="run-superseded",
+            started_at=datetime(2026, 1, 2, 3, 6, 0),
+            ended_at=datetime(2026, 1, 2, 3, 7, 0),
+            superseded_by_checkpoint_id="checkpoint-1",
+            superseded_at=datetime(2026, 1, 2, 3, 8, 0),
+        )
+        runtime_store = FakeExternalWorkerRuntimeStore()
+        runtime_store.runs = {
+            active_run.run_id: active_run,
+            superseded_run.run_id: superseded_run,
+        }
+        runtime_store.events = [
+            RuntimeEventRecord(
+                sequence=1,
+                event_id="event-active",
+                run_id=active_run.run_id,
+                event_kind="wire.StreamDelta",
+                payload={
+                    "message_type": "StreamDelta",
+                    "message": {"content": "Restored answer.", "role": "assistant"},
+                },
+                created_at=datetime(2026, 1, 2, 3, 4, 30),
+            ),
+            RuntimeEventRecord(
+                sequence=2,
+                event_id="event-superseded",
+                run_id=superseded_run.run_id,
+                event_kind="wire.StreamDelta",
+                payload={
+                    "message_type": "StreamDelta",
+                    "message": {
+                        "content": "Rolled back answer.",
+                        "role": "assistant",
+                    },
+                },
+                created_at=datetime(2026, 1, 2, 3, 6, 30),
+            ),
+        ]
+        session.current_turn_id = superseded_run.run_id
+        session_manager.configure_runtime_store(runtime_store)
+
+        async def fake_restore(restored_session, checkpoint_id: str) -> None:
+            assert restored_session is session
+            assert checkpoint_id == "checkpoint-1"
+
+        monkeypatch.setattr(
+            session_manager,
+            "_runtime_checkpoint_restore_service",
+            SimpleNamespace(restore=fake_restore),
+        )
+
+        restore_response = await client.post(
+            f"/sessions/{session_id}/checkpoints/checkpoint-1/restore"
+        )
+        summary_response = await client.get(f"/sessions/{session_id}")
+        result_response = await client.get(f"/sessions/{session_id}/result")
+
+        assert restore_response.status_code == 200
+        assert summary_response.json()["turn_id"] == active_run.run_id
+        assert result_response.json()["turn_id"] == active_run.run_id
+        assert result_response.json()["final_answer"] == "Restored answer."
+
+        new_run = replace(
+            active_run,
+            run_id="run-after-restore",
+            started_at=datetime(2026, 1, 2, 3, 9, 0),
+            ended_at=datetime(2026, 1, 2, 3, 10, 0),
+        )
+        runtime_store.runs[new_run.run_id] = new_run
+        runtime_store.events.append(
+            RuntimeEventRecord(
+                sequence=3,
+                event_id="event-after-restore",
+                run_id=new_run.run_id,
+                event_kind="wire.StreamDelta",
+                payload={
+                    "message_type": "StreamDelta",
+                    "message": {"content": "New answer.", "role": "assistant"},
+                },
+                created_at=datetime(2026, 1, 2, 3, 9, 30),
+            )
+        )
+        session.current_turn_id = new_run.run_id
+
+        new_summary = await client.get(f"/sessions/{session_id}")
+        new_result = await client.get(f"/sessions/{session_id}/result")
+
+        assert new_summary.json()["turn_id"] == new_run.run_id
+        assert new_result.json()["turn_id"] == new_run.run_id
+        assert new_result.json()["final_answer"] == "New answer."
 
     async def test_restore_checkpoint_returns_409_for_active_turn(self, client):
         session_id = "restore-busy-session"

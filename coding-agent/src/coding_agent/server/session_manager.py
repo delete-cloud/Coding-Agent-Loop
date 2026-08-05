@@ -1112,12 +1112,7 @@ class SessionManager:
         self._runtime_checkpoint_restore_orchestration = (
             RuntimeCheckpointRestoreOrchestrationService(
                 admission=self._runtime_maintenance_admission,
-                restore=lambda session, checkpoint_id: (
-                    self._runtime_checkpoint_restore_service.restore(
-                        session,
-                        checkpoint_id,
-                    )
-                ),
+                restore=self._restore_checkpoint,
             )
         )
         self._runtime_checkpoint_query_service = RuntimeCheckpointQueryService(
@@ -1679,6 +1674,14 @@ class SessionManager:
 
     async def list_runtime_runs(self, session_id: str) -> list[AgentRunRecord]:
         return await self._runtime_control_services.queries().list_runtime_runs(
+            session_id
+        )
+
+    async def list_active_runtime_runs(
+        self,
+        session_id: str,
+    ) -> list[AgentRunRecord]:
+        return await self._runtime_control_services.queries().list_active_runtime_runs(
             session_id
         )
 
@@ -2946,6 +2949,16 @@ class SessionManager:
 
     async def _restore_checkpoint(self, session: Session, checkpoint_id: str) -> None:
         await self._runtime_checkpoint_restore_service.restore(session, checkpoint_id)
+        latest_active_run = (
+            None
+            if self._runtime_store is None
+            else await self._runtime_control_services.queries().latest_runtime_run(
+                session.id
+            )
+        )
+        session.current_turn_id = (
+            None if latest_active_run is None else latest_active_run.run_id
+        )
 
     async def _restore_checkpoint_durable_state(
         self,
