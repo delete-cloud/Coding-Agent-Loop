@@ -28,6 +28,7 @@ class FakeDelegate:
         self.renew_owner_leases_event = asyncio.Event()
         self.release_owned_sessions_called = False
         self.close_called = False
+        self.active_runtime_run_requests = []
 
     async def _persist_session_async(self, session) -> None:
         self.persisted.append(session)
@@ -51,6 +52,10 @@ class FakeDelegate:
 
     async def close(self) -> None:
         self.close_called = True
+
+    async def list_active_runtime_runs(self, session_id: str):
+        self.active_runtime_run_requests.append(session_id)
+        return [SimpleNamespace(run_id="run-active")]
 
 
 async def test_server_backed_local_cli_attach_runtime_uses_session_binding_delegate() -> (
@@ -99,6 +104,17 @@ async def test_server_backed_local_cli_delegates_owner_acquire() -> None:
     await manager.acquire_session_owner("session-1")
 
     assert delegate.owner_acquires == ["session-1"]
+
+
+async def test_server_backed_local_cli_delegates_active_runtime_runs() -> None:
+    manager = object.__new__(ServerBackedLocalCliSessionManager)
+    delegate = FakeDelegate()
+    manager._delegate = delegate
+
+    runs = await manager.list_active_runtime_runs("session-1")
+
+    assert [run.run_id for run in runs] == ["run-active"]
+    assert delegate.active_runtime_run_requests == ["session-1"]
 
 
 async def test_server_backed_local_cli_releases_owner_leases_before_close() -> None:

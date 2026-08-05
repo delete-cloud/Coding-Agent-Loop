@@ -180,6 +180,42 @@ async def test_runtime_query_service_reports_resume_metadata() -> None:
 
 
 @pytest.mark.asyncio
+async def test_runtime_query_service_separates_active_timeline_from_audit_runs() -> (
+    None
+):
+    store = RecordingRuntimeQueryStore()
+    store.runs.extend(
+        [
+            _run(
+                "run-active",
+                status="completed",
+                started_at=datetime(2026, 5, 19, 11, 0, tzinfo=UTC),
+            ),
+            _run(
+                "run-superseded",
+                status="completed",
+                started_at=datetime(2026, 5, 19, 12, 0, tzinfo=UTC),
+                superseded_by_checkpoint_id="cp-restore",
+                superseded_at=datetime(2026, 5, 19, 13, 0, tzinfo=UTC),
+            ),
+        ]
+    )
+
+    service = RuntimeQueryService(store)
+
+    assert [run.run_id for run in await service.list_runtime_runs("session-1")] == [
+        "run-active",
+        "run-superseded",
+    ]
+    assert [
+        run.run_id for run in await service.list_active_runtime_runs("session-1")
+    ] == ["run-active"]
+    latest = await service.latest_runtime_run("session-1")
+    assert latest is not None
+    assert latest.run_id == "run-active"
+
+
+@pytest.mark.asyncio
 async def test_runtime_query_service_marks_active_run_not_resumable() -> None:
     store = RecordingRuntimeQueryStore()
     store.runs.append(
@@ -272,6 +308,8 @@ def _run(
     *,
     status: str,
     started_at: datetime,
+    superseded_by_checkpoint_id: str | None = None,
+    superseded_at: datetime | None = None,
 ) -> AgentRunRecord:
     return AgentRunRecord(
         run_id=run_id,
@@ -283,6 +321,8 @@ def _run(
         started_at=started_at,
         metadata={},
         result={},
+        superseded_by_checkpoint_id=superseded_by_checkpoint_id,
+        superseded_at=superseded_at,
     )
 
 

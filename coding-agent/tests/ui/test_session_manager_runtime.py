@@ -118,6 +118,65 @@ def _external_worker_run_target() -> RunTarget:
     )
 
 
+@pytest.mark.asyncio
+async def test_restore_durable_state_persists_reconciled_current_turn() -> None:
+    manager = SessionManager(store=InMemorySessionStore())
+    session_id = await manager.create_session()
+    session = manager.get_session(session_id)
+    session.tape_id = "tape-1"
+    checkpoint_created_at = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    active_run = AgentRunRecord(
+        run_id="run-active",
+        session_id=session_id,
+        tape_id=session.tape_id,
+        parent_run_id=None,
+        agent_id=None,
+        status="completed",
+        started_at=checkpoint_created_at,
+    )
+    stale_run = AgentRunRecord(
+        run_id="run-stale",
+        session_id=session_id,
+        tape_id=session.tape_id,
+        parent_run_id=None,
+        agent_id=None,
+        status="completed",
+        started_at=checkpoint_created_at + timedelta(seconds=1),
+    )
+
+    class RuntimeStore:
+        async def list_agent_runs(self, requested_session_id: str):
+            assert requested_session_id == session_id
+            return [active_run, stale_run]
+
+    persisted_payloads: list[dict[str, Any]] = []
+
+    class DurableStore:
+        async def restore_checkpoint_state(self, authority, snapshot, payload):
+            del authority, snapshot
+            persisted_payloads.append(payload)
+
+    manager.configure_runtime_store(cast(Any, RuntimeStore()))
+    manager._local_durable_store = cast(Any, DurableStore())
+    manager._owner_authority_for_session = cast(Any, lambda _: object())
+    session.current_turn_id = stale_run.run_id
+
+    await manager._restore_checkpoint_durable_state(
+        session,
+        types.SimpleNamespace(
+            meta=types.SimpleNamespace(created_at=checkpoint_created_at)
+        ),
+    )
+
+    assert session.current_turn_id == active_run.run_id
+    assert persisted_payloads[0]["turn_id"] == active_run.run_id
+    restored_session = type(session).from_store_data(persisted_payloads[0])
+    assert restored_session.current_turn_id == active_run.run_id
+    legacy_payload = dict(persisted_payloads[0])
+    legacy_payload.pop("turn_id")
+    assert type(session).from_store_data(legacy_payload).current_turn_id is None
+
+
 def test_selected_topic_store_returns_fenced_sqlite_store_for_local_durable_bundle(
     tmp_path: Path,
 ) -> None:

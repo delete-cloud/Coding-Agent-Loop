@@ -1958,6 +1958,90 @@ describe("P2 race guards", () => {
     vi.restoreAllMocks();
   });
 
+  it("rebuilds messages from the active run list after checkpoint restore", async () => {
+    const active = session("session-restore-active-0001", "model-restore", {
+      checkpoint_count: 1,
+    });
+    const checkpoint = {
+      checkpoint_id: "cp-active",
+      tape_id: "tape-active",
+      session_id: active.session_id,
+      entry_count: 1,
+      window_start: 0,
+      created_at: "2026-06-12T00:00:00Z",
+      label: "active-boundary",
+    };
+    let runsCalls = 0;
+
+    const displayEvent = (runId: string, content: string) => ({
+      source_event_id: `${runId}-event`,
+      run_id: runId,
+      sequence: 1,
+      display_kind: "assistant_text_delta",
+      payload: { content, role: "assistant" },
+      created_at: "2026-06-12T00:01:00Z",
+    });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/sessions")) {
+          return Promise.resolve(jsonResponse({ sessions: [active] }));
+        }
+        if (url.endsWith(`/sessions/${active.session_id}/checkpoints`)) {
+          return Promise.resolve(jsonResponse({ checkpoints: [checkpoint] }));
+        }
+        if (url.endsWith(`/sessions/${active.session_id}/checkpoints/cp-active/restore`)) {
+          return Promise.resolve(jsonResponse({}));
+        }
+        if (url.endsWith(`/sessions/${active.session_id}`)) {
+          return Promise.resolve(jsonResponse(active));
+        }
+        if (url.endsWith(`/sessions/${active.session_id}/runs`)) {
+          runsCalls += 1;
+          return Promise.resolve(
+            jsonResponse({
+              session_id: active.session_id,
+              runs: runsCalls === 1
+                ? [{ run_id: "run-active" }, { run_id: "run-rolled-back" }]
+                : [{ run_id: "run-active" }],
+            }),
+          );
+        }
+        if (url.includes("/runs/run-active/display-events?")) {
+          return Promise.resolve(
+            jsonResponse({
+              run_id: "run-active",
+              events: [displayEvent("run-active", "Restored answer")],
+            }),
+          );
+        }
+        if (url.includes("/runs/run-rolled-back/display-events?")) {
+          return Promise.resolve(
+            jsonResponse({
+              run_id: "run-rolled-back",
+              events: [displayEvent("run-rolled-back", "Rolled back answer")],
+            }),
+          );
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /model-restore/i }));
+    expect(await screen.findByText("Rolled back answer")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Toggle checkpoints panel" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Restore" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm restore" }));
+
+    await waitFor(() => expect(runsCalls).toBe(2));
+    await waitFor(() => expect(screen.queryByText("Rolled back answer")).toBeNull());
+    expect(screen.getByText("Restored answer")).toBeTruthy();
+  });
+
   it("applies only the active session's diff when fetches resolve out of order", async () => {
     const first = session("session-diff-0001", "model-diff-a");
     const second = session("session-diff-0002", "model-diff-b");

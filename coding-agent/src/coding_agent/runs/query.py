@@ -93,8 +93,18 @@ class RuntimeQueryService:
     async def list_runtime_runs(self, session_id: str) -> list[AgentRunRecord]:
         return await self._require_store().list_agent_runs(session_id)
 
+    async def list_active_runtime_runs(
+        self,
+        session_id: str,
+    ) -> list[AgentRunRecord]:
+        return [
+            run
+            for run in await self.list_runtime_runs(session_id)
+            if run.superseded_at is None
+        ]
+
     async def latest_runtime_run(self, session_id: str) -> AgentRunRecord | None:
-        runs = await self.list_runtime_runs(session_id)
+        runs = await self.list_active_runtime_runs(session_id)
         if not runs:
             return None
         return max(runs, key=lambda run: (run.started_at, run.run_id))
@@ -194,7 +204,7 @@ class RuntimeQueryService:
             )
             interrupted_runs = [
                 run
-                for run in await self.list_runtime_runs(session.id)
+                for run in await self.list_active_runtime_runs(session.id)
                 if run.status == "interrupted"
             ]
             if interrupted_runs:

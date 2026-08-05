@@ -231,6 +231,12 @@ class HarnessManager:
             SimpleNamespace(run_id="run-1", started_at=datetime(2026, 1, 1, tzinfo=UTC))
         ]
 
+    async def list_active_runtime_runs(self, session_id: str) -> list[Any]:
+        self.calls.append(("list_active_runtime_runs", session_id))
+        return [
+            SimpleNamespace(run_id="run-1", started_at=datetime(2026, 1, 1, tzinfo=UTC))
+        ]
+
     async def list_sessions_async(self) -> list[str]:
         self.calls.append(("list_sessions_async", None))
         return ["sess-compat"]

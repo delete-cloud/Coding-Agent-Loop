@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime
 
 import pytest
@@ -11,6 +12,50 @@ from coding_agent.stores.runtime_store import (
     RunMessageSnapshotRecord,
     SQLiteRuntimeStore,
 )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["requested", "expired"])
+async def test_sqlite_runtime_store_claim_skips_superseded_run(
+    tmp_path,
+    status: str,
+) -> None:
+    store = SQLiteRuntimeStore(tmp_path / "runtime.sqlite3")
+    started_at = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    for run_id, run_started_at, superseded_at in (
+        ("run-superseded", started_at, started_at),
+        ("run-active", started_at.replace(minute=1), None),
+    ):
+        await store.create_agent_run(
+            AgentRunRecord(
+                run_id=run_id,
+                session_id="session-1",
+                tape_id="tape-1",
+                parent_run_id=None,
+                agent_id=None,
+                status=status,
+                started_at=run_started_at,
+                metadata={
+                    "executor_ref_kind": "local_attached",
+                    "executor_kind": "local_cli",
+                },
+                result={},
+                error=None,
+                superseded_by_checkpoint_id=(
+                    "checkpoint-1" if superseded_at is not None else None
+                ),
+                superseded_at=superseded_at,
+            )
+        )
+
+    claimed = await store.claim_attached_executor_run(
+        session_id="session-1",
+        executor_kind="local_cli",
+        claim_metadata={"executor_id": "executor-1"},
+    )
+
+    assert claimed is not None
+    assert claimed.run_id == "run-active"
 
 
 @pytest.mark.asyncio
@@ -148,3 +193,61 @@ async def test_sqlite_runtime_store_normalizes_blank_error_to_none(tmp_path) -> 
     loaded = await store.load_agent_run("run-1")
     assert loaded is not None
     assert loaded.error is None
+
+
+@pytest.mark.asyncio
+async def test_sqlite_runtime_store_round_trips_run_supersession(tmp_path) -> None:
+    path = tmp_path / "runtime.sqlite3"
+    store = SQLiteRuntimeStore(path)
+    superseded_at = datetime(2026, 6, 1, 13, 0, tzinfo=UTC)
+
+    await store.create_agent_run(
+        AgentRunRecord(
+            run_id="run-superseded",
+            session_id="session-1",
+            tape_id="tape-1",
+            parent_run_id=None,
+            agent_id=None,
+            status="completed",
+            started_at=datetime(2026, 6, 1, 12, 0, tzinfo=UTC),
+            superseded_by_checkpoint_id="checkpoint-1",
+            superseded_at=superseded_at,
+        )
+    )
+
+    loaded = await SQLiteRuntimeStore(path).load_agent_run("run-superseded")
+
+    assert loaded is not None
+    assert loaded.superseded_by_checkpoint_id == "checkpoint-1"
+    assert loaded.superseded_at == superseded_at
+
+
+def test_sqlite_runtime_store_migrates_legacy_agent_runs_schema(tmp_path) -> None:
+    path = tmp_path / "runtime.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE agent_runs (
+                run_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                tape_id TEXT,
+                parent_run_id TEXT,
+                agent_id TEXT,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                ended_at TEXT,
+                metadata TEXT NOT NULL,
+                result TEXT NOT NULL,
+                error TEXT
+            )
+            """
+        )
+
+    SQLiteRuntimeStore(path)
+
+    with sqlite3.connect(path) as connection:
+        columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(agent_runs)").fetchall()
+        }
+    assert {"superseded_by_checkpoint_id", "superseded_at"} <= columns

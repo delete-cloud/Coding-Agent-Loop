@@ -4195,7 +4195,7 @@ async def list_session_runtime_runs(
     del request
     _ = await _get_visible_session(session_id, auth_context)
     try:
-        records = await session_manager.list_runtime_runs(session_id)
+        records = await session_manager.list_active_runtime_runs(session_id)
     except RuntimeError as exc:
         raise HTTPException(
             status_code=404,
@@ -6491,7 +6491,7 @@ async def _session_result_runtime_run_id(session: Session) -> str | None:
     if session.current_turn_id is not None:
         return session.current_turn_id
     try:
-        runs = await session_manager.list_runtime_runs(session.id)
+        runs = await session_manager.list_active_runtime_runs(session.id)
     except RuntimeError:
         return None
     if not runs:

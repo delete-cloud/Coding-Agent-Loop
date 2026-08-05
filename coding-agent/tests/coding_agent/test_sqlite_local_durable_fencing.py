@@ -12,7 +12,11 @@ from agentkit.checkpoint import CheckpointService
 from agentkit.errors import ConfigError
 from coding_agent.stores.durable_local import SQLiteLocalDurableStore
 from coding_agent.stores.local import local_sqlite_path, local_sqlite_storage_config
-from coding_agent.stores.runtime_store import AgentRunRecord, RuntimeEventRecord
+from coding_agent.stores.runtime_store import (
+    AgentRunRecord,
+    RuntimeEventRecord,
+    SQLiteRuntimeStore,
+)
 from coding_agent.server.session_manager import SessionManager
 from coding_agent.server.stores.session_owner_store import (
     SQLiteSessionOwnerStore,
@@ -52,6 +56,57 @@ class FakeTapeStore:
     async def load(self, tape_id: str) -> list[dict[str, object]]:
         del tape_id
         return []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["requested", "expired"])
+async def test_sqlite_durable_claim_skips_superseded_run(
+    tmp_path: Path,
+    status: str,
+) -> None:
+    store = SQLiteLocalDurableStore(tmp_path / "local.sqlite3")
+    owner = await store.acquire_owner("session-a", "owner-a")
+    await store.save_session(
+        owner,
+        {"id": "session-a", "session_id": "session-a", "tape_id": "tape-a"},
+    )
+    started_at = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    for run_id, run_started_at, superseded_at in (
+        ("run-superseded", started_at, started_at),
+        ("run-active", started_at + timedelta(minutes=1), None),
+    ):
+        await store.create_agent_run(
+            owner,
+            AgentRunRecord(
+                run_id=run_id,
+                session_id="session-a",
+                tape_id="tape-a",
+                parent_run_id=None,
+                agent_id=None,
+                status=status,
+                started_at=run_started_at,
+                metadata={
+                    "executor_ref_kind": "local_attached",
+                    "executor_kind": "local_cli",
+                },
+                result={},
+                error=None,
+                superseded_by_checkpoint_id=(
+                    "checkpoint-1" if superseded_at is not None else None
+                ),
+                superseded_at=superseded_at,
+            ),
+        )
+
+    claimed = await store.claim_attached_executor_run(
+        {"session-a": owner},
+        session_id="session-a",
+        executor_kind="local_cli",
+        claim_metadata={"worker_id": "worker-1"},
+    )
+
+    assert claimed is not None
+    assert claimed.run_id == "run-active"
 
 
 @pytest.mark.asyncio
@@ -984,6 +1039,35 @@ async def test_sqlite_local_durable_store_restores_checkpoint_state_atomically(
             plugin_states={},
         ),
     )
+    for run_id, started_at in (
+        ("run-before", created_at - timedelta(seconds=1)),
+        ("run-at-boundary", created_at),
+        ("run-after", created_at + timedelta(seconds=1)),
+    ):
+        await store.create_agent_run(
+            owner,
+            AgentRunRecord(
+                run_id=run_id,
+                session_id="session-a",
+                tape_id="tape-a",
+                parent_run_id=None,
+                agent_id=None,
+                status="completed",
+                started_at=started_at,
+                metadata={},
+                result={"content": run_id},
+            ),
+        )
+    await store.append_runtime_event(
+        owner,
+        RuntimeEventRecord(
+            event_id="event-after",
+            run_id="run-after",
+            event_kind="wire.StreamDelta",
+            payload={"content": "must remain available for audit"},
+            created_at=created_at + timedelta(seconds=2),
+        ),
+    )
     await store.save_checkpoint(
         owner,
         CheckpointSnapshot(
@@ -1224,6 +1308,18 @@ async def test_sqlite_local_durable_store_restores_checkpoint_state_atomically(
     }
     assert await store.load_checkpoint("checkpoint-keep") is not None
     assert await store.load_checkpoint("checkpoint-drop") is None
+    runtime_reader = SQLiteRuntimeStore(tmp_path / "local.sqlite3")
+    runs = {
+        run.run_id: run for run in await runtime_reader.list_agent_runs("session-a")
+    }
+    assert runs["run-before"].superseded_at is None
+    assert runs["run-at-boundary"].superseded_at is None
+    assert runs["run-after"].superseded_by_checkpoint_id == "checkpoint-keep"
+    assert runs["run-after"].superseded_at is not None
+    assert [
+        event.event_id
+        for event in await runtime_reader.replay_runtime_events("run-after")
+    ] == ["event-after"]
     topic_reader = SQLiteTopicStore(tmp_path / "local.sqlite3")
     restored_topics = await topic_reader.list_topics(tape_id="tape-a")
     topics_by_id = {topic.topic_id: topic for topic in restored_topics}

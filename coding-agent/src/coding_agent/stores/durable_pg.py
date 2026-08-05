@@ -56,6 +56,15 @@ class PGDurableStore:
     DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()
     """
     _DELETE_SESSION_SQL = "DELETE FROM agent_http_sessions WHERE session_id = $1"
+    _SUPERSEDE_RUNS_AFTER_CHECKPOINT_SQL = """
+    UPDATE agent_runs
+    SET superseded_by_checkpoint_id = $3,
+        superseded_at = NOW(),
+        updated_at = NOW()
+    WHERE session_id = $1
+      AND started_at > $2
+      AND superseded_at IS NULL
+    """
     _SELECT_SESSION_FOR_UPDATE_SQL = """
     SELECT payload
     FROM agent_http_sessions
@@ -131,9 +140,13 @@ class PGDurableStore:
         ended_at,
         metadata,
         result,
-        error
+        error,
+        superseded_by_checkpoint_id,
+        superseded_at
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11)
+    VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11, $12, $13
+    )
     ON CONFLICT (run_id)
     DO UPDATE SET
         tape_id = EXCLUDED.tape_id,
@@ -446,6 +459,8 @@ class PGDurableStore:
                 record.metadata,
                 record.result,
                 record.error,
+                record.superseded_by_checkpoint_id,
+                record.superseded_at,
             )
             return _agent_run_from_row(
                 _required_owned_row(row, "run target belongs to another owner")
@@ -714,6 +729,12 @@ class PGDurableStore:
                 self._UPSERT_SESSION_SQL,
                 authority.session_id,
                 session_payload,
+            )
+            await connection.execute(
+                self._SUPERSEDE_RUNS_AFTER_CHECKPOINT_SQL,
+                authority.session_id,
+                meta.created_at,
+                meta.checkpoint_id,
             )
             await self._reconcile_topics_after_checkpoint_restore(
                 connection,

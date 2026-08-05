@@ -669,3 +669,31 @@ patterns:
   - message
   - run
   - persistence
+- id: PM-0027
+  title: Reconcile runtime projections on checkpoint restore
+  path: patterns/PM-0027-reconcile-runtime-projections-on-checkpoint-restore.md
+  severity: high
+  confidence: high
+  subsystems:
+  - checkpoint
+  - runtime
+  - ui
+  related_files:
+  - src/coding_agent/stores/durable_local.py
+  - src/coding_agent/stores/durable_pg.py
+  - src/coding_agent/stores/runtime_store.py
+  - src/coding_agent/runs/query.py
+  - src/coding_agent/server/http_server.py
+  - src/coding_agent/acp/server.py
+  - webui/app/src/App.tsx
+  - webui/app/src/lib/api.ts
+  related_commits: []
+  keywords:
+  - checkpoint
+  - restore
+  - runtime
+  - projection
+  - superseded
+  - timeline
+  - replay
+  - audit

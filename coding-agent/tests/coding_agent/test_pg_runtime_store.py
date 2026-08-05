@@ -45,6 +45,8 @@ class FakePool:
                 metadata,
                 result,
                 error,
+                superseded_by_checkpoint_id,
+                superseded_at,
             ) = args
             row = {
                 "run_id": run_id,
@@ -58,6 +60,8 @@ class FakePool:
                 "metadata": metadata,
                 "result": result,
                 "error": error,
+                "superseded_by_checkpoint_id": superseded_by_checkpoint_id,
+                "superseded_at": superseded_at,
             }
             self.agent_runs[cast(str, run_id)] = row
             return row
@@ -75,6 +79,11 @@ class FakePool:
                 }:
                     continue
                 if metadata.get("executor_kind") != executor_kind:
+                    continue
+                if (
+                    "superseded_at IS NULL" in query
+                    and row["superseded_at"] is not None
+                ):
                     continue
                 row["status"] = "claimed"
                 row["metadata"] = {
@@ -306,6 +315,33 @@ async def test_create_update_load_and_list_agent_runs(
 
 
 @pytest.mark.asyncio
+async def test_load_agent_run_round_trips_supersession_fields(
+    store: PGRuntimeStore,
+) -> None:
+    superseded_at = _dt(10)
+    await store.create_agent_run(
+        AgentRunRecord(
+            run_id="run-superseded",
+            session_id="session-1",
+            tape_id="tape-1",
+            parent_run_id=None,
+            agent_id=None,
+            status="completed",
+            started_at=_dt(9),
+            ended_at=_dt(9, 30),
+            superseded_by_checkpoint_id="checkpoint-1",
+            superseded_at=superseded_at,
+        )
+    )
+
+    loaded = await store.load_agent_run("run-superseded")
+
+    assert loaded is not None
+    assert loaded.superseded_by_checkpoint_id == "checkpoint-1"
+    assert loaded.superseded_at == superseded_at
+
+
+@pytest.mark.asyncio
 async def test_claim_external_worker_run_marks_requested_run_claimed(
     store: PGRuntimeStore,
 ) -> None:
@@ -384,6 +420,49 @@ async def test_claim_attached_executor_run_accepts_local_attached_binding(
     assert claimed.status == "claimed"
     assert claimed.metadata["executor_ref_kind"] == "local_attached"
     assert claimed.metadata["worker_id"] == "worker-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["requested", "expired"])
+async def test_claim_attached_executor_run_skips_superseded_run(
+    store: PGRuntimeStore,
+    status: str,
+) -> None:
+    started_at = _dt(9)
+    for run_id, run_started_at, superseded_at in (
+        ("run-superseded", started_at, _dt(10)),
+        ("run-active", _dt(9, 1), None),
+    ):
+        await store.create_agent_run(
+            AgentRunRecord(
+                run_id=run_id,
+                session_id="session-local-attached",
+                tape_id=None,
+                parent_run_id=None,
+                agent_id=None,
+                status=status,
+                started_at=run_started_at,
+                metadata={
+                    "executor_ref_kind": "local_attached",
+                    "executor_kind": "local_cli",
+                },
+                result={},
+                error=None,
+                superseded_by_checkpoint_id=(
+                    "checkpoint-1" if superseded_at is not None else None
+                ),
+                superseded_at=superseded_at,
+            )
+        )
+
+    claimed = await store.claim_attached_executor_run(
+        session_id="session-local-attached",
+        executor_kind="local_cli",
+        claim_metadata={"worker_id": "worker-1"},
+    )
+
+    assert claimed is not None
+    assert claimed.run_id == "run-active"
 
 
 @pytest.mark.asyncio
@@ -607,3 +686,5 @@ async def test_pg_runtime_store_schema_initialization_is_idempotent(
     assert "CREATE TABLE IF NOT EXISTS runtime_events" in schema_calls[0]
     assert "CREATE TABLE IF NOT EXISTS run_message_snapshots" in schema_calls[0]
     assert "CREATE TABLE IF NOT EXISTS agent_interactions" in schema_calls[0]
+    assert "ADD COLUMN IF NOT EXISTS superseded_by_checkpoint_id" in schema_calls[0]
+    assert "ADD COLUMN IF NOT EXISTS superseded_at" in schema_calls[0]

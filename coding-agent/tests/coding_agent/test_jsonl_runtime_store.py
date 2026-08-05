@@ -18,6 +18,7 @@ async def test_jsonl_runtime_store_persists_runs_and_events_across_instances(
     root = tmp_path / "runtime"
     first = JSONLRuntimeStore(root)
     started_at = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+    superseded_at = datetime(2026, 6, 1, 12, 2, tzinfo=UTC)
 
     await first.create_agent_run(
         AgentRunRecord(
@@ -31,6 +32,8 @@ async def test_jsonl_runtime_store_persists_runs_and_events_across_instances(
             metadata={"execution_placement": "server_embedded"},
             result={},
             error=None,
+            superseded_by_checkpoint_id="checkpoint-1",
+            superseded_at=superseded_at,
         )
     )
     await first.update_agent_run(
@@ -61,6 +64,8 @@ async def test_jsonl_runtime_store_persists_runs_and_events_across_instances(
     assert loaded is not None
     assert loaded.status == "completed"
     assert loaded.metadata["resume_from_run_id"] == "run-0"
+    assert loaded.superseded_by_checkpoint_id == "checkpoint-1"
+    assert loaded.superseded_at == superseded_at
     assert event.sequence == 1
     assert [item.event_id for item in events] == ["event-1"]
     assert events[0].payload["resume_from_run_id"] == "run-0"

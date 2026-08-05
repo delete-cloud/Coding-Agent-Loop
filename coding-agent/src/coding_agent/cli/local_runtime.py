@@ -81,6 +81,8 @@ class LocalCliSessionManager(Protocol):
 
     async def list_runtime_runs(self, session_id: str) -> Any: ...
 
+    async def list_active_runtime_runs(self, session_id: str) -> Any: ...
+
     async def list_checkpoints(self, session_id: str) -> Any: ...
 
     async def session_resume_metadata(self, session_id: str) -> dict[str, object]: ...
@@ -232,6 +234,9 @@ class ServerBackedLocalCliSessionManager:
 
     async def list_runtime_runs(self, session_id: str) -> Any:
         return await self._delegate.list_runtime_runs(session_id)
+
+    async def list_active_runtime_runs(self, session_id: str) -> Any:
+        return await self._delegate.list_active_runtime_runs(session_id)
 
     async def list_checkpoints(self, session_id: str) -> Any:
         return await self._delegate.list_checkpoints(session_id)
