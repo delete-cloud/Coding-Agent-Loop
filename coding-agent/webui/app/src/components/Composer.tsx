@@ -16,7 +16,7 @@ export default function Composer({
   streaming,
 }: Props) {
   return (
-    <footer className="flex min-w-0 items-end gap-2 border-t border-border bg-surface-1 px-2 py-3 sm:gap-3 sm:px-4">
+    <footer className="flex min-w-0 shrink-0 items-end gap-2 border-t border-border bg-surface-1 px-2 py-3 sm:gap-3 sm:px-4">
       <textarea
         className="min-h-[48px] min-w-0 flex-1 resize-none rounded-xl border border-border bg-surface-0 px-3 py-2.5 text-sm text-fg placeholder:text-muted focus:border-accent focus:outline-none sm:px-4"
         placeholder="Ask the agent…  (Enter to send, Shift+Enter for newline)"
