@@ -41,6 +41,18 @@ describe("ResultPanel", () => {
     expect(failure.className).toContain("text-err");
   });
 
+  it("bounds and scrolls the expanded details below the header", () => {
+    render(<ResultPanel result={result()} />);
+
+    const toggle = screen.getByRole("button", { name: /session result/i });
+    const details = screen.getByRole("region", { name: "Session result details" });
+
+    expect(details.className).toContain("max-h-[40vh]");
+    expect(details.className).toContain("overflow-y-auto");
+    expect(details.tabIndex).toBe(0);
+    expect(details.contains(toggle)).toBe(false);
+  });
+
   it("collapses and expands via the header", () => {
     render(<ResultPanel result={result()} />);
 

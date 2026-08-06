@@ -44,7 +44,12 @@ export default function ResultPanel({ result }: Props) {
           </span>
         </button>
         {open && (
-          <div className="mt-2 flex flex-col gap-2 pb-1">
+          <div
+            className="mt-2 flex max-h-[40vh] flex-col gap-2 overflow-y-auto pb-1"
+            role="region"
+            aria-label="Session result details"
+            tabIndex={0}
+          >
             {result.final_answer?.trim() && (
               <div className="prose-webui text-sm leading-relaxed">
                 <ReactMarkdown>{result.final_answer}</ReactMarkdown>
