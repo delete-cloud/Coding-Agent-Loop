@@ -249,10 +249,13 @@ npx --yes @devcontainers/cli@0.88.0 exec --workspace-folder . \
   .devcontainer/verify.sh
 ```
 
-Opening the container runs `.devcontainer/setup.sh`, which fails immediately if
-the tool versions or non-root requirement are wrong, then installs dependencies
-with `uv sync --all-extras` and
+Creating the container runs `.devcontainer/setup.sh` through
+`postCreateCommand`. The script fails immediately if the tool versions or
+non-root requirement are wrong, then installs dependencies with
+`uv sync --all-extras` and
 `corepack pnpm@10.23.0 --dir webui/app install --frozen-lockfile`.
+After dependency files change in an existing container, rerun
+`.devcontainer/setup.sh` before continuing development.
 `.devcontainer/verify.sh` repeats that setup check and runs the CLI tests plus
 the WebUI test, typecheck, and production-build gates. Run other development
 commands through `devcontainer exec` as well, for example:
