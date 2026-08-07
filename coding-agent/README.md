@@ -225,6 +225,58 @@ For more detail, see:
 
 ## Development
 
+### Raft host runtime with a development container
+
+The supported split keeps the Raft-managed Codex runtime on the host, where it
+edits the host checkout, while dependency installation, lint, typecheck, build,
+and test commands run inside the development container. This provides a
+version-pinned, rebuildable primary toolchain, but not bit-for-bit
+reproducibility because Debian packages resolve from the configured `apt`
+repositories at image build time. It is **not** a host security isolation
+boundary.
+
+The image fixes Python at 3.12.11, Node.js at 20.19.5, `uv` at 0.12.1, Ruff at
+0.15.12, and pnpm at exactly 10.23.0. It runs commands as the non-root `vscode`
+user. The Dev Container configuration limits the single workspace to 2 CPUs,
+1536 MiB of memory, and 512 PIDs.
+
+From the `coding-agent` checkout on a host with Docker and Node.js available,
+use the pinned Dev Containers CLI release:
+
+```bash
+npx --yes @devcontainers/cli@0.88.0 up --workspace-folder .
+npx --yes @devcontainers/cli@0.88.0 exec --workspace-folder . \
+  .devcontainer/verify.sh
+```
+
+Creating the container runs `.devcontainer/setup.sh` through
+`postCreateCommand`. The script fails immediately if the tool versions or
+non-root requirement are wrong, then installs dependencies with
+`uv sync --all-extras` and
+`corepack pnpm@10.23.0 --dir webui/app install --frozen-lockfile`.
+After dependency files change in an existing container, rerun
+`.devcontainer/setup.sh` before continuing development.
+`.devcontainer/verify.sh` repeats that setup check and runs the CLI tests plus
+the WebUI test, typecheck, and production-build gates. Run other development
+commands through `devcontainer exec` as well, for example:
+
+```bash
+npx --yes @devcontainers/cli@0.88.0 exec --workspace-folder . \
+  ruff check src tests
+```
+
+The configuration defines no separate credential mounts and does not expose a
+Docker or Podman socket or request privileged or host-network mode. It does
+bind-mount the full checkout, so every file and credential stored in that
+checkout is visible inside the container. Keep provider credentials and
+authenticated Git configuration outside the checkout; they belong to the Raft
+host runtime. Do not add those credentials or sockets to this container:
+vm-23's system Docker daemon backs K3s through cri-dockerd.
+
+Real Docker workspace-provider end-to-end testing requires a separately
+reviewed rootless Docker/Podman endpoint and remains deferred. Paseo integration
+is also deferred.
+
 ```bash
 uv run pytest tests/ -v
 uv run ruff format src/
