@@ -20,6 +20,7 @@ COPY --from=ruff /ruff /usr/local/bin/ruff
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
         build-essential \
+        bubblewrap \
         ca-certificates \
         git \
     && rm -rf /var/lib/apt/lists/* \
