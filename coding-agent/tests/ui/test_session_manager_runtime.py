@@ -1869,6 +1869,9 @@ async def test_resume_external_executor_session_requests_linked_run() -> None:
     )
     runtime_store.created.append(previous_run)
 
+    session = await manager.get_session_async(session_id)
+    original_tape_id = session.tape_id
+
     with pytest.raises(RemoteLoopOwnershipRetired, match="in-process"):
         await manager.resume_session(
             session_id,
@@ -1878,6 +1881,27 @@ async def test_resume_external_executor_session_requests_linked_run() -> None:
 
     assert [run.run_id for run in runtime_store.created] == [previous_run.run_id]
     assert runtime_store.updated == []
+    session_after = await manager.get_session_async(session_id)
+    assert session_after.tape_id == original_tape_id
+    assert await manager._tape_store.load(previous_run.tape_id) == []
+
+
+@pytest.mark.asyncio
+async def test_run_agent_loads_attached_session_through_async_store_guard() -> None:
+    manager = SessionManager(store=InMemorySessionStore())
+    session_id = await manager.create_session(
+        default_run_target=_external_worker_run_target()
+    )
+    manager._session_cache.pop(session_id, None)
+
+    def fail_sync_get(missing_session_id: str) -> object:
+        raise AssertionError(
+            f"run_agent must not call sync get_session: {missing_session_id}"
+        )
+
+    manager.get_session = fail_sync_get  # type: ignore[method-assign]
+    with pytest.raises(RemoteLoopOwnershipRetired, match="in-process"):
+        await manager.run_agent(session_id, "hello")
 
 
 @pytest.mark.asyncio

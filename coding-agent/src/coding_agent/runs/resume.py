@@ -9,6 +9,7 @@ from typing import Protocol, cast
 from agentkit.checkpoint.models import CheckpointMeta
 from agentkit.tape.models import Anchor
 
+from coding_agent.runs.attached_executor import RemoteLoopOwnershipRetired
 from coding_agent.stores.runtime_store import (
     AgentRunRecord,
     JSONObject,
@@ -142,6 +143,8 @@ class RuntimeResumeOrchestrationService:
             "cancelling",
         }:
             raise RuntimeError("turn already in progress")
+        if self.session_is_attached(session):
+            raise RemoteLoopOwnershipRetired()
 
         previous_run = await self.latest_runtime_run(session.id)
         if previous_run is None:
@@ -167,14 +170,6 @@ class RuntimeResumeOrchestrationService:
             prompt=prompt,
         )
         run_id = self.run_id_factory()
-        if self.session_is_attached(session):
-            return await self.request_attached(
-                session.id,
-                resume_prompt,
-                run_id,
-                resume_context,
-            )
-
         record = await self.run_local(
             session.id,
             resume_prompt,

@@ -3418,7 +3418,7 @@ class SessionManager:
         run_id_override: str | None = None,
         resume_context: SessionResumeContext | None = None,
     ) -> None:
-        if _session_is_attached(self.get_session(session_id)):
+        if _session_is_attached(await self.get_session_async(session_id)):
             raise RemoteLoopOwnershipRetired()
 
         async def run_admitted_turn(session: object) -> None:
