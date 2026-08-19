@@ -31,6 +31,11 @@ add bee capabilities. From P2, a cutover session must reject Bee mutations of
 its tape or unit of work; that isolation is a contract test. Bee keeps writing
 its legacy stores.
 
+P2's first store cut marks Bee as legacy-only. It does not migrate Bee schema
+and does not implement cutover-session rejection of Bee tape or unit-of-work
+mutations. That isolation contract (`test_cutover_session_rejects_bee_*`)
+remains deferred. Bee module docs are documentary only.
+
 Cut remote loop ownership. The agent loop, mailbox, continuation, and
 authoritative store writer live only in the local daemon. Remote execution is a
 `CommandExecutor` implementation: tools and workspace only. It is not a loop

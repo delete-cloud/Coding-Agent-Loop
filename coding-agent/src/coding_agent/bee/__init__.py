@@ -1,3 +1,9 @@
+"""Bee workflow package (legacy).
+
+Bee keeps writing its own stores. Harness UoW isolation for cutover sessions
+is deferred; this package is not migrated into the coding-agent fact source.
+"""
+
 from importlib import import_module
 from typing import Any
 

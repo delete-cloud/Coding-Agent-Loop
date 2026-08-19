@@ -1,4 +1,4 @@
-"""Generic Bee workflow task manifest records.
+"""Generic Bee workflow task manifest records (legacy).
 
 Bee is a Coding Agent product/runtime profile over Topic. This module only
 parses sanitized task intent; it does not execute nodes or bypass action safety.

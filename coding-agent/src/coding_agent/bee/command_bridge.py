@@ -1,4 +1,4 @@
-"""Bee command intent bridge.
+"""Bee command intent bridge (legacy).
 
 This module resolves Bee node command references to workspace-declared intents.
 It does not execute commands or grant policy permissions.

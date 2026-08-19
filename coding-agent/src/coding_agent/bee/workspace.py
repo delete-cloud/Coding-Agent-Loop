@@ -1,4 +1,4 @@
-"""Workspace-local Bee template discovery.
+"""Workspace-local Bee template discovery (legacy).
 
 This module treats `.bee` files as sanitized product artifacts. It does not
 execute commands or create durable runs.
