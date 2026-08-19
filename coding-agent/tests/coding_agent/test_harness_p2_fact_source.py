@@ -735,8 +735,10 @@ async def test_cross_host_key_expired_contract_lands_at_p2(
     assert expired.value.cursor_seq == "0"
 
     floor_replay = await store.replay_from_retention_floor(SESSION_ID)
-    assert [event.event_id for event in floor_replay] == ["event-three"]
-    assert floor_replay[0].session_seq == "3"
+    assert [event.event_id for event in floor_replay.events] == ["event-three"]
+    assert floor_replay.events[0].session_seq == "3"
+    assert floor_replay.raw_cursor.session_id == SESSION_ID
+    assert floor_replay.raw_cursor.session_seq == "3"
 
     with pytest.raises(CursorEpochMismatchError):
         await store.accept_trusted_handoff(
@@ -862,6 +864,79 @@ async def test_receipt_generation_and_effect_status_can_advance(
     assert receipt is not None
     assert receipt.generation == "2"
     assert receipt.payload == {"op": "advance"}
+
+
+@pytest.mark.asyncio
+async def test_uow_allows_optional_mailbox_effect_and_receipt(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store, owner = await _open_store(store_kind, tmp_path)
+    unit = AuthoritativeUnitOfWork(
+        event=_event("bare"),
+        session_state={**SESSION_PAYLOAD, "turn": "bare"},
+    )
+
+    committed = await store.commit_authoritative_uow(owner, unit)
+
+    assert committed.event.session_seq == "1"
+    assert await store.load_event_record(SESSION_ID, "1") is not None
+    assert await store.load_mailbox_slot(SESSION_ID, "mailbox-main") is None
+    assert await store.load_effect_slot(SESSION_ID, "effect-1") is None
+    assert await store.load_receipt_slot(SESSION_ID, "receipt-1") is None
+
+
+@pytest.mark.asyncio
+async def test_empty_floor_replay_returns_resumable_cursor(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store, owner = await _open_store(store_kind, tmp_path)
+    first = await store.commit_authoritative_uow(owner, _unit("one"))
+    await store.raise_retention_floor(owner, "2")
+
+    replay = await store.replay_from_retention_floor(SESSION_ID)
+    assert replay.events == []
+    assert replay.raw_cursor.session_id == SESSION_ID
+    assert replay.raw_cursor.session_seq == first.event.session_seq
+    assert replay.complete is True
+
+    second = await store.commit_authoritative_uow(owner, _unit("two"))
+    continued = await store.replay_raw(replay.raw_cursor)
+    assert [event.event_id for event in continued] == ["event-two"]
+    assert continued[0].session_seq == second.event.session_seq
+
+
+@pytest.mark.asyncio
+async def test_truncated_floor_replay_cursor_lands_on_page_tail(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store, owner = await _open_store(store_kind, tmp_path)
+    for index in range(1, 11):
+        await store.commit_authoritative_uow(owner, _unit(str(index)))
+
+    page = await store.replay_from_retention_floor(SESSION_ID, limit=3)
+    assert [event.event_id for event in page.events] == [
+        "event-1",
+        "event-2",
+        "event-3",
+    ]
+    fact = await store.load_session_fact_source(SESSION_ID)
+    assert fact is not None
+    assert fact.session_seq == "10"
+    assert page.raw_cursor.session_id == SESSION_ID
+    assert page.raw_cursor.session_seq == "3"
+    assert page.raw_cursor.session_seq != fact.session_seq
+    assert page.complete is False
+
+    continued = await store.replay_raw(page.raw_cursor)
+    assert [event.event_id for event in continued] == [
+        f"event-{index}" for index in range(4, 11)
+    ]
+    full = await store.replay_from_retention_floor(SESSION_ID, limit=20)
+    assert full.complete is True
+    assert full.raw_cursor.session_seq == "10"
 
 
 def test_adr_0076_remains_proposed_and_0051_0053_remain_accepted() -> None:

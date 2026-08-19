@@ -35,6 +35,7 @@ from coding_agent.stores.runtime_store import (
     OperationReceiptSlot,
     ProjectionCursor,
     RawCursor,
+    RetentionFloorReplay,
     RuntimeEventRecord,
     RunMessageSnapshotRecord,
     SQLiteRuntimeStore,
@@ -1610,87 +1611,90 @@ class SQLiteLocalDurableStore:
                     """,
                     _agent_run_sqlite_values(unit.run_state),
                 )
-            connection.execute(
-                """
-                INSERT INTO session_mailbox_slots (
-                    session_id, slot_id, lane, disposition, payload
-                )
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(session_id, slot_id)
-                DO UPDATE SET
-                    lane = excluded.lane,
-                    disposition = excluded.disposition,
-                    payload = excluded.payload
-                """,
-                (
-                    authority.session_id,
-                    unit.mailbox.slot_id,
-                    unit.mailbox.lane,
-                    unit.mailbox.disposition,
-                    _json_to_sql(unit.mailbox.payload),
-                ),
-            )
-            existing_effect = connection.execute(
-                """
-                SELECT status FROM session_effect_slots
-                WHERE session_id = ? AND effect_id = ?
-                """,
-                (authority.session_id, unit.effect.effect_id),
-            ).fetchone()
-            if existing_effect is None or effect_status_may_replace(
-                current=existing_effect["status"],
-                incoming=unit.effect.status,
-            ):
+            if unit.mailbox is not None:
                 connection.execute(
                     """
-                    INSERT INTO session_effect_slots (
-                        session_id, effect_id, status, payload
+                    INSERT INTO session_mailbox_slots (
+                        session_id, slot_id, lane, disposition, payload
                     )
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(session_id, effect_id)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(session_id, slot_id)
                     DO UPDATE SET
-                        status = excluded.status,
+                        lane = excluded.lane,
+                        disposition = excluded.disposition,
                         payload = excluded.payload
                     """,
                     (
                         authority.session_id,
-                        unit.effect.effect_id,
-                        unit.effect.status,
-                        _json_to_sql(unit.effect.payload),
+                        unit.mailbox.slot_id,
+                        unit.mailbox.lane,
+                        unit.mailbox.disposition,
+                        _json_to_sql(unit.mailbox.payload),
                     ),
                 )
-            existing_receipt = connection.execute(
-                """
-                SELECT generation FROM session_receipt_slots
-                WHERE session_id = ? AND receipt_id = ?
-                """,
-                (authority.session_id, unit.receipt.receipt_id),
-            ).fetchone()
-            if existing_receipt is None or receipt_generation_may_replace(
-                current=existing_receipt["generation"],
-                incoming=unit.receipt.generation,
-            ):
-                connection.execute(
+            if unit.effect is not None:
+                existing_effect = connection.execute(
                     """
-                    INSERT INTO session_receipt_slots (
-                        session_id, receipt_id, generation, payload,
-                        compensation_effect_id
-                    )
-                    VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT(session_id, receipt_id)
-                    DO UPDATE SET
-                        generation = excluded.generation,
-                        payload = excluded.payload,
-                        compensation_effect_id = excluded.compensation_effect_id
+                    SELECT status FROM session_effect_slots
+                    WHERE session_id = ? AND effect_id = ?
                     """,
-                    (
-                        authority.session_id,
-                        unit.receipt.receipt_id,
-                        unit.receipt.generation,
-                        _json_to_sql(unit.receipt.payload),
-                        unit.receipt.compensation_effect_id,
-                    ),
-                )
+                    (authority.session_id, unit.effect.effect_id),
+                ).fetchone()
+                if existing_effect is None or effect_status_may_replace(
+                    current=existing_effect["status"],
+                    incoming=unit.effect.status,
+                ):
+                    connection.execute(
+                        """
+                        INSERT INTO session_effect_slots (
+                            session_id, effect_id, status, payload
+                        )
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(session_id, effect_id)
+                        DO UPDATE SET
+                            status = excluded.status,
+                            payload = excluded.payload
+                        """,
+                        (
+                            authority.session_id,
+                            unit.effect.effect_id,
+                            unit.effect.status,
+                            _json_to_sql(unit.effect.payload),
+                        ),
+                    )
+            if unit.receipt is not None:
+                existing_receipt = connection.execute(
+                    """
+                    SELECT generation FROM session_receipt_slots
+                    WHERE session_id = ? AND receipt_id = ?
+                    """,
+                    (authority.session_id, unit.receipt.receipt_id),
+                ).fetchone()
+                if existing_receipt is None or receipt_generation_may_replace(
+                    current=existing_receipt["generation"],
+                    incoming=unit.receipt.generation,
+                ):
+                    connection.execute(
+                        """
+                        INSERT INTO session_receipt_slots (
+                            session_id, receipt_id, generation, payload,
+                            compensation_effect_id
+                        )
+                        VALUES (?, ?, ?, ?, ?)
+                        ON CONFLICT(session_id, receipt_id)
+                        DO UPDATE SET
+                            generation = excluded.generation,
+                            payload = excluded.payload,
+                            compensation_effect_id = excluded.compensation_effect_id
+                        """,
+                        (
+                            authority.session_id,
+                            unit.receipt.receipt_id,
+                            unit.receipt.generation,
+                            _json_to_sql(unit.receipt.payload),
+                            unit.receipt.compensation_effect_id,
+                        ),
+                    )
             event = EventRecord(
                 event_id=unit.event.event_id,
                 session_id=authority.session_id,
@@ -1849,13 +1853,19 @@ class SQLiteLocalDurableStore:
         session_id: str,
         *,
         limit: int = 1000,
-    ) -> list[EventRecord]:
+    ) -> RetentionFloorReplay:
         _require_non_empty("session_id", session_id)
         _require_positive_int("limit", limit)
         with self._lock, self._connect() as connection:
             fact = self._load_fact_source_row(connection, session_id)
             if fact is None:
-                return []
+                return RetentionFloorReplay.from_page(
+                    session_id=session_id,
+                    events=[],
+                    limit=limit,
+                    retention_floor=0,
+                    head_session_seq="0",
+                )
             rows = connection.execute(
                 """
                 SELECT * FROM session_event_records
@@ -1865,7 +1875,14 @@ class SQLiteLocalDurableStore:
                 """,
                 (session_id, fact.retention_floor_int, limit),
             ).fetchall()
-        return [_event_record_from_sqlite_row(row) for row in rows]
+            events = [_event_record_from_sqlite_row(row) for row in rows]
+            return RetentionFloorReplay.from_page(
+                session_id=session_id,
+                events=events,
+                limit=limit,
+                retention_floor=fact.retention_floor_int,
+                head_session_seq=fact.state.session_seq,
+            )
 
     async def replay_projection(
         self,

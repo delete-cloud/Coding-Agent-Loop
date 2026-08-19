@@ -573,6 +573,16 @@ class RuntimeTurnObservationState:
 class RuntimeTurnSessionState:
     persist_session: RuntimeTurnStatePersister
     now: Callable[[], datetime] = _utc_now
+    persist_begin: RuntimeTurnStatePersister | None = None
+    persist_finalize: RuntimeTurnStatePersister | None = None
+
+    async def _persist(
+        self,
+        session: RuntimeTurnStateSession,
+        persist: RuntimeTurnStatePersister | None,
+    ) -> None:
+        writer = persist if persist is not None else self.persist_session
+        await writer(session)
 
     async def begin(
         self,
@@ -586,7 +596,7 @@ class RuntimeTurnSessionState:
         started_at = self.now()
         session.current_turn_id = run_id
         session.last_failure_details = None
-        await self.persist_session(session)
+        await self._persist(session, self.persist_begin)
         return started_at
 
     async def finalize(
@@ -607,7 +617,7 @@ class RuntimeTurnSessionState:
             if session.turn_status == "running":
                 session.turn_status = "idle"
         session.last_activity = self.now()
-        await self.persist_session(session)
+        await self._persist(session, self.persist_finalize)
 
 
 @dataclass(frozen=True)

@@ -77,6 +77,8 @@ class RuntimeTurnService:
     bind_root_run_identity: RuntimeRootRunIdentityBinder
     bind_subagent_message_publisher: RuntimeSubagentMessagePublisherBinder
     start_observation: RuntimeObservationStarter
+    persist_turn_started: RuntimeTurnStatePersister | None = None
+    persist_turn_settled: RuntimeTurnStatePersister | None = None
     complete_observation: RuntimeObservationCompleter | None = None
     log_turn_exception: Callable[[str], None] | None = None
     fatal_error_types: tuple[type[BaseException], ...] = ()
@@ -92,7 +94,9 @@ class RuntimeTurnService:
         current_task: object | None = None,
     ) -> None:
         turn_session_state = RuntimeTurnSessionState(
-            persist_session=self.persist_session
+            persist_session=self.persist_session,
+            persist_begin=self.persist_turn_started,
+            persist_finalize=self.persist_turn_settled,
         )
         started_at = await turn_session_state.begin(session, run_id=run_id)
         turn_run = RuntimeTurnRunTracker(
