@@ -1,4 +1,4 @@
-"""Generic Bee template pack manifest loading.
+"""Generic Bee template pack manifest loading (legacy).
 
 Template pack discovery is static metadata loading. It validates manifests and
 workspace templates but never executes commands or creates durable Bee runs.

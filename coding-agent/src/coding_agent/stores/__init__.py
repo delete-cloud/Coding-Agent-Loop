@@ -1,6 +1,7 @@
 """Durable store contracts for coding agent product state."""
 
 from .runtime import (
+    HarnessFactSourceStore,
     RuntimeCheckpointStore,
     RuntimeEventStore,
     RuntimeInteractionStore,
@@ -11,6 +12,7 @@ from .runtime import (
 )
 
 __all__ = [
+    "HarnessFactSourceStore",
     "RuntimeCheckpointStore",
     "RuntimeEventStore",
     "RuntimeInteractionStore",

@@ -4,6 +4,7 @@ import json
 import sqlite3
 import threading
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, cast
@@ -24,16 +25,43 @@ from agentkit.storage.sqlite import (
 from coding_agent.stores.runtime_store import (
     AgentRunRecord,
     AgentInteractionRecord,
+    AuthoritativeCommit,
+    AuthoritativeUnitOfWork,
+    CursorEpochMismatchError,
+    DEFAULT_HARNESS_PROJECTION,
+    EffectLedgerSlot,
+    EventRecord,
+    MailboxDispositionSlot,
+    OperationReceiptSlot,
+    ProjectionCursor,
+    RawCursor,
     RuntimeEventRecord,
     RunMessageSnapshotRecord,
     SQLiteRuntimeStore,
+    SessionFactSourceState,
+    TrustedHandoff,
     _agent_run_from_sqlite_row,
     _agent_run_sqlite_values,
     _datetime_to_json,
     _interaction_from_sqlite_row,
     _interaction_sqlite_values,
+    _json_object_from_sql,
     _json_to_sql,
     _runtime_event_from_sqlite_row,
+    _sqlite_optional_int,
+    _sqlite_optional_str,
+    _sqlite_required_datetime,
+    _sqlite_required_int,
+    _require_positive_int,
+    _sqlite_required_str,
+    assert_projection_binding,
+    assert_raw_cursor_not_expired,
+    assert_trusted_handoff,
+    effect_status_may_replace,
+    format_u64,
+    parse_u64,
+    receipt_generation_may_replace,
+    stored_trusted_handoff,
 )
 from coding_agent.topics.store import (
     SQLiteTopicStore,
@@ -86,6 +114,53 @@ class SQLiteLocalDurableStore:
     CREATE INDEX IF NOT EXISTS session_tapes_tape_id_idx
         ON session_tapes (tape_id);
     """
+    _HARNESS_FACT_SOURCE_SCHEMA_SQL: Final[str] = """
+    CREATE TABLE IF NOT EXISTS session_fact_source (
+        session_id TEXT PRIMARY KEY,
+        session_seq INTEGER NOT NULL,
+        retention_floor INTEGER NOT NULL,
+        projection TEXT NOT NULL,
+        projection_epoch INTEGER NOT NULL,
+        trusted_handoff_seq INTEGER,
+        trusted_handoff_epoch INTEGER,
+        trusted_handoff_projection TEXT,
+        trusted_handoff_payload TEXT,
+        trusted_handoff_accepted_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS session_event_records (
+        session_id TEXT NOT NULL,
+        session_seq INTEGER NOT NULL,
+        event_id TEXT NOT NULL UNIQUE,
+        event_kind TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        projection_epoch INTEGER NOT NULL,
+        PRIMARY KEY (session_id, session_seq)
+    );
+    CREATE TABLE IF NOT EXISTS session_mailbox_slots (
+        session_id TEXT NOT NULL,
+        slot_id TEXT NOT NULL,
+        lane TEXT NOT NULL,
+        disposition TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        PRIMARY KEY (session_id, slot_id)
+    );
+    CREATE TABLE IF NOT EXISTS session_effect_slots (
+        session_id TEXT NOT NULL,
+        effect_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        PRIMARY KEY (session_id, effect_id)
+    );
+    CREATE TABLE IF NOT EXISTS session_receipt_slots (
+        session_id TEXT NOT NULL,
+        receipt_id TEXT NOT NULL,
+        generation TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        compensation_effect_id TEXT,
+        PRIMARY KEY (session_id, receipt_id)
+    );
+    """
 
     def __init__(self, path: Path) -> None:
         self._path = path
@@ -99,6 +174,8 @@ class SQLiteLocalDurableStore:
             SQLiteRuntimeStore._ensure_schema(connection)
             connection.executescript(SQLiteTopicStore._CREATE_SCHEMA_SQL)
             connection.executescript(self._SESSION_TAPES_SCHEMA_SQL)
+            connection.executescript(self._HARNESS_FACT_SOURCE_SCHEMA_SQL)
+            self._ensure_harness_fact_source_columns(connection)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._path, timeout=5.0)
@@ -1324,6 +1401,7 @@ class SQLiteLocalDurableStore:
                 """,
                 (meta.tape_id, authority.session_id, meta.entry_count),
             )
+            self._open_projection_epoch(connection, authority.session_id)
 
     def _reconcile_topics_after_checkpoint_restore(
         self,
@@ -1416,6 +1494,564 @@ class SQLiteLocalDurableStore:
         if not isinstance(session_id, str):
             raise TypeError("checkpoint session_id must be text")
         return session_id
+
+    async def commit_authoritative_uow(
+        self,
+        authority: OwnerAuthority,
+        unit: AuthoritativeUnitOfWork,
+    ) -> AuthoritativeCommit:
+        if unit.event.session_id != authority.session_id:
+            raise SessionOwnershipConflictError("event belongs to another session")
+        _require_json_object("session payload", unit.session_state)
+        if unit.session_state.get("id") != authority.session_id:
+            raise SessionOwnershipConflictError(
+                "session payload belongs to another owner"
+            )
+        payload_session_id = unit.session_state.get("session_id")
+        if (
+            payload_session_id is not None
+            and payload_session_id != authority.session_id
+        ):
+            raise SessionOwnershipConflictError(
+                "session payload belongs to another owner"
+            )
+        tape_id = unit.session_state.get("tape_id")
+        if tape_id is not None and not isinstance(tape_id, str):
+            raise TypeError("session payload tape_id must be a string")
+        if (
+            unit.run_state is not None
+            and unit.run_state.session_id != authority.session_id
+        ):
+            raise SessionOwnershipConflictError("agent run belongs to another session")
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._assert_authority(connection, authority)
+            if tape_id:
+                self._bind_tape(connection, authority.session_id, tape_id)
+            if unit.run_state is not None:
+                if unit.run_state.tape_id is None:
+                    raise SessionOwnershipConflictError(
+                        "run target is not bound to a tape"
+                    )
+                self._assert_tape_belongs_to_session(
+                    connection,
+                    tape_id=unit.run_state.tape_id,
+                    session_id=authority.session_id,
+                )
+            fact = self._ensure_fact_source(connection, authority.session_id)
+            next_seq = fact.session_seq_int + 1
+            connection.execute(
+                """
+                UPDATE session_fact_source
+                SET session_seq = ?
+                WHERE session_id = ?
+                """,
+                (next_seq, authority.session_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO session_event_records (
+                    session_id, session_seq, event_id, event_kind, payload,
+                    created_at, projection_epoch
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    authority.session_id,
+                    next_seq,
+                    unit.event.event_id,
+                    unit.event.event_kind,
+                    _json_to_sql(unit.event.payload),
+                    _datetime_to_json(unit.event.created_at),
+                    fact.projection_epoch_int,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO agent_http_sessions (session_id, payload, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(session_id)
+                DO UPDATE SET payload = excluded.payload,
+                              updated_at = CURRENT_TIMESTAMP
+                """,
+                (authority.session_id, json.dumps(unit.session_state, sort_keys=True)),
+            )
+            if unit.run_state is not None:
+                existing = connection.execute(
+                    "SELECT session_id FROM agent_runs WHERE run_id = ?",
+                    (unit.run_state.run_id,),
+                ).fetchone()
+                if (
+                    existing is not None
+                    and existing["session_id"] != authority.session_id
+                ):
+                    raise SessionOwnershipConflictError(
+                        "agent run target belongs to another session"
+                    )
+                connection.execute(
+                    """
+                    INSERT INTO agent_runs (
+                        run_id, session_id, tape_id, parent_run_id, agent_id, status,
+                        started_at, ended_at, metadata, result, error,
+                        superseded_by_checkpoint_id, superseded_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(run_id)
+                    DO UPDATE SET
+                        tape_id = excluded.tape_id,
+                        parent_run_id = excluded.parent_run_id,
+                        agent_id = excluded.agent_id,
+                        status = excluded.status,
+                        started_at = excluded.started_at,
+                        ended_at = excluded.ended_at,
+                        metadata = excluded.metadata,
+                        result = excluded.result,
+                        error = excluded.error
+                    """,
+                    _agent_run_sqlite_values(unit.run_state),
+                )
+            connection.execute(
+                """
+                INSERT INTO session_mailbox_slots (
+                    session_id, slot_id, lane, disposition, payload
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(session_id, slot_id)
+                DO UPDATE SET
+                    lane = excluded.lane,
+                    disposition = excluded.disposition,
+                    payload = excluded.payload
+                """,
+                (
+                    authority.session_id,
+                    unit.mailbox.slot_id,
+                    unit.mailbox.lane,
+                    unit.mailbox.disposition,
+                    _json_to_sql(unit.mailbox.payload),
+                ),
+            )
+            existing_effect = connection.execute(
+                """
+                SELECT status FROM session_effect_slots
+                WHERE session_id = ? AND effect_id = ?
+                """,
+                (authority.session_id, unit.effect.effect_id),
+            ).fetchone()
+            if existing_effect is None or effect_status_may_replace(
+                current=existing_effect["status"],
+                incoming=unit.effect.status,
+            ):
+                connection.execute(
+                    """
+                    INSERT INTO session_effect_slots (
+                        session_id, effect_id, status, payload
+                    )
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(session_id, effect_id)
+                    DO UPDATE SET
+                        status = excluded.status,
+                        payload = excluded.payload
+                    """,
+                    (
+                        authority.session_id,
+                        unit.effect.effect_id,
+                        unit.effect.status,
+                        _json_to_sql(unit.effect.payload),
+                    ),
+                )
+            existing_receipt = connection.execute(
+                """
+                SELECT generation FROM session_receipt_slots
+                WHERE session_id = ? AND receipt_id = ?
+                """,
+                (authority.session_id, unit.receipt.receipt_id),
+            ).fetchone()
+            if existing_receipt is None or receipt_generation_may_replace(
+                current=existing_receipt["generation"],
+                incoming=unit.receipt.generation,
+            ):
+                connection.execute(
+                    """
+                    INSERT INTO session_receipt_slots (
+                        session_id, receipt_id, generation, payload,
+                        compensation_effect_id
+                    )
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(session_id, receipt_id)
+                    DO UPDATE SET
+                        generation = excluded.generation,
+                        payload = excluded.payload,
+                        compensation_effect_id = excluded.compensation_effect_id
+                    """,
+                    (
+                        authority.session_id,
+                        unit.receipt.receipt_id,
+                        unit.receipt.generation,
+                        _json_to_sql(unit.receipt.payload),
+                        unit.receipt.compensation_effect_id,
+                    ),
+                )
+            event = EventRecord(
+                event_id=unit.event.event_id,
+                session_id=authority.session_id,
+                event_kind=unit.event.event_kind,
+                payload=unit.event.payload,
+                created_at=unit.event.created_at,
+                session_seq=format_u64(next_seq),
+                projection_epoch=format_u64(fact.projection_epoch_int),
+            )
+        return AuthoritativeCommit(
+            event=event,
+            projection=fact.projection,
+            projection_epoch=format_u64(fact.projection_epoch_int),
+            raw_cursor=RawCursor(
+                session_id=authority.session_id,
+                session_seq=format_u64(next_seq),
+            ),
+        )
+
+    async def load_session_fact_source(
+        self,
+        session_id: str,
+    ) -> SessionFactSourceState | None:
+        _require_non_empty("session_id", session_id)
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM session_fact_source WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return _fact_source_from_sqlite_row(row).state
+
+    async def load_event_record(
+        self,
+        session_id: str,
+        session_seq: str,
+    ) -> EventRecord | None:
+        _require_non_empty("session_id", session_id)
+        seq = parse_u64(session_seq, field_name="session_seq")
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM session_event_records
+                WHERE session_id = ? AND session_seq = ?
+                """,
+                (session_id, seq),
+            ).fetchone()
+        if row is None:
+            return None
+        return _event_record_from_sqlite_row(row)
+
+    async def load_mailbox_slot(
+        self,
+        session_id: str,
+        slot_id: str,
+    ) -> MailboxDispositionSlot | None:
+        _require_non_empty("session_id", session_id)
+        _require_non_empty("slot_id", slot_id)
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM session_mailbox_slots
+                WHERE session_id = ? AND slot_id = ?
+                """,
+                (session_id, slot_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return MailboxDispositionSlot(
+            slot_id=_sqlite_required_str(row, "slot_id", context="mailbox slot"),
+            lane=_sqlite_required_str(row, "lane", context="mailbox slot"),
+            disposition=_sqlite_required_str(
+                row, "disposition", context="mailbox slot"
+            ),
+            payload=_json_object_from_sql(row["payload"], context="mailbox slot"),
+        )
+
+    async def load_effect_slot(
+        self,
+        session_id: str,
+        effect_id: str,
+    ) -> EffectLedgerSlot | None:
+        _require_non_empty("session_id", session_id)
+        _require_non_empty("effect_id", effect_id)
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM session_effect_slots
+                WHERE session_id = ? AND effect_id = ?
+                """,
+                (session_id, effect_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return EffectLedgerSlot(
+            effect_id=_sqlite_required_str(row, "effect_id", context="effect slot"),
+            status=_sqlite_required_str(row, "status", context="effect slot"),
+            payload=_json_object_from_sql(row["payload"], context="effect slot"),
+        )
+
+    async def load_receipt_slot(
+        self,
+        session_id: str,
+        receipt_id: str,
+    ) -> OperationReceiptSlot | None:
+        _require_non_empty("session_id", session_id)
+        _require_non_empty("receipt_id", receipt_id)
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM session_receipt_slots
+                WHERE session_id = ? AND receipt_id = ?
+                """,
+                (session_id, receipt_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return OperationReceiptSlot(
+            receipt_id=_sqlite_required_str(row, "receipt_id", context="receipt slot"),
+            generation=_sqlite_required_str(row, "generation", context="receipt slot"),
+            payload=_json_object_from_sql(row["payload"], context="receipt slot"),
+            compensation_effect_id=_sqlite_optional_str(
+                row,
+                "compensation_effect_id",
+                context="receipt slot",
+            ),
+        )
+
+    async def replay_raw(
+        self,
+        cursor: RawCursor,
+        *,
+        limit: int = 1000,
+    ) -> list[EventRecord]:
+        _require_positive_int("limit", limit)
+        with self._lock, self._connect() as connection:
+            fact = self._load_fact_source_row(connection, cursor.session_id)
+            if fact is None:
+                return []
+            assert_raw_cursor_not_expired(cursor, fact.state.retention_floor)
+            after = parse_u64(cursor.session_seq, field_name="session_seq")
+            rows = connection.execute(
+                """
+                SELECT * FROM session_event_records
+                WHERE session_id = ? AND session_seq > ?
+                ORDER BY session_seq
+                LIMIT ?
+                """,
+                (cursor.session_id, after, limit),
+            ).fetchall()
+        return [_event_record_from_sqlite_row(row) for row in rows]
+
+    async def replay_from_retention_floor(
+        self,
+        session_id: str,
+        *,
+        limit: int = 1000,
+    ) -> list[EventRecord]:
+        _require_non_empty("session_id", session_id)
+        _require_positive_int("limit", limit)
+        with self._lock, self._connect() as connection:
+            fact = self._load_fact_source_row(connection, session_id)
+            if fact is None:
+                return []
+            rows = connection.execute(
+                """
+                SELECT * FROM session_event_records
+                WHERE session_id = ? AND session_seq >= ?
+                ORDER BY session_seq
+                LIMIT ?
+                """,
+                (session_id, fact.retention_floor_int, limit),
+            ).fetchall()
+        return [_event_record_from_sqlite_row(row) for row in rows]
+
+    async def replay_projection(
+        self,
+        cursor: ProjectionCursor,
+        *,
+        limit: int = 1000,
+    ) -> list[EventRecord]:
+        _require_positive_int("limit", limit)
+        with self._lock, self._connect() as connection:
+            fact = self._load_fact_source_row(connection, cursor.session_id)
+            if fact is None:
+                raise CursorEpochMismatchError(
+                    f"projection cursor bound to epoch {cursor.epoch}, current is missing"
+                )
+            assert_projection_binding(cursor, fact.state)
+            assert_raw_cursor_not_expired(
+                RawCursor(session_id=cursor.session_id, session_seq=cursor.session_seq),
+                fact.state.retention_floor,
+            )
+            after = parse_u64(cursor.session_seq, field_name="session_seq")
+            epoch = parse_u64(cursor.epoch, field_name="epoch")
+            rows = connection.execute(
+                """
+                SELECT * FROM session_event_records
+                WHERE session_id = ? AND session_seq > ?
+                  AND projection_epoch = ?
+                ORDER BY session_seq
+                LIMIT ?
+                """,
+                (cursor.session_id, after, epoch, limit),
+            ).fetchall()
+        return [_event_record_from_sqlite_row(row) for row in rows]
+
+    async def raise_retention_floor(
+        self,
+        authority: OwnerAuthority,
+        retention_floor: str,
+    ) -> SessionFactSourceState:
+        floor = parse_u64(retention_floor, field_name="retention_floor")
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._assert_authority(connection, authority)
+            fact = self._ensure_fact_source(connection, authority.session_id)
+            if floor < fact.retention_floor_int:
+                raise ValueError("retention_floor cannot move backwards")
+            if floor > fact.session_seq_int + 1:
+                raise ValueError("retention_floor cannot pass the physical log")
+            connection.execute(
+                """
+                UPDATE session_fact_source
+                SET retention_floor = ?
+                WHERE session_id = ?
+                """,
+                (floor, authority.session_id),
+            )
+            updated = self._load_fact_source_row(connection, authority.session_id)
+            if updated is None:
+                raise RuntimeError("failed to reload session fact source")
+        return updated.state
+
+    async def accept_trusted_handoff(
+        self,
+        authority: OwnerAuthority,
+        handoff: TrustedHandoff,
+    ) -> SessionFactSourceState:
+        if handoff.session_id != authority.session_id:
+            raise SessionOwnershipConflictError("handoff belongs to another session")
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._assert_authority(connection, authority)
+            fact = self._load_fact_source_row(connection, authority.session_id)
+            if fact is None:
+                raise CursorEpochMismatchError(
+                    f"trusted handoff bound to epoch {handoff.epoch}, current is missing"
+                )
+            assert_trusted_handoff(handoff, fact.state)
+            accepted_at = _datetime_to_sqlite_text(datetime.now(UTC))
+            connection.execute(
+                """
+                UPDATE session_fact_source
+                SET trusted_handoff_seq = ?,
+                    trusted_handoff_epoch = ?,
+                    trusted_handoff_projection = ?,
+                    trusted_handoff_payload = ?,
+                    trusted_handoff_accepted_at = ?
+                WHERE session_id = ?
+                """,
+                (
+                    parse_u64(handoff.session_seq, field_name="session_seq"),
+                    parse_u64(handoff.epoch, field_name="epoch"),
+                    handoff.projection,
+                    _json_to_sql(handoff.payload),
+                    accepted_at,
+                    authority.session_id,
+                ),
+            )
+            updated = self._load_fact_source_row(connection, authority.session_id)
+            if updated is None:
+                raise RuntimeError("failed to persist trusted handoff")
+        return updated.state
+
+    def _ensure_fact_source(
+        self,
+        connection: sqlite3.Connection,
+        session_id: str,
+    ) -> _SqliteFactSource:
+        existing = self._load_fact_source_row(connection, session_id)
+        if existing is not None:
+            return existing
+        connection.execute(
+            """
+            INSERT INTO session_fact_source (
+                session_id, session_seq, retention_floor, projection, projection_epoch
+            )
+            VALUES (?, 0, 0, ?, 0)
+            """,
+            (session_id, DEFAULT_HARNESS_PROJECTION),
+        )
+        created = self._load_fact_source_row(connection, session_id)
+        if created is None:
+            raise RuntimeError("failed to allocate session fact source")
+        return created
+
+    @classmethod
+    def _ensure_harness_fact_source_columns(
+        cls,
+        connection: sqlite3.Connection,
+    ) -> None:
+        columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(session_fact_source)"
+            ).fetchall()
+        }
+        migrations = (
+            ("trusted_handoff_seq", "INTEGER"),
+            ("trusted_handoff_epoch", "INTEGER"),
+            ("trusted_handoff_projection", "TEXT"),
+            ("trusted_handoff_payload", "TEXT"),
+            ("trusted_handoff_accepted_at", "TEXT"),
+        )
+        for name, decl in migrations:
+            if name not in columns:
+                connection.execute(
+                    f"ALTER TABLE session_fact_source ADD COLUMN {name} {decl}"
+                )
+
+    def _load_fact_source_row(
+        self,
+        connection: sqlite3.Connection,
+        session_id: str,
+    ) -> _SqliteFactSource | None:
+        row = connection.execute(
+            "SELECT * FROM session_fact_source WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return _fact_source_from_sqlite_row(row)
+
+    def _open_projection_epoch(
+        self,
+        connection: sqlite3.Connection,
+        session_id: str,
+    ) -> None:
+        existing = self._load_fact_source_row(connection, session_id)
+        if existing is None:
+            connection.execute(
+                """
+                INSERT INTO session_fact_source (
+                    session_id, session_seq, retention_floor, projection,
+                    projection_epoch
+                )
+                VALUES (?, 0, 0, ?, 1)
+                """,
+                (session_id, DEFAULT_HARNESS_PROJECTION),
+            )
+            return
+        connection.execute(
+            """
+            UPDATE session_fact_source
+            SET projection_epoch = projection_epoch + 1
+            WHERE session_id = ?
+            """,
+            (session_id,),
+        )
 
     def _assert_authority(
         self,
@@ -1565,6 +2201,77 @@ def _row_required_int(row: sqlite3.Row | None, key: str, *, context: str) -> int
     if not isinstance(value, int):
         raise TypeError(f"{context} {key} must be an int")
     return value
+
+
+@dataclass(frozen=True)
+class _SqliteFactSource:
+    state: SessionFactSourceState
+    session_seq_int: int
+    retention_floor_int: int
+    projection_epoch_int: int
+    projection: str
+
+
+def _fact_source_from_sqlite_row(row: sqlite3.Row) -> _SqliteFactSource:
+    session_seq = _sqlite_required_int(row, "session_seq", context="fact source")
+    retention_floor = _sqlite_required_int(
+        row, "retention_floor", context="fact source"
+    )
+    projection_epoch = _sqlite_required_int(
+        row, "projection_epoch", context="fact source"
+    )
+    projection = _sqlite_required_str(row, "projection", context="fact source")
+    session_id = _sqlite_required_str(row, "session_id", context="fact source")
+    raw_handoff_payload = row["trusted_handoff_payload"]
+    handoff_payload = (
+        None
+        if raw_handoff_payload is None
+        else _json_object_from_sql(raw_handoff_payload, context="trusted handoff")
+    )
+    return _SqliteFactSource(
+        state=SessionFactSourceState(
+            session_id=session_id,
+            session_seq=format_u64(session_seq),
+            retention_floor=format_u64(retention_floor),
+            projection=projection,
+            projection_epoch=format_u64(projection_epoch),
+            trusted_handoff=stored_trusted_handoff(
+                session_id=session_id,
+                session_seq=_sqlite_optional_int(
+                    row, "trusted_handoff_seq", context="fact source"
+                ),
+                epoch=_sqlite_optional_int(
+                    row, "trusted_handoff_epoch", context="fact source"
+                ),
+                projection=_sqlite_optional_str(
+                    row, "trusted_handoff_projection", context="fact source"
+                ),
+                payload=handoff_payload,
+            ),
+        ),
+        session_seq_int=session_seq,
+        retention_floor_int=retention_floor,
+        projection_epoch_int=projection_epoch,
+        projection=projection,
+    )
+
+
+def _event_record_from_sqlite_row(row: sqlite3.Row) -> EventRecord:
+    return EventRecord(
+        event_id=_sqlite_required_str(row, "event_id", context="session event"),
+        session_id=_sqlite_required_str(row, "session_id", context="session event"),
+        event_kind=_sqlite_required_str(row, "event_kind", context="session event"),
+        payload=_json_object_from_sql(row["payload"], context="session event"),
+        created_at=_sqlite_required_datetime(
+            row, "created_at", context="session event"
+        ),
+        session_seq=format_u64(
+            _sqlite_required_int(row, "session_seq", context="session event")
+        ),
+        projection_epoch=format_u64(
+            _sqlite_required_int(row, "projection_epoch", context="session event")
+        ),
+    )
 
 
 class FencedSQLiteTapeStore:

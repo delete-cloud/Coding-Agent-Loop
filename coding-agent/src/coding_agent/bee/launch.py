@@ -1,4 +1,4 @@
-"""Durable Bee launch records.
+"""Durable Bee launch records (legacy).
 
 Bee launch records describe how a Bee task was requested. They do not create
 tasks, execute nodes, or grant command execution rights.
