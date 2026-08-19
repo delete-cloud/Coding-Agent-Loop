@@ -42,6 +42,7 @@ from coding_agent.stores.runtime_store import (
     PGRuntimeStore,
     ProjectionCursor,
     RawCursor,
+    RetentionFloorReplay,
     RunMessageSnapshotRecord,
     RuntimeEventRecord,
     SessionFactSourceState,
@@ -1025,47 +1026,50 @@ class PGDurableStore:
                     unit.run_state.superseded_at,
                 )
                 _required_owned_row(run_row, "run target belongs to another owner")
-            _ = await connection.fetchrow(
-                self._UPSERT_MAILBOX_SLOT_SQL,
-                authority.session_id,
-                unit.mailbox.slot_id,
-                unit.mailbox.lane,
-                unit.mailbox.disposition,
-                unit.mailbox.payload,
-            )
-            existing_effect = await connection.fetchrow(
-                self._SELECT_EFFECT_SLOT_SQL,
-                authority.session_id,
-                unit.effect.effect_id,
-            )
-            if existing_effect is None or effect_status_may_replace(
-                current=_required_str(dict(existing_effect), "status"),
-                incoming=unit.effect.status,
-            ):
+            if unit.mailbox is not None:
                 _ = await connection.fetchrow(
-                    self._UPSERT_EFFECT_SLOT_SQL,
+                    self._UPSERT_MAILBOX_SLOT_SQL,
+                    authority.session_id,
+                    unit.mailbox.slot_id,
+                    unit.mailbox.lane,
+                    unit.mailbox.disposition,
+                    unit.mailbox.payload,
+                )
+            if unit.effect is not None:
+                existing_effect = await connection.fetchrow(
+                    self._SELECT_EFFECT_SLOT_SQL,
                     authority.session_id,
                     unit.effect.effect_id,
-                    unit.effect.status,
-                    unit.effect.payload,
                 )
-            existing_receipt = await connection.fetchrow(
-                self._SELECT_RECEIPT_SLOT_SQL,
-                authority.session_id,
-                unit.receipt.receipt_id,
-            )
-            if existing_receipt is None or receipt_generation_may_replace(
-                current=_required_str(dict(existing_receipt), "generation"),
-                incoming=unit.receipt.generation,
-            ):
-                _ = await connection.fetchrow(
-                    self._UPSERT_RECEIPT_SLOT_SQL,
+                if existing_effect is None or effect_status_may_replace(
+                    current=_required_str(dict(existing_effect), "status"),
+                    incoming=unit.effect.status,
+                ):
+                    _ = await connection.fetchrow(
+                        self._UPSERT_EFFECT_SLOT_SQL,
+                        authority.session_id,
+                        unit.effect.effect_id,
+                        unit.effect.status,
+                        unit.effect.payload,
+                    )
+            if unit.receipt is not None:
+                existing_receipt = await connection.fetchrow(
+                    self._SELECT_RECEIPT_SLOT_SQL,
                     authority.session_id,
                     unit.receipt.receipt_id,
-                    unit.receipt.generation,
-                    unit.receipt.payload,
-                    unit.receipt.compensation_effect_id,
                 )
+                if existing_receipt is None or receipt_generation_may_replace(
+                    current=_required_str(dict(existing_receipt), "generation"),
+                    incoming=unit.receipt.generation,
+                ):
+                    _ = await connection.fetchrow(
+                        self._UPSERT_RECEIPT_SLOT_SQL,
+                        authority.session_id,
+                        unit.receipt.receipt_id,
+                        unit.receipt.generation,
+                        unit.receipt.payload,
+                        unit.receipt.compensation_effect_id,
+                    )
             event = _event_record_from_pg_row(
                 _required_row(event_row, "session event insert")
             )
@@ -1177,14 +1181,20 @@ class PGDurableStore:
         session_id: str,
         *,
         limit: int = 1000,
-    ) -> list[EventRecord]:
+    ) -> RetentionFloorReplay:
         _require_non_empty("session_id", session_id)
         _require_positive_int("limit", limit)
         await self._ensure_schema()
         pool = await self._pool.get_pool()
         fact_row = await pool.fetchrow(self._SELECT_FACT_SOURCE_SQL, session_id)
         if fact_row is None:
-            return []
+            return RetentionFloorReplay.from_page(
+                session_id=session_id,
+                events=[],
+                limit=limit,
+                retention_floor=0,
+                head_session_seq="0",
+            )
         fact = _fact_source_from_pg_row(dict(fact_row))
         rows = await pool.fetch(
             self._REPLAY_SESSION_EVENTS_FROM_SQL,
@@ -1192,7 +1202,14 @@ class PGDurableStore:
             fact.retention_floor_int,
             limit,
         )
-        return [_event_record_from_pg_row(dict(row)) for row in rows]
+        events = [_event_record_from_pg_row(dict(row)) for row in rows]
+        return RetentionFloorReplay.from_page(
+            session_id=session_id,
+            events=events,
+            limit=limit,
+            retention_floor=fact.retention_floor_int,
+            head_session_seq=fact.state.session_seq,
+        )
 
     async def replay_projection(
         self,

@@ -18,6 +18,7 @@ from coding_agent.stores.runtime_store import (
     OperationReceiptSlot,
     ProjectionCursor,
     RawCursor,
+    RetentionFloorReplay,
     RunMessageSnapshotRecord,
     RuntimeEventRecord,
     SessionFactSourceState,
@@ -195,7 +196,7 @@ class HarnessFactSourceStore(Protocol):
         session_id: str,
         *,
         limit: int = 1000,
-    ) -> list[EventRecord]: ...
+    ) -> RetentionFloorReplay: ...
 
     async def replay_projection(
         self,

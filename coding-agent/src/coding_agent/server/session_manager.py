@@ -6,6 +6,7 @@ import asyncio
 import importlib
 import logging
 import os
+import sqlite3
 import threading
 import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
@@ -79,8 +80,11 @@ from coding_agent.providers.base import ToolSchema
 from coding_agent.stores.runtime_store import (
     AgentInteractionRecord,
     AgentRunRecord,
+    AuthoritativeUnitOfWork,
+    EventRecord,
     JSONLRuntimeStore,
     JSONObject,
+    MailboxDispositionSlot,
     PGRuntimeStore,
     RunMessageSnapshotRecord,
     RuntimeEventRecord,
@@ -876,6 +880,23 @@ class SemanticDogfoodTopicSeedResult:
     warnings: tuple[str, ...] = ()
 
 
+def _is_duplicate_event_id_error(exc: BaseException) -> bool:
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        text = str(current)
+        name = type(current).__name__
+        if "event_id" in text and (
+            isinstance(current, sqlite3.IntegrityError)
+            or name in {"IntegrityError", "UniqueViolationError"}
+            or "unique" in text.lower()
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 class SessionManager:
     """Manages agent sessions with lifecycle and resource management."""
 
@@ -1207,6 +1228,8 @@ class SessionManager:
         self._runtime_turn_service_factory = RuntimeTurnServiceFactory(
             runtime_control_services=self._runtime_control_services,
             persist_session=self._persist_session_async,
+            persist_turn_started=self._persist_turn_started,
+            persist_turn_settled=self._persist_turn_settled,
             make_consumer=self._make_session_consumer,
             prepare_runtime=self._local_daemon_runtime_preparation.prepare_runtime,
             close_runtime=self._runtime_closer.close,
@@ -2308,7 +2331,7 @@ class SessionManager:
     def _approval_decisions(self) -> ApprovalDecisionService:
         return ApprovalDecisionService(
             interactions=self._approval_interactions(),
-            persist_session=self._persist_session_async,
+            persist_session=self._persist_approval_decided,
         )
 
     def _approval_requests(self) -> ApprovalRequestService:
@@ -2317,9 +2340,9 @@ class SessionManager:
             interactions=interactions,
             decisions=ApprovalDecisionService(
                 interactions=interactions,
-                persist_session=self._persist_session_async,
+                persist_session=self._persist_approval_decided,
             ),
-            persist_session=self._persist_session_async,
+            persist_session=self._persist_approval_requested,
         )
 
     async def _send_session_wire_message(
@@ -2420,29 +2443,159 @@ class SessionManager:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, run_guarded)
 
+    def _authoritative_store(self) -> SQLiteLocalDurableStore | PGDurableStore | None:
+        if self._local_durable_store is not None:
+            return self._local_durable_store
+        return self._pg_durable_store
+
+    def _boundary_event_id(
+        self,
+        session: Session,
+        event_kind: str,
+        event_id_suffix: str | None = None,
+    ) -> str:
+        event_id = f"{session.id}:{event_kind}:{session.current_turn_id or 'none'}"
+        if event_id_suffix:
+            return f"{event_id}:{event_id_suffix}"
+        return event_id
+
+    def _session_boundary_payload(self, session: Session) -> JSONObject:
+        return {
+            "turn_id": session.current_turn_id,
+            "turn_in_progress": session.turn_in_progress,
+        }
+
+    def _approval_boundary_id(self, session: Session) -> str | None:
+        pending = session.approval_coordinator.pending_request
+        if pending is not None:
+            return pending.request_id
+        projection = session.approval_response
+        if isinstance(projection, dict):
+            request_id = projection.get("request_id")
+            if isinstance(request_id, str) and request_id:
+                return request_id
+        return None
+
+    async def _commit_session_uow(
+        self,
+        session: Session,
+        *,
+        event_kind: str,
+        payload: JSONObject,
+        created_at: datetime,
+        include_mailbox: bool,
+        event_id_suffix: str | None = None,
+    ) -> None:
+        self._session_cache[session.id] = session
+        store = self._authoritative_store()
+        if store is None:
+            raise RuntimeError("durable authoritative store is not configured")
+        authority = self._owner_authorities.get(session.id)
+        if authority is None:
+            raise SessionOwnershipConflictError(
+                "session metadata mutation requires owner authority"
+            )
+        mailbox = None
+        if include_mailbox and session.current_turn_id is not None:
+            mailbox = MailboxDispositionSlot(
+                slot_id=f"turn:{session.current_turn_id}",
+                lane="turn",
+                disposition="in_flight" if session.turn_in_progress else "settled",
+                payload={"run_id": session.current_turn_id},
+            )
+        session_state = cast(JSONObject, session.to_store_data())
+        try:
+            await store.commit_authoritative_uow(
+                authority,
+                AuthoritativeUnitOfWork(
+                    event=EventRecord(
+                        event_id=self._boundary_event_id(
+                            session,
+                            event_kind,
+                            event_id_suffix,
+                        ),
+                        session_id=session.id,
+                        event_kind=event_kind,
+                        payload=payload,
+                        created_at=created_at,
+                    ),
+                    session_state=session_state,
+                    mailbox=mailbox,
+                ),
+            )
+        except Exception as exc:
+            if not _is_duplicate_event_id_error(exc):
+                raise
+            await store.save_session(authority, session_state)
+
     async def _persist_session_async(self, session: Session) -> None:
         self._session_cache[session.id] = session
         payload = cast(dict[str, Any], session.to_store_data())
-        if self._local_durable_store is not None:
+        store = self._authoritative_store()
+        if store is not None:
             authority = self._owner_authorities.get(session.id)
             if authority is None:
                 raise SessionOwnershipConflictError(
                     "session metadata mutation requires owner authority"
                 )
-            await self._local_durable_store.save_session(authority, payload)
-            return
-        if self._pg_durable_store is not None:
-            authority = self._owner_authorities.get(session.id)
-            if authority is None:
-                raise SessionOwnershipConflictError(
-                    "session metadata mutation requires owner authority"
-                )
-            await self._pg_durable_store.save_session(authority, payload)
+            await store.save_session(authority, payload)
             return
         await self._run_store_io(
             self._store.save,
             session.id,
             payload,
+        )
+
+    async def _persist_turn_started(self, session: Session) -> None:
+        if self._authoritative_store() is None:
+            await self._persist_session_async(session)
+            return
+        await self._commit_session_uow(
+            session,
+            event_kind="harness.TurnStarted",
+            payload=self._session_boundary_payload(session),
+            created_at=datetime.now(UTC),
+            include_mailbox=True,
+        )
+
+    async def _persist_turn_settled(self, session: Session) -> None:
+        if self._authoritative_store() is None:
+            await self._persist_session_async(session)
+            return
+        await self._commit_session_uow(
+            session,
+            event_kind="harness.TurnSettled",
+            payload=self._session_boundary_payload(session),
+            created_at=datetime.now(UTC),
+            include_mailbox=True,
+        )
+
+    async def _persist_approval_requested(self, session: Session) -> None:
+        request_id = self._approval_boundary_id(session)
+        if request_id is None or self._authoritative_store() is None:
+            await self._persist_session_async(session)
+            return
+        await self._commit_session_uow(
+            session,
+            event_kind="harness.ApprovalRequested",
+            payload=self._session_boundary_payload(session),
+            created_at=datetime.now(UTC),
+            include_mailbox=session.current_turn_id is not None,
+            event_id_suffix=request_id,
+        )
+
+    async def _persist_approval_decided(self, session: Session) -> None:
+        request_id = self._approval_boundary_id(session)
+        if request_id is None or self._authoritative_store() is None:
+            await self._persist_session_async(session)
+            return
+        await self._commit_session_uow(
+            session,
+            event_kind="harness.ApprovalDecided",
+            payload=self._session_boundary_payload(session),
+            created_at=datetime.now(UTC),
+            include_mailbox=session.current_turn_id is not None,
+            event_id_suffix=request_id,
         )
 
     async def _persist_workspace_record_for_session(self, session: Session) -> None:

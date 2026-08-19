@@ -35,6 +35,8 @@ class RuntimeTurnServiceFactory:
     bind_root_run_identity: RuntimeRootRunIdentityBinder
     bind_subagent_message_publisher: RuntimeSubagentMessagePublisherBinder
     start_observation: RuntimeObservationStarter
+    persist_turn_started: RuntimeTurnStatePersister | None = None
+    persist_turn_settled: RuntimeTurnStatePersister | None = None
     complete_observation: RuntimeObservationCompleter | None = None
     log_turn_exception: Callable[[str], None] | None = None
     fatal_error_types: tuple[type[BaseException], ...] = (FatalToolExecutionError,)
@@ -45,6 +47,8 @@ class RuntimeTurnServiceFactory:
             run_coordinator=run_coordinator,
             runtime_run_persistence=self.runtime_control_services.run_persistence(),
             persist_session=self.persist_session,
+            persist_turn_started=self.persist_turn_started,
+            persist_turn_settled=self.persist_turn_settled,
             make_consumer=self.make_consumer,
             prepare_runtime=self.prepare_runtime,
             close_runtime=self.close_runtime,

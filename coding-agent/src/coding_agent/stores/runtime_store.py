@@ -2429,20 +2429,24 @@ class OperationReceiptSlot:
 class AuthoritativeUnitOfWork:
     event: EventRecord
     session_state: JSONObject
-    mailbox: MailboxDispositionSlot
-    effect: EffectLedgerSlot
-    receipt: OperationReceiptSlot
+    mailbox: MailboxDispositionSlot | None = None
+    effect: EffectLedgerSlot | None = None
+    receipt: OperationReceiptSlot | None = None
     run_state: AgentRunRecord | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.event, EventRecord):
             raise TypeError("event must be an EventRecord")
         _require_json_object("session_state", self.session_state)
-        if not isinstance(self.mailbox, MailboxDispositionSlot):
+        if self.mailbox is not None and not isinstance(
+            self.mailbox, MailboxDispositionSlot
+        ):
             raise TypeError("mailbox must be a MailboxDispositionSlot")
-        if not isinstance(self.effect, EffectLedgerSlot):
+        if self.effect is not None and not isinstance(self.effect, EffectLedgerSlot):
             raise TypeError("effect must be an EffectLedgerSlot")
-        if not isinstance(self.receipt, OperationReceiptSlot):
+        if self.receipt is not None and not isinstance(
+            self.receipt, OperationReceiptSlot
+        ):
             raise TypeError("receipt must be an OperationReceiptSlot")
         if self.run_state is not None and not isinstance(
             self.run_state, AgentRunRecord
@@ -2520,6 +2524,52 @@ class SessionFactSourceState:
 
 
 @dataclass(frozen=True)
+class RetentionFloorReplay:
+    events: list[EventRecord]
+    raw_cursor: RawCursor
+    complete: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.events, list):
+            raise TypeError("events must be a list")
+        for event in self.events:
+            if not isinstance(event, EventRecord):
+                raise TypeError("events must contain EventRecord values")
+        if not isinstance(self.raw_cursor, RawCursor):
+            raise TypeError("raw_cursor must be a RawCursor")
+        if not isinstance(self.complete, bool):
+            raise TypeError("complete must be a bool")
+
+    @classmethod
+    def from_page(
+        cls,
+        *,
+        session_id: str,
+        events: list[EventRecord],
+        limit: int,
+        retention_floor: int,
+        head_session_seq: str,
+    ) -> RetentionFloorReplay:
+        if events:
+            last_seq = events[-1].session_seq
+            if last_seq is None:
+                raise ValueError("replayed event must include session_seq")
+            return cls(
+                events=events,
+                raw_cursor=RawCursor(session_id=session_id, session_seq=last_seq),
+                complete=len(events) < limit or last_seq == head_session_seq,
+            )
+        return cls(
+            events=events,
+            raw_cursor=RawCursor(
+                session_id=session_id,
+                session_seq=format_u64(max(retention_floor, 1) - 1),
+            ),
+            complete=True,
+        )
+
+
+@dataclass(frozen=True)
 class AuthoritativeCommit:
     event: EventRecord
     projection: str
@@ -2556,6 +2606,7 @@ __all__ = [
     "PGRuntimeStore",
     "ProjectionCursor",
     "RawCursor",
+    "RetentionFloorReplay",
     "RunMessageSnapshotRecord",
     "RuntimeEventRecord",
     "SQLiteRuntimeStore",
