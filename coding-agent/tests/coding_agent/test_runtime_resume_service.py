@@ -10,6 +10,7 @@ from agentkit.tape.models import Entry
 
 from coding_agent.stores.runtime_store import AgentRunRecord, RunMessageSnapshotRecord
 from coding_agent.runs import (
+    RemoteLoopOwnershipRetired,
     RuntimeResumeOrchestrationService,
     RuntimeResumeService,
     RuntimeResumeSessionOrchestrationService,
@@ -201,6 +202,54 @@ async def test_runtime_resume_orchestration_runs_local_resume_with_boundary_anch
     assert local_runs[0][2] == "run-resumed"
     assert "Previous run was interrupted." in local_runs[0][1]
     assert "continue the implementation" in local_runs[0][1]
+
+
+@pytest.mark.asyncio
+async def test_runtime_resume_orchestration_rejects_attached_before_side_effects() -> (
+    None
+):
+    session = FakeSession(tape_id=None)
+    persisted_sessions: list[FakeSession] = []
+    saved_tape_entries: list[tuple[str, list[dict[str, object]]]] = []
+
+    async def persist_session(persisted_session: FakeSession) -> None:
+        persisted_sessions.append(persisted_session)
+
+    async def save_tape_entries(
+        tape_id: str,
+        entries: list[dict[str, object]],
+    ) -> None:
+        saved_tape_entries.append((tape_id, entries))
+
+    async def fail_async(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise AssertionError("attached resume must not touch run or tape state")
+
+    service = RuntimeResumeOrchestrationService(
+        resume_service=RuntimeResumeService(),
+        latest_runtime_run=fail_async,
+        latest_runtime_event_id=fail_async,
+        load_runtime_run=fail_async,
+        persist_session=persist_session,
+        list_checkpoints=_list_checkpoints,
+        load_tape_entries=_load_tape_entries,
+        save_tape_entries=save_tape_entries,
+        load_message_snapshot=_load_message_snapshot,
+        run_local=fail_async,
+        request_attached=fail_async,
+        session_is_attached=lambda session: True,
+        append_live_boundary_anchor=lambda session, anchor: (_ for _ in ()).throw(
+            AssertionError(anchor)
+        ),
+        active_resume_blocking_statuses=frozenset({"running"}),
+    )
+
+    with pytest.raises(RemoteLoopOwnershipRetired, match="in-process"):
+        await service.resume(session, prompt="resume attached")
+
+    assert persisted_sessions == []
+    assert saved_tape_entries == []
+    assert session.tape_id is None
 
 
 @pytest.mark.asyncio
