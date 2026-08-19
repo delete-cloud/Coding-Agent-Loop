@@ -48,6 +48,7 @@ from coding_agent.stores.runtime_store import (
     RuntimeEventRecord,
 )
 from coding_agent.runs import (
+    RemoteLoopOwnershipRetired,
     CloudWorkspaceRef,
     ExternalWorkerExecutorRef,
     ExternalWorkerWorkspaceRef,
@@ -1868,68 +1869,40 @@ async def test_resume_external_executor_session_requests_linked_run() -> None:
     )
     runtime_store.created.append(previous_run)
 
-    new_run = await manager.resume_session(
-        session_id,
-        prompt="resume locally",
-        resume_reason="remote_resume",
-    )
+    with pytest.raises(RemoteLoopOwnershipRetired, match="in-process"):
+        await manager.resume_session(
+            session_id,
+            prompt="resume locally",
+            resume_reason="remote_resume",
+        )
 
-    assert new_run.status == "requested"
-    assert new_run.parent_run_id == previous_run.run_id
-    assert new_run.metadata["prompt"].startswith("Previous run was interrupted.")
-    assert new_run.metadata["previous_run_id"] == previous_run.run_id
-    assert new_run.metadata["resume_from_run_id"] == previous_run.run_id
-    assert new_run.metadata["resume_reason"] == "remote_resume"
-    assert isinstance(new_run.metadata["resume_boundary_anchor_id"], str)
-    assert new_run.metadata["resume_boundary_anchor_type"] == "resume_boundary"
-    tape_entries = await manager._tape_store.load(stable_tape_id)
-    assert len(tape_entries) == 1
-    boundary_entry = tape_entries[0]
-    assert boundary_entry["kind"] == "anchor"
-    assert boundary_entry["anchor_type"] == "context"
-    assert boundary_entry["id"] == new_run.metadata["resume_boundary_anchor_id"]
-    boundary_meta = cast(dict[str, object], boundary_entry["meta"])
-    assert boundary_meta["product_anchor_type"] == "resume_boundary"
-    assert boundary_meta["previous_run_id"] == previous_run.run_id
-    assert boundary_meta["resume_reason"] == "remote_resume"
+    assert [run.run_id for run in runtime_store.created] == [previous_run.run_id]
+    assert runtime_store.updated == []
 
 
 @pytest.mark.asyncio
-async def test_finalize_attached_executor_run_saves_tape_before_final_status(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_finalize_attached_executor_run_saves_tape_before_final_status() -> None:
     runtime_store = FakeRuntimeStore()
     manager = SessionManager(runtime_store=runtime_store)
     session_id = await manager.create_session(
         default_run_target=_external_worker_run_target()
     )
-    requested = await manager.request_attached_executor_run(
-        session_id,
-        "run on attached executor",
-    )
-    claim = await manager.claim_attached_executor_run(
-        executor_id="executor-1",
-        executor_kind="local_cli",
-        session_id=session_id,
-    )
-    assert claim is not None
-
-    class FailingTapeStore:
-        async def save(
-            self,
-            tape_id: str,
-            entries: list[dict[str, object]],
-        ) -> None:
-            del tape_id, entries
-            raise RuntimeError("tape save failed")
-
-    monkeypatch.setattr(manager, "_tape_store", FailingTapeStore(), raising=False)
-
-    with pytest.raises(RuntimeError, match="tape save failed"):
-        await manager.finalize_attached_executor_run(
-            run_id=requested.run_id,
+    with pytest.raises(RemoteLoopOwnershipRetired, match="in-process"):
+        await manager.request_attached_executor_run(
+            session_id,
+            "run on attached executor",
+        )
+    with pytest.raises(RemoteLoopOwnershipRetired, match="in-process"):
+        await manager.claim_attached_executor_run(
             executor_id="executor-1",
-            claim_token=claim.claim_token,
+            executor_kind="local_cli",
+            session_id=session_id,
+        )
+    with pytest.raises(RemoteLoopOwnershipRetired, match="in-process"):
+        await manager.finalize_attached_executor_run(
+            run_id="run-1",
+            executor_id="executor-1",
+            claim_token="claim-token",
             status="completed",
             result={"ok": True},
             error=None,
@@ -1938,12 +1911,9 @@ async def test_finalize_attached_executor_run_saves_tape_before_final_status(
         )
 
     assert runtime_store.updated == []
-    loaded = await runtime_store.load_agent_run(requested.run_id)
-    assert loaded is not None
-    assert loaded.status == "claimed"
     session = await manager.get_session_async(session_id)
-    assert session.turn_in_progress is True
-    assert session.turn_status == "running"
+    assert session.turn_in_progress is False
+    assert session.turn_status == "idle"
 
 
 @pytest.mark.asyncio
@@ -3241,24 +3211,11 @@ async def test_cancel_attached_executor_requested_run_marks_cancelled() -> None:
     session_id = await manager.create_session(
         default_run_target=_external_worker_run_target()
     )
-    requested = await manager.request_attached_executor_run(
-        session_id,
-        "run on attached executor",
-    )
-
-    result = await manager.cancel_session_turn(session_id)
-
-    assert result.session_id == session_id
-    assert result.turn_id == requested.run_id
-    assert result.status == "cancelled"
-    loaded = await runtime_store.load_agent_run(requested.run_id)
-    assert loaded is not None
-    assert loaded.status == "cancelled"
-    assert loaded.error == "cancelled before claim"
-    assert "cancel_requested_at" in loaded.metadata
-    session = manager.get_session(session_id)
-    assert session.turn_in_progress is False
-    assert session.turn_status == "idle"
+    with pytest.raises(RemoteLoopOwnershipRetired, match="in-process"):
+        await manager.request_attached_executor_run(
+            session_id,
+            "run on attached executor",
+        )
 
 
 @pytest.mark.asyncio
@@ -3268,30 +3225,17 @@ async def test_cancel_attached_executor_claimed_run_marks_cancelling() -> None:
     session_id = await manager.create_session(
         default_run_target=_external_worker_run_target()
     )
-    requested = await manager.request_attached_executor_run(
-        session_id,
-        "run on attached executor",
-    )
-    claim = await manager.claim_attached_executor_run(
-        executor_id="executor-1",
-        executor_kind="local_cli",
-        session_id=session_id,
-    )
-    assert claim is not None
-
-    result = await manager.cancel_session_turn(session_id)
-
-    assert result.session_id == session_id
-    assert result.turn_id == requested.run_id
-    assert result.status == "cancelling"
-    loaded = await runtime_store.load_agent_run(requested.run_id)
-    assert loaded is not None
-    assert loaded.status == "cancelling"
-    assert loaded.error is None
-    assert "cancel_requested_at" in loaded.metadata
-    session = manager.get_session(session_id)
-    assert session.turn_in_progress is True
-    assert session.turn_status == "cancelling"
+    with pytest.raises(RemoteLoopOwnershipRetired, match="in-process"):
+        await manager.request_attached_executor_run(
+            session_id,
+            "run on attached executor",
+        )
+    with pytest.raises(RemoteLoopOwnershipRetired, match="in-process"):
+        await manager.claim_attached_executor_run(
+            executor_id="executor-1",
+            executor_kind="local_cli",
+            session_id=session_id,
+        )
 
 
 @pytest.mark.asyncio

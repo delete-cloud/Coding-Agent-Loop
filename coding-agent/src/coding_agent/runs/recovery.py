@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import cast
@@ -11,6 +11,13 @@ from coding_agent.stores import RuntimeRunRecoveryStore
 STALE_RUNTIME_RUN_ERROR = "runtime run was still running during startup recovery"
 STALE_RUNTIME_RUN_RECOVERY_REASON = "startup_stale_running_run"
 ATTACHED_EXECUTOR_REF_KINDS = frozenset({"external_worker", "local_attached"})
+ATTACHED_EXECUTOR_TERMINAL_STATUSES = frozenset(
+    {"completed", "failed", "interrupted", "cancelled"}
+)
+REMOTE_LOOP_RETIRED_RECOVERY_REASON = "remote_loop_ownership_retired"
+REMOTE_LOOP_RETIRED_ERROR = (
+    "remote loop ownership has been retired; the agent loop lives in-process"
+)
 
 type RuntimeRunSessionLister = Callable[[], Awaitable[list[str]]]
 type RuntimeRunRecoveryEligibility = Callable[[str], Awaitable[bool]]
@@ -23,18 +30,6 @@ def _utc_now() -> datetime:
 async def _recover_all_sessions(session_id: str) -> bool:
     del session_id
     return True
-
-
-def _optional_metadata_datetime(
-    metadata: Mapping[str, object],
-    key: str,
-) -> datetime | None:
-    value = metadata.get(key)
-    if value is None:
-        return None
-    if not isinstance(value, str) or not value:
-        raise RuntimeError(f"runtime run metadata {key} must be a non-empty string")
-    return datetime.fromisoformat(value)
 
 
 @dataclass(frozen=True)
@@ -106,40 +101,33 @@ class RuntimeRunRecoveryService:
     ) -> bool:
         if self.store is None:
             return False
-        if (
-            run.metadata.get("executor_ref_kind")
-            not in ATTACHED_EXECUTOR_REF_KINDS
-        ):
+        if run.metadata.get("executor_ref_kind") not in ATTACHED_EXECUTOR_REF_KINDS:
             return False
-        if run.status not in {"claimed", "running", "cancelling"}:
-            return False
-        lease_expires_at = _optional_metadata_datetime(
-            run.metadata,
-            "lease_expires_at",
-        )
-        if lease_expires_at is None or lease_expires_at > recovered_at:
+        if run.status in ATTACHED_EXECUTOR_TERMINAL_STATUSES:
             return False
         metadata = dict(run.metadata)
-        metadata["reclaimable"] = True
+        metadata["reclaimable"] = False
         metadata["recovered_at"] = recovered_at.isoformat()
-        metadata["recovery_reason"] = "attached_executor_lease_expired"
-        metadata["legacy_recovery_reason"] = "external_worker_lease_expired"
+        metadata["recovery_reason"] = REMOTE_LOOP_RETIRED_RECOVERY_REASON
         metadata["previous_status"] = run.status
         if self.owner_id is not None:
             metadata["recovered_by_owner_id"] = self.owner_id
         await self.store.update_agent_run(
             run.run_id,
-            status="expired",
-            ended_at=None,
+            status="interrupted",
+            ended_at=recovered_at,
             metadata=cast(JSONObject, metadata),
             result=run.result,
-            error="external worker lease expired",
+            error=REMOTE_LOOP_RETIRED_ERROR,
         )
         return True
 
 
 __all__ = [
     "ATTACHED_EXECUTOR_REF_KINDS",
+    "ATTACHED_EXECUTOR_TERMINAL_STATUSES",
+    "REMOTE_LOOP_RETIRED_ERROR",
+    "REMOTE_LOOP_RETIRED_RECOVERY_REASON",
     "RuntimeRunRecoveryEligibility",
     "RuntimeRunRecoveryService",
     "RuntimeRunSessionLister",

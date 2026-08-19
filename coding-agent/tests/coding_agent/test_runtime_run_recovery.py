@@ -7,6 +7,8 @@ import pytest
 from coding_agent.stores.runtime_store import AgentRunRecord, JSONObject
 from coding_agent.runs import RuntimeRunRecoveryService
 from coding_agent.runs.recovery import (
+    REMOTE_LOOP_RETIRED_ERROR,
+    REMOTE_LOOP_RETIRED_RECOVERY_REASON,
     STALE_RUNTIME_RUN_ERROR,
     STALE_RUNTIME_RUN_RECOVERY_REASON,
 )
@@ -174,26 +176,31 @@ async def test_runtime_run_recovery_service_expires_attached_executor_leases() -
         recovered_at=recovered_at
     )
 
-    assert recovered_count == 1
-    assert store.updated == [
-        {
-            "run_id": "run-expired",
-            "status": "expired",
-            "ended_at": None,
-            "metadata": {
-                "executor_ref_kind": "local_attached",
-                "lease_expires_at": (recovered_at - timedelta(seconds=1)).isoformat(),
-                "executor_id": "executor-1",
-                "reclaimable": True,
-                "recovered_at": recovered_at.isoformat(),
-                "recovery_reason": "attached_executor_lease_expired",
-                "legacy_recovery_reason": "external_worker_lease_expired",
-                "previous_status": "claimed",
-            },
-            "result": {"steps_taken": 2},
-            "error": "external worker lease expired",
-        }
-    ]
+    assert recovered_count == 2
+    assert {update["run_id"] for update in store.updated} == {
+        "run-expired",
+        "run-active",
+    }
+    assert store.updated[0] == {
+        "run_id": "run-expired",
+        "status": "interrupted",
+        "ended_at": recovered_at,
+        "metadata": {
+            "executor_ref_kind": "local_attached",
+            "lease_expires_at": (recovered_at - timedelta(seconds=1)).isoformat(),
+            "executor_id": "executor-1",
+            "reclaimable": False,
+            "recovered_at": recovered_at.isoformat(),
+            "recovery_reason": REMOTE_LOOP_RETIRED_RECOVERY_REASON,
+            "previous_status": "claimed",
+        },
+        "result": {"steps_taken": 2},
+        "error": REMOTE_LOOP_RETIRED_ERROR,
+    }
+    assert store.updated[1]["status"] == "interrupted"
+    assert store.updated[1]["metadata"]["recovery_reason"] == (
+        REMOTE_LOOP_RETIRED_RECOVERY_REASON
+    )
 
 
 @pytest.mark.asyncio

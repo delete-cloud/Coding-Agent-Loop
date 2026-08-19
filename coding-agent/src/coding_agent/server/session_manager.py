@@ -111,6 +111,7 @@ from coding_agent.runs import (
     UNSET,
     UnsetType,
     DefaultRunCoordinator,
+    RemoteLoopOwnershipRetired,
     EventBroadcastResult,
     LocalDaemonExecutorRef,
     RunCoordinator,
@@ -1784,12 +1785,8 @@ class SessionManager:
         run_id: str | None = None,
         resume_context: SessionResumeContext | None = None,
     ) -> AgentRunRecord:
-        return await self._runtime_attached_executor_request_service.request_run(
-            session_id,
-            prompt,
-            run_id=run_id,
-            resume_context=resume_context,
-        )
+        del session_id, prompt, run_id, resume_context
+        raise RemoteLoopOwnershipRetired()
 
     async def request_external_worker_run(
         self,
@@ -1842,12 +1839,8 @@ class SessionManager:
         run_id: str,
         resume_context: SessionResumeContext,
     ) -> AgentRunRecord:
-        return await self.request_attached_executor_run(
-            session_id,
-            prompt,
-            run_id=run_id,
-            resume_context=resume_context,
-        )
+        del session_id, prompt, run_id, resume_context
+        raise RemoteLoopOwnershipRetired()
 
     def _append_live_resume_boundary_anchor(
         self, session: Session, anchor: Anchor
@@ -1869,17 +1862,17 @@ class SessionManager:
         capabilities: JSONObject | None = None,
         workspace_sync: JSONObject | None = None,
     ) -> ExternalWorkerClaim | None:
-        claim = await self._runtime_attached_executor_claim_service.claim_run(
-            executor_id=executor_id,
-            executor_kind=executor_kind,
-            session_id=session_id,
-            lease_seconds=lease_seconds,
-            worker_instance_id=worker_instance_id,
-            process_id=process_id,
-            capabilities=capabilities,
-            workspace_sync=workspace_sync,
+        del (
+            executor_id,
+            executor_kind,
+            session_id,
+            lease_seconds,
+            worker_instance_id,
+            process_id,
+            capabilities,
+            workspace_sync,
         )
-        return cast(ExternalWorkerClaim | None, claim)
+        raise RemoteLoopOwnershipRetired()
 
     async def claim_external_worker_run(
         self,
@@ -1917,16 +1910,17 @@ class SessionManager:
         capabilities: JSONObject | None = None,
         workspace_sync: JSONObject | None = None,
     ) -> AgentRunRecord:
-        return await self._runtime_control_services.attached_executor().heartbeat_run(
-            run_id=run_id,
-            executor_id=executor_id,
-            claim_token=claim_token,
-            lease_seconds=lease_seconds,
-            worker_instance_id=worker_instance_id,
-            process_id=process_id,
-            capabilities=capabilities,
-            workspace_sync=workspace_sync,
+        del (
+            run_id,
+            executor_id,
+            claim_token,
+            lease_seconds,
+            worker_instance_id,
+            process_id,
+            capabilities,
+            workspace_sync,
         )
+        raise RemoteLoopOwnershipRetired()
 
     async def heartbeat_external_worker_run(
         self,
@@ -1963,15 +1957,16 @@ class SessionManager:
         payload: JSONObject,
         created_at: datetime,
     ) -> RuntimeEventRecord:
-        return await self._runtime_control_services.attached_executor().append_event(
-            run_id=run_id,
-            executor_id=executor_id,
-            claim_token=claim_token,
-            event_id=event_id,
-            event_kind=event_kind,
-            payload=payload,
-            created_at=created_at,
+        del (
+            run_id,
+            executor_id,
+            claim_token,
+            event_id,
+            event_kind,
+            payload,
+            created_at,
         )
+        raise RemoteLoopOwnershipRetired()
 
     async def append_external_worker_event(
         self,
@@ -2007,16 +2002,17 @@ class SessionManager:
         tape_id: str | None,
         tape_entries: list[JSONObject] | None = None,
     ) -> AgentRunRecord:
-        return await self._runtime_attached_executor_finalize_service.finalize_run(
-            run_id=run_id,
-            executor_id=executor_id,
-            claim_token=claim_token,
-            status=status,
-            result=result,
-            error=error,
-            tape_id=tape_id,
-            tape_entries=tape_entries,
+        del (
+            run_id,
+            executor_id,
+            claim_token,
+            status,
+            result,
+            error,
+            tape_id,
+            tape_entries,
         )
+        raise RemoteLoopOwnershipRetired()
 
     async def finalize_external_worker_run(
         self,
@@ -3422,6 +3418,9 @@ class SessionManager:
         run_id_override: str | None = None,
         resume_context: SessionResumeContext | None = None,
     ) -> None:
+        if _session_is_attached(self.get_session(session_id)):
+            raise RemoteLoopOwnershipRetired()
+
         async def run_admitted_turn(session: object) -> None:
             admitted_session = cast(Session, session)
             run_id = run_id_override or uuid.uuid4().hex

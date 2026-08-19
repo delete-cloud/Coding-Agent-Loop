@@ -202,6 +202,7 @@ from coding_agent.runs import (
     LocalAttachedExecutorRef,
     ManagedPoolExecutorRef,
     LocalPathWorkspaceRef,
+    REMOTE_LOOP_OWNERSHIP_RETIRED,
     RunTarget,
     RuntimeTurnSessionState,
     run_target_from_dict,
@@ -318,7 +319,6 @@ from coding_agent.wire import (
     WireMessage,
 )
 from coding_agent.wire.protocol import (
-    CompletionStatus,
     ThinkingDelta,
     ToolResultDelta,
     TurnStatusDelta,
@@ -772,15 +772,6 @@ def _cleanup_provisioned_cloud_binding(workspace: CloudWorkspaceRef) -> None:
     if not isinstance(provider, str) or not provider.strip():
         return
     cleanup_cloud_binding_from_config(cloud_workspace_config, workspace)
-
-
-def _session_uses_attached_executor(session: Any) -> bool:
-    target = getattr(session, "default_run_target", None)
-    if not isinstance(target, RunTarget):
-        return False
-    return isinstance(
-        target.executor, (ExternalWorkerExecutorRef, LocalAttachedExecutorRef)
-    )
 
 
 def _storage_uses_pg_http_sessions(storage_config: dict[str, Any]) -> bool:
@@ -3195,6 +3186,8 @@ async def send_prompt(
 
     try:
         session = await session_manager.prepare_session_turn(session_id)
+        if _session_uses_retired_remote_loop(session):
+            raise _remote_loop_gone()
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Session not found") from exc
     except SessionOwnershipConflictError as exc:
@@ -3205,9 +3198,6 @@ async def send_prompt(
                 status_code=409, detail="Turn already in progress"
             ) from exc
         raise
-
-    if _session_uses_attached_executor(session):
-        return await _send_attached_executor_prompt(session_id, prompt_text)
 
     session.turn_in_progress = True
     session.last_activity = datetime.now(UTC)
@@ -3306,52 +3296,11 @@ async def resume_session(
         raise HTTPException(status_code=404, detail="Session not found") from exc
     if not _auth_context_can_access_session(auth_context, session):
         raise HTTPException(status_code=404, detail="Session not found")
+    if _session_uses_retired_remote_loop(session):
+        raise _remote_loop_gone()
 
     prompt_text = None if body is None else body.prompt
     resume_reason = "user_resume" if body is None else body.resume_reason
-
-    if _session_uses_attached_executor(session):
-        try:
-            run = await session_manager.resume_session(
-                session_id,
-                prompt=prompt_text,
-                resume_reason=resume_reason,
-            )
-        except RuntimeError as exc:
-            detail = str(exc)
-            if detail in {
-                "turn already in progress",
-                "latest run is still active",
-                "session has no previous run to resume",
-            }:
-                raise HTTPException(status_code=409, detail=detail) from exc
-            raise HTTPException(status_code=503, detail=detail) from exc
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
-        except (ValueError, TypeError) as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-        async def external_event_generator() -> AsyncIterator[dict[str, str]]:
-            yield {
-                "event": "RunRequested",
-                "data": json.dumps(
-                    {
-                        "session_id": session_id,
-                        "run_id": run.run_id,
-                        "status": run.status,
-                        "previous_run_id": run.parent_run_id,
-                        "resume_from_run_id": run.metadata.get("resume_from_run_id"),
-                        "resume_from_event_id": run.metadata.get(
-                            "resume_from_event_id"
-                        ),
-                    }
-                ),
-            }
-
-        return EventSourceResponse(
-            external_event_generator(),
-            media_type="text/event-stream",
-        )
 
     async def event_generator() -> AsyncIterator[dict[str, str]]:
         try:
@@ -3414,47 +3363,14 @@ def _prompt_stream_event_response(
     return _display_event_stream_transform(session, event)
 
 
-async def _send_attached_executor_prompt(
-    session_id: str,
-    prompt_text: str,
-) -> EventSourceResponse:
-    try:
-        run = await session_manager.request_attached_executor_run(
-            session_id,
-            prompt_text,
-        )
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
-    except SessionOwnershipConflictError as exc:
-        raise _owner_conflict_http_exception(exc, session_id=session_id) from exc
-    except RuntimeError as exc:
-        if str(exc) == "turn already in progress":
-            raise HTTPException(
-                status_code=409,
-                detail="Turn already in progress",
-            ) from exc
-        raise
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+def _remote_loop_gone() -> HTTPException:
+    return HTTPException(status_code=410, detail=REMOTE_LOOP_OWNERSHIP_RETIRED)
 
-    run_requested_event = {
-        "event": "RunRequested",
-        "data": json.dumps(
-            {
-                "session_id": session_id,
-                "run_id": run.run_id,
-                "status": run.status,
-            }
-        ),
-    }
 
-    async def event_generator() -> AsyncIterator[dict[str, str]]:
-        yield run_requested_event
-
-    return EventSourceResponse(
-        event_generator(),
-        media_type="text/event-stream",
-    )
+def _session_uses_retired_remote_loop(session: object) -> bool:
+    target = getattr(session, "default_run_target", None)
+    executor = getattr(target, "executor", None)
+    return isinstance(executor, (ExternalWorkerExecutorRef, LocalAttachedExecutorRef))
 
 
 @app.post("/worker/runs/claim", response_model=WorkerClaimResponse)
@@ -3465,34 +3381,8 @@ async def claim_worker_run(
     body: WorkerClaimRequest,
     api_key: str | None = Depends(verify_api_key),
 ) -> WorkerClaimResponse:
-    try:
-        claim = await session_manager.claim_attached_executor_run(
-            executor_id=body.worker_id,
-            executor_kind=body.executor_kind,
-            session_id=body.session_id,
-            lease_seconds=body.lease_seconds,
-            worker_instance_id=body.worker_instance_id,
-            process_id=body.process_id,
-            capabilities=cast(JSONObject | None, body.capabilities),
-            workspace_sync=cast(JSONObject | None, body.workspace_sync),
-        )
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    if claim is None:
-        raise HTTPException(status_code=404, detail="No worker run available")
-    session = claim.session
-    return WorkerClaimResponse(
-        run_id=claim.run.run_id,
-        session_id=claim.run.session_id,
-        claim_token=claim.claim_token,
-        prompt=claim.prompt,
-        tape_id=claim.run.tape_id,
-        approval_policy=session.approval_policy.value,
-        provider_name=session.provider_name,
-        model_name=session.model_name,
-        base_url=session.base_url,
-        max_steps=session.max_steps,
-    )
+    del request, body, api_key
+    raise _remote_loop_gone()
 
 
 @app.post("/worker/runs/{run_id}/heartbeat", response_model=WorkerHeartbeatResponse)
@@ -3504,28 +3394,8 @@ async def heartbeat_worker_run(
     body: WorkerHeartbeatRequest,
     api_key: str | None = Depends(verify_api_key),
 ) -> WorkerHeartbeatResponse:
-    try:
-        run = await session_manager.heartbeat_attached_executor_run(
-            run_id=run_id,
-            executor_id=body.worker_id,
-            claim_token=body.claim_token,
-            lease_seconds=body.lease_seconds,
-            worker_instance_id=body.worker_instance_id,
-            process_id=body.process_id,
-            capabilities=cast(JSONObject | None, body.capabilities),
-            workspace_sync=cast(JSONObject | None, body.workspace_sync),
-        )
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return WorkerHeartbeatResponse(
-        run_id=run.run_id,
-        status=run.status,
-        cancel_requested=bool(run.metadata.get("cancel_requested_at")),
-    )
+    del request, run_id, body, api_key
+    raise _remote_loop_gone()
 
 
 @app.post("/worker/runs/{run_id}/events", response_model=RuntimeEventsResponse)
@@ -3537,42 +3407,8 @@ async def append_worker_run_events(
     body: WorkerRuntimeEventsRequest,
     api_key: str | None = Depends(verify_api_key),
 ) -> RuntimeEventsResponse:
-    records: list[RuntimeEventRecord] = []
-    try:
-        run = await session_manager.load_runtime_run(run_id)
-        session = await session_manager.get_session_async(run.session_id)
-        for event in body.events:
-            payload = cast(
-                dict[str, JSONValue],
-                {
-                    "message_type": event.event,
-                    "message": dict(event.data),
-                },
-            )
-            record = await session_manager.append_attached_executor_event(
-                run_id=run_id,
-                executor_id=body.worker_id,
-                claim_token=body.claim_token,
-                event_id=event.event_id,
-                event_kind=f"wire.{event.event}",
-                payload=payload,
-                created_at=event.created_at or datetime.now(UTC),
-            )
-            records.append(record)
-            await _broadcast_event(
-                session,
-                {"event": event.event, "data": json.dumps(event.data)},
-            )
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return RuntimeEventsResponse(
-        run_id=run_id,
-        events=[_runtime_event_response(record) for record in records],
-    )
+    del request, run_id, body, api_key
+    raise _remote_loop_gone()
 
 
 @app.post("/worker/runs/{run_id}/approval", response_model=WorkerApprovalResponse)
@@ -3584,35 +3420,8 @@ async def request_worker_approval(
     body: WorkerApprovalRequest,
     api_key: str | None = Depends(verify_api_key),
 ) -> WorkerApprovalResponse:
-    try:
-        run = await session_manager.heartbeat_attached_executor_run(
-            run_id=run_id,
-            executor_id=body.worker_id,
-            claim_token=body.claim_token,
-        )
-        approval = await wait_for_approval(
-            run.session_id,
-            ApprovalRequest(
-                session_id=run.session_id,
-                agent_id="",
-                request_id=body.request_id,
-                tool=body.tool_name,
-                args=body.arguments,
-                timeout_seconds=body.timeout_seconds,
-            ),
-        )
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return WorkerApprovalResponse(
-        request_id=approval.request_id,
-        approved=approval.approved,
-        feedback=approval.feedback,
-        scope=approval.scope,
-    )
+    del request, run_id, body, api_key
+    raise _remote_loop_gone()
 
 
 @app.post("/worker/runs/{run_id}/complete", response_model=RuntimeRunResponse)
@@ -3624,63 +3433,8 @@ async def complete_worker_run(
     body: WorkerRunCompleteRequest,
     api_key: str | None = Depends(verify_api_key),
 ) -> RuntimeRunResponse:
-    try:
-        run = await session_manager.finalize_attached_executor_run(
-            run_id=run_id,
-            executor_id=body.worker_id,
-            claim_token=body.claim_token,
-            status=body.status,
-            result=cast(dict[str, JSONValue], dict(body.result)),
-            error=body.error,
-            tape_id=body.tape_id,
-            tape_entries=(
-                None
-                if body.tape_entries is None
-                else [
-                    cast(dict[str, JSONValue], dict(entry))
-                    for entry in body.tape_entries
-                ]
-            ),
-        )
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=_key_error_detail(exc)) from exc
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    completion_status = _worker_completion_status(body.status)
-    try:
-        session = await session_manager.get_session_async(run.session_id)
-        await _broadcast_event(
-            session,
-            {
-                "event": "TurnEnd",
-                "data": json.dumps(
-                    {
-                        "session_id": run.session_id,
-                        "agent_id": "",
-                        "turn_id": run.run_id,
-                        "completion_status": completion_status,
-                        "timestamp": datetime.now(UTC).isoformat(),
-                    }
-                ),
-            },
-        )
-    except Exception:
-        logger.exception(
-            "Failed to broadcast external worker completion",
-            extra={"run_id": run.run_id, "session_id": run.session_id},
-        )
-    return _runtime_run_response(run)
-
-
-def _worker_completion_status(status: str) -> str:
-    if status == "completed":
-        return CompletionStatus.COMPLETED.value
-    if status == "cancelled":
-        return CompletionStatus.BLOCKED.value
-    return CompletionStatus.ERROR.value
+    del request, run_id, body, api_key
+    raise _remote_loop_gone()
 
 
 @app.post("/sessions/{session_id}/approve", response_model=ApprovalResponseSchema)
