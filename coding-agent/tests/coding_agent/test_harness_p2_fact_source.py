@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -318,12 +319,19 @@ class HarnessFakePGConnection:
         if "FROM session_event_records" in query:
             session_id = cast(str, args[0])
             after = args[1]
-            limit = int(args[2]) if len(args) > 2 else 1000
+            epoch_filter = None
+            if "projection_epoch = $3" in query:
+                epoch_filter = args[2]
+                limit = int(args[3]) if len(args) > 3 else 1000
+            else:
+                limit = int(args[2]) if len(args) > 2 else 1000
             inclusive = "session_seq >= $2" in query
             rows = []
             for event in self.events:
                 seq = event["session_seq"]
                 if event["session_id"] != session_id:
+                    continue
+                if epoch_filter is not None and event["projection_epoch"] != epoch_filter:
                     continue
                 if inclusive and seq >= after:
                     rows.append(event)
@@ -652,6 +660,61 @@ async def test_delta_and_settled_cursors_bind_projection_and_epoch(
     replayed = await store.replay_projection(rebound)
     assert [event.event_id for event in replayed] == ["event-two"]
     assert replayed[0].projection_epoch == "1"
+
+
+@pytest.mark.asyncio
+async def test_replay_projection_does_not_return_superseded_epoch_events(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store, owner = await _open_store(store_kind, tmp_path)
+    await store.commit_authoritative_uow(owner, _unit("one"))
+    await store.commit_authoritative_uow(owner, _unit("two"))
+    await _restore(store, owner)
+    await store.commit_authoritative_uow(owner, _unit("three"))
+
+    rebuilt = ProjectionCursor(
+        kind="delta",
+        session_id=SESSION_ID,
+        projection=DEFAULT_HARNESS_PROJECTION,
+        epoch="1",
+        session_seq="0",
+    )
+    replayed = await store.replay_projection(rebuilt)
+    assert [event.event_id for event in replayed] == ["event-three"]
+    assert [event.projection_epoch for event in replayed] == ["1"]
+
+
+@pytest.mark.asyncio
+async def test_authoritative_uow_rejects_unbound_or_foreign_run_tape(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store, owner = await _open_store(store_kind, tmp_path)
+    started_at = datetime(2026, 8, 19, 12, 0, tzinfo=UTC)
+    unbound = _unit(
+        "unbound",
+        run_state=replace(
+            _run("run-unbound", started_at=started_at),
+            tape_id="tape-of-other-session",
+        ),
+    )
+    with pytest.raises(SessionOwnershipConflictError):
+        await store.commit_authoritative_uow(owner, unbound)
+
+    missing_tape = _unit(
+        "missing",
+        run_state=replace(
+            _run("run-missing-tape", started_at=started_at),
+            tape_id=None,
+        ),
+    )
+    with pytest.raises(SessionOwnershipConflictError):
+        await store.commit_authoritative_uow(owner, missing_tape)
+
+    bound = _unit("bound", run_state=_run("run-bound", started_at=started_at))
+    committed = await store.commit_authoritative_uow(owner, bound)
+    assert committed.event.session_seq == "1"
 
 
 @pytest.mark.asyncio

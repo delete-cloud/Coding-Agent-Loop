@@ -1528,6 +1528,16 @@ class SQLiteLocalDurableStore:
             self._assert_authority(connection, authority)
             if tape_id:
                 self._bind_tape(connection, authority.session_id, tape_id)
+            if unit.run_state is not None:
+                if unit.run_state.tape_id is None:
+                    raise SessionOwnershipConflictError(
+                        "run target is not bound to a tape"
+                    )
+                self._assert_tape_belongs_to_session(
+                    connection,
+                    tape_id=unit.run_state.tape_id,
+                    session_id=authority.session_id,
+                )
             fact = self._ensure_fact_source(connection, authority.session_id)
             next_seq = fact.session_seq_int + 1
             connection.execute(
@@ -1876,14 +1886,16 @@ class SQLiteLocalDurableStore:
                 fact.state.retention_floor,
             )
             after = parse_u64(cursor.session_seq, field_name="session_seq")
+            epoch = parse_u64(cursor.epoch, field_name="epoch")
             rows = connection.execute(
                 """
                 SELECT * FROM session_event_records
                 WHERE session_id = ? AND session_seq > ?
+                  AND projection_epoch = ?
                 ORDER BY session_seq
                 LIMIT ?
                 """,
-                (cursor.session_id, after, limit),
+                (cursor.session_id, after, epoch, limit),
             ).fetchall()
         return [_event_record_from_sqlite_row(row) for row in rows]
 

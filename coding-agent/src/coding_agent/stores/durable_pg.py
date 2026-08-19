@@ -452,6 +452,12 @@ class PGDurableStore:
     ORDER BY session_seq
     LIMIT $3
     """
+    _REPLAY_PROJECTION_EVENTS_AFTER_SQL = """
+    SELECT * FROM session_event_records
+    WHERE session_id = $1 AND session_seq > $2 AND projection_epoch = $3
+    ORDER BY session_seq
+    LIMIT $4
+    """
     _REPLAY_SESSION_EVENTS_FROM_SQL = """
     SELECT * FROM session_event_records
     WHERE session_id = $1 AND session_seq >= $2
@@ -971,7 +977,11 @@ class PGDurableStore:
             await self._require_owner(connection, authority)
             if tape_id:
                 await self._bind_tape(connection, authority.session_id, tape_id)
-            if unit.run_state is not None and unit.run_state.tape_id:
+            if unit.run_state is not None:
+                if unit.run_state.tape_id is None:
+                    raise SessionOwnershipConflictError(
+                        "run target is not bound to a tape"
+                    )
                 await self._require_stable_tape(
                     connection, authority, unit.run_state.tape_id
                 )
@@ -998,10 +1008,6 @@ class PGDurableStore:
                 unit.session_state,
             )
             if unit.run_state is not None:
-                if unit.run_state.tape_id is None:
-                    raise SessionOwnershipConflictError(
-                        "run target is not bound to a tape"
-                    )
                 run_row = await connection.fetchrow(
                     self._UPSERT_OWNED_RUN_SQL,
                     unit.run_state.run_id,
@@ -1209,10 +1215,12 @@ class PGDurableStore:
             fact.state.retention_floor,
         )
         after = parse_u64(cursor.session_seq, field_name="session_seq")
+        epoch = parse_u64(cursor.epoch, field_name="epoch")
         rows = await pool.fetch(
-            self._REPLAY_SESSION_EVENTS_AFTER_SQL,
+            self._REPLAY_PROJECTION_EVENTS_AFTER_SQL,
             cursor.session_id,
             after,
+            epoch,
             limit,
         )
         return [_event_record_from_pg_row(dict(row)) for row in rows]
