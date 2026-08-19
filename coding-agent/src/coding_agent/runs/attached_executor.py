@@ -8,7 +8,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, AsyncContextManager, Protocol, cast
 
-from coding_agent.stores.runtime_store import AgentRunRecord, JSONObject, RuntimeEventRecord
+from coding_agent.stores.runtime_store import (
+    AgentRunRecord,
+    JSONObject,
+    RuntimeEventRecord,
+)
 from coding_agent.stores import RuntimeRunStore
 
 from .lifecycle import RuntimeRunResumeContext
@@ -18,6 +22,16 @@ from .runtime_events import with_runtime_event_correlation
 
 ATTACHED_EXECUTOR_REF_KINDS = frozenset({"external_worker", "local_attached"})
 ATTACHED_EXECUTOR_FINAL_STATUSES = frozenset({"completed", "cancelled", "failed"})
+REMOTE_LOOP_OWNERSHIP_RETIRED = (
+    "remote loop ownership has been retired; the agent loop lives in-process"
+)
+
+
+class RemoteLoopOwnershipRetired(RuntimeError):
+    """Raised when an external process tries to own the agent loop."""
+
+    def __init__(self, message: str = REMOTE_LOOP_OWNERSHIP_RETIRED) -> None:
+        super().__init__(message)
 
 
 class RuntimeAttachedExecutorStore(RuntimeRunStore, Protocol):
@@ -268,36 +282,17 @@ class RuntimeAttachedExecutorService:
         capabilities: JSONObject | None = None,
         workspace_sync: JSONObject | None = None,
     ) -> RuntimeAttachedExecutorClaim | None:
-        claim_token = self.token_urlsafe(32)
-        now = self.now()
-        lease_expires_at = now + timedelta(seconds=lease_seconds)
-        claim_metadata: JSONObject = {
-            "worker_id": executor_id,
-            "executor_id": executor_id,
-            "claim_token_hash": _hash_claim_token(claim_token),
-            "claimed_at": now.isoformat(),
-            "lease_expires_at": lease_expires_at.isoformat(),
-        }
-        if worker_instance_id is not None:
-            claim_metadata["worker_instance_id"] = worker_instance_id
-        if process_id is not None:
-            claim_metadata["process_id"] = process_id
-        if capabilities is not None:
-            claim_metadata["capabilities"] = capabilities
-        if workspace_sync is not None:
-            claim_metadata["workspace_sync"] = workspace_sync
-        run = await self._require_store().claim_attached_executor_run(
-            session_id=session_id,
-            executor_kind=executor_kind,
-            claim_metadata=claim_metadata,
+        del (
+            executor_id,
+            executor_kind,
+            session_id,
+            lease_seconds,
+            worker_instance_id,
+            process_id,
+            capabilities,
+            workspace_sync,
         )
-        if run is None:
-            return None
-        return RuntimeAttachedExecutorClaim(
-            run=run,
-            claim_token=claim_token,
-            prompt=_metadata_required_str(run.metadata, "prompt"),
-        )
+        raise RemoteLoopOwnershipRetired()
 
     async def heartbeat_run(
         self,
@@ -430,10 +425,7 @@ class RuntimeAttachedExecutorService:
         if run is None:
             raise KeyError(f"runtime run not found: {run_id}")
         metadata = run.metadata
-        if (
-            metadata.get("executor_ref_kind")
-            not in ATTACHED_EXECUTOR_REF_KINDS
-        ):
+        if metadata.get("executor_ref_kind") not in ATTACHED_EXECUTOR_REF_KINDS:
             raise ValueError("runtime run is not attached executor owned")
         owner_id = metadata.get("executor_id") or metadata.get("worker_id")
         if owner_id != executor_id:
@@ -461,13 +453,6 @@ def _hash_claim_token(claim_token: str) -> str:
     return hashlib.sha256(claim_token.encode("utf-8")).hexdigest()
 
 
-def _metadata_required_str(metadata: Mapping[str, object], key: str) -> str:
-    value = metadata.get(key)
-    if not isinstance(value, str) or not value:
-        raise RuntimeError(f"runtime run metadata is missing {key}")
-    return value
-
-
 def _optional_metadata_datetime(
     metadata: Mapping[str, object],
     key: str,
@@ -482,6 +467,8 @@ def _optional_metadata_datetime(
 
 __all__ = [
     "ATTACHED_EXECUTOR_REF_KINDS",
+    "REMOTE_LOOP_OWNERSHIP_RETIRED",
+    "RemoteLoopOwnershipRetired",
     "RuntimeAttachedExecutorClaim",
     "RuntimeAttachedExecutorClaimEnvelope",
     "RuntimeAttachedExecutorClaimFactory",

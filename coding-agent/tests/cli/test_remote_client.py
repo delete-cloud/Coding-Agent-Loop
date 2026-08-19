@@ -6,7 +6,6 @@ from queue import Empty, Queue
 import shlex
 import stat
 import subprocess
-import asyncio
 import threading
 from pathlib import Path
 
@@ -1993,20 +1992,12 @@ def test_add_remote_rejects_blank_admin_token_credentials_for_direct_callers(
 def test_remote_local_run_uses_external_worker_binding(
     tmp_path: Path, monkeypatch
 ) -> None:
+    from coding_agent.runs import REMOTE_LOOP_OWNERSHIP_RETIRED
+
     config_path = tmp_path / "remotes.json"
     repo_path = tmp_path / "repo"
     repo_path.mkdir()
     monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
-    calls: list[dict[str, object]] = []
-
-    async def fake_run_local_attached_executor_once(**kwargs):
-        calls.append(kwargs)
-        return 0
-
-    monkeypatch.setattr(
-        "coding_agent.remote.worker.run_local_attached_executor_once",
-        fake_run_local_attached_executor_once,
-    )
     runner = CliRunner()
     runner.invoke(
         main,
@@ -2031,24 +2022,10 @@ def test_remote_local_run_uses_external_worker_binding(
             "--worker-id",
             "worker-test",
         ],
-        catch_exceptions=False,
     )
 
-    assert result.exit_code == 0
-    assert calls == [
-        {
-            "base_url": "http://agent.example",
-            "headers": {"Authorization": "Bearer secret-token"},
-            "repo_path": repo_path.resolve(),
-            "goal": "do local work",
-            "approval_policy": "yolo",
-            "provider_name": None,
-            "model_name": None,
-            "base_url_override": None,
-            "max_steps": 7,
-            "worker_id": "worker-test",
-        }
-    ]
+    assert result.exit_code != 0
+    assert REMOTE_LOOP_OWNERSHIP_RETIRED in result.output
 
 
 @pytest.mark.asyncio
@@ -2057,62 +2034,8 @@ async def test_attached_executor_client_creates_local_attached_session(
 ) -> None:
     from coding_agent.remote import worker as remote_worker
 
-    requests: list[dict[str, object]] = []
-
-    async def handler(request: httpx.Request) -> httpx.Response:
-        requests.append(
-            {
-                "method": request.method,
-                "path": request.url.path,
-                "json": json.loads(request.content.decode("utf-8")),
-            }
-        )
-        return httpx.Response(200, json={"session_id": "sess-local-attached"})
-
-    async with httpx.AsyncClient(
-        base_url="http://agent.example",
-        transport=httpx.MockTransport(handler),
-    ) as client:
-        session_id = await remote_worker._create_attached_executor_session(
-            client=client,
-            repo_path=tmp_path,
-            approval_policy="yolo",
-            provider_name=None,
-            model_name=None,
-            base_url_override=None,
-            max_steps=7,
-            worker_id="executor-1",
-        )
-
-    assert session_id == "sess-local-attached"
-    assert requests == [
-        {
-            "method": "POST",
-            "path": "/sessions",
-            "json": {
-                "approval_policy": "yolo",
-                "max_steps": 7,
-                "run_target": {
-                    "workspace": {
-                        "kind": "external_worker_ref",
-                        "ref": {
-                            "kind": "local_path",
-                            "display_path": str(tmp_path),
-                        },
-                        "provider_instance_id": "executor-1",
-                    },
-                    "executor": {
-                        "kind": "local_attached",
-                        "executor_kind": "local_cli",
-                        "worker_pool": "default",
-                    },
-                    "isolation": {"kind": "external_worker_policy"},
-                    "constraints": {},
-                    "annotations": {},
-                },
-            },
-        }
-    ]
+    del tmp_path
+    assert not hasattr(remote_worker, "_create_attached_executor_session")
 
 
 @pytest.mark.asyncio
@@ -2121,49 +2044,8 @@ async def test_attached_executor_client_claims_via_executor_endpoint(
 ) -> None:
     from coding_agent.remote import worker as remote_worker
 
-    requests: list[dict[str, object]] = []
-
-    async def handler(request: httpx.Request) -> httpx.Response:
-        requests.append(
-            {
-                "method": request.method,
-                "path": request.url.path,
-                "json": json.loads(request.content.decode("utf-8")),
-            }
-        )
-        return httpx.Response(
-            200,
-            json={
-                "run_id": "run-1",
-                "session_id": "sess-1",
-                "claim_token": "claim-token",
-                "prompt": "hello",
-                "approval_policy": "yolo",
-                "max_steps": 7,
-            },
-        )
-
-    async with httpx.AsyncClient(
-        base_url="http://agent.example",
-        transport=httpx.MockTransport(handler),
-    ) as client:
-        claim = await remote_worker._claim_run(
-            client=client,
-            session_id="sess-1",
-            worker_id="executor-1",
-            worker_instance_id="executor-1:instance",
-            repo_path=tmp_path,
-        )
-
-    assert claim is not None
-    assert claim["run_id"] == "run-1"
-    assert requests[0]["method"] == "POST"
-    assert requests[0]["path"] == "/executor/runs/claim"
-    payload = requests[0]["json"]
-    assert isinstance(payload, dict)
-    assert payload["executor_id"] == "executor-1"
-    assert payload["executor_kind"] == "local_cli"
-    assert payload["session_id"] == "sess-1"
+    del tmp_path
+    assert not hasattr(remote_worker, "_claim_run")
 
 
 @pytest.mark.asyncio
@@ -2171,106 +2053,19 @@ async def test_attached_executor_records_agent_phase_span(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from coding_agent.adapter.types import StopReason, TurnOutcome
     from coding_agent.remote import worker as remote_worker
 
-    sink = RecordingObservationSink()
-    completed_requests: list[dict[str, object]] = []
-
-    class FakeTape:
-        tape_id = "tape-1"
-
-        def to_list(self) -> list[dict[str, object]]:
-            return [{"kind": "message"}]
-
-    class FakeContext:
-        tape = FakeTape()
-        config = {"observation_sink": sink}
-
-    class FakePipelineAdapter:
-        def __init__(self, **kwargs: object) -> None:
-            self.kwargs = kwargs
-
-        async def run_turn(self, prompt: str) -> TurnOutcome:
-            assert prompt == "private prompt should not be traced"
-            return TurnOutcome(
-                stop_reason=StopReason.NO_TOOL_CALLS,
-                final_message="done",
-                steps_taken=2,
-            )
-
-    def fake_create_agent(**kwargs: object) -> tuple[object, FakeContext]:
-        assert kwargs["session_id_override"] == "sess-1"
-        assert kwargs["run_id_override"] == "run-1"
-        return object(), FakeContext()
-
-    async def fake_heartbeat_until_complete(**kwargs: object) -> None:
-        del kwargs
-        await asyncio.sleep(0)
-
-    async def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/executor/runs/run-1/complete"
-        completed_requests.append(json.loads(request.content.decode("utf-8")))
-        return httpx.Response(200, json={})
-
-    monkeypatch.setattr("coding_agent.remote.worker.create_agent", fake_create_agent)
-    monkeypatch.setattr(
-        "coding_agent.remote.worker.PipelineAdapter",
-        FakePipelineAdapter,
-    )
-    monkeypatch.setattr(
-        "coding_agent.remote.worker._heartbeat_until_complete",
-        fake_heartbeat_until_complete,
-    )
-
-    async with httpx.AsyncClient(
-        base_url="http://agent.example",
-        transport=httpx.MockTransport(handler),
-    ) as client:
-        status = await remote_worker._execute_claimed_run(
-            client=client,
-            claim={
-                "run_id": "run-1",
-                "session_id": "sess-1",
-                "claim_token": "claim-token",
-                "prompt": "private prompt should not be traced",
-                "approval_policy": "yolo",
-                "max_steps": 7,
-            },
-            repo_path=tmp_path,
-            worker_id="executor-1",
-            worker_instance_id="executor-1:instance",
-        )
-
-    assert status == 0
-    assert completed_requests[0]["status"] == "completed"
-    assert [span.name for span in sink.spans] == ["remote.workspace.agent_phase"]
-    assert sink.spans[0].status == "ok"
-    assert sink.spans[0].attributes == {
-        "session_id": "sess-1",
-        "run_id": "run-1",
-        "executor_kind": "local",
-        "workspace_ref_kind": "local_path",
-        "remote_status": "completed",
-    }
-    assert "private prompt should not be traced" not in str(sink.spans[0].attributes)
+    del tmp_path, monkeypatch
+    assert not hasattr(remote_worker, "_execute_claimed_run")
 
 
 def test_remote_worker_runs_external_worker_loop(tmp_path: Path, monkeypatch) -> None:
+    from coding_agent.runs import REMOTE_LOOP_OWNERSHIP_RETIRED
+
     config_path = tmp_path / "remotes.json"
     repo_path = tmp_path / "repo"
     repo_path.mkdir()
     monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
-    calls: list[dict[str, object]] = []
-
-    async def fake_run_attached_executor_loop(**kwargs):
-        calls.append(kwargs)
-        return 0
-
-    monkeypatch.setattr(
-        "coding_agent.remote.worker.run_attached_executor_loop",
-        fake_run_attached_executor_loop,
-    )
     runner = CliRunner()
     runner.invoke(
         main,
@@ -2292,39 +2087,21 @@ def test_remote_worker_runs_external_worker_loop(tmp_path: Path, monkeypatch) ->
             "--poll-interval",
             "0.5",
         ],
-        catch_exceptions=False,
     )
 
-    assert result.exit_code == 0
-    assert calls == [
-        {
-            "base_url": "http://agent.example",
-            "headers": {"Authorization": "Bearer secret-token"},
-            "repo_path": repo_path.resolve(),
-            "worker_id": "worker-test",
-            "once": True,
-            "poll_interval_seconds": 0.5,
-        }
-    ]
+    assert result.exit_code != 0
+    assert REMOTE_LOOP_OWNERSHIP_RETIRED in result.output
 
 
 def test_remote_executor_alias_runs_existing_attached_executor_loop(
     tmp_path: Path, monkeypatch
 ) -> None:
+    from coding_agent.runs import REMOTE_LOOP_OWNERSHIP_RETIRED
+
     config_path = tmp_path / "remotes.json"
     repo_path = tmp_path / "repo"
     repo_path.mkdir()
     monkeypatch.setenv("CODING_AGENT_REMOTES_FILE", str(config_path))
-    calls: list[dict[str, object]] = []
-
-    async def fake_run_attached_executor_loop(**kwargs):
-        calls.append(kwargs)
-        return 0
-
-    monkeypatch.setattr(
-        "coding_agent.remote.worker.run_attached_executor_loop",
-        fake_run_attached_executor_loop,
-    )
     runner = CliRunner()
     runner.invoke(
         main,
@@ -2346,20 +2123,10 @@ def test_remote_executor_alias_runs_existing_attached_executor_loop(
             "--poll-interval",
             "0.5",
         ],
-        catch_exceptions=False,
     )
 
-    assert result.exit_code == 0
-    assert calls == [
-        {
-            "base_url": "http://agent.example",
-            "headers": {"Authorization": "Bearer secret-token"},
-            "repo_path": repo_path.resolve(),
-            "worker_id": "executor-test",
-            "once": True,
-            "poll_interval_seconds": 0.5,
-        }
-    ]
+    assert result.exit_code != 0
+    assert REMOTE_LOOP_OWNERSHIP_RETIRED in result.output
 
 
 def test_remote_prompt_streams_existing_external_worker_session(

@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from coding_agent.approval import ApprovalPolicy
-from coding_agent.stores.runtime_store import AgentRunRecord, JSONObject, RuntimeEventRecord
+from coding_agent.stores.runtime_store import (
+    AgentRunRecord,
+    JSONObject,
+    RuntimeEventRecord,
+)
 from coding_agent.runs import (
+    RemoteLoopOwnershipRetired,
     ExternalWorkerExecutorRef,
     ExternalWorkerWorkspaceRef,
     IsolationPolicy,
@@ -88,56 +94,19 @@ async def test_attached_executor_service_requests_claims_updates_events_and_fina
         run_id="run-1",
         resume_context=FakeResumeContext(),
     )
-    claim = await service.claim_run(
-        executor_id="executor-1",
-        executor_kind="local_cli",
-        session_id="session-1",
-        capabilities={"streaming": True},
-    )
-    assert claim is not None
-    heartbeat = await service.heartbeat_run(
-        run_id="run-1",
-        executor_id="executor-1",
-        claim_token=claim.claim_token,
-        worker_instance_id="worker-1",
-    )
-    event = await service.append_event(
-        run_id="run-1",
-        executor_id="executor-1",
-        claim_token=claim.claim_token,
-        event_id="event-1",
-        event_kind="wire.StreamDelta",
-        payload={"content": "hello"},
-        created_at=now,
-    )
-    finalized = await service.finalize_run(
-        run_id="run-1",
-        executor_id="executor-1",
-        claim_token=claim.claim_token,
-        status="completed",
-        result={"ok": True},
-        error=None,
-        tape_id="tape-final",
-    )
+    with pytest.raises(RemoteLoopOwnershipRetired, match="in-process"):
+        await service.claim_run(
+            executor_id="executor-1",
+            executor_kind="local_cli",
+            session_id="session-1",
+            capabilities={"streaming": True},
+        )
 
     assert requested.status == "requested"
     assert requested.parent_run_id == "run-previous"
     assert requested.metadata["prompt"] == "continue work"
     assert requested.metadata["run_request_status"] == "requested"
     assert requested.metadata["resume_reason"] == "user_resume"
-    assert claim.run.status == "claimed"
-    assert claim.prompt == "continue work"
-    assert claim.claim_token == "claim-token"
-    assert claim.run.metadata["executor_id"] == "executor-1"
-    assert claim.run.metadata["capabilities"] == {"streaming": True}
-    assert heartbeat.status == "running"
-    assert heartbeat.metadata["worker_instance_id"] == "worker-1"
-    assert event.payload["content"] == "hello"
-    assert event.payload["session_id"] == "session-1"
-    assert event.payload["run_id"] == "run-1"
-    assert finalized.status == "completed"
-    assert finalized.metadata["final_tape_id"] == "tape-final"
-    assert finalized.result == {"ok": True}
 
 
 @pytest.mark.asyncio
@@ -155,20 +124,10 @@ async def test_attached_executor_service_rejects_wrong_executor_owner() -> None:
         prompt="continue work",
         run_id="run-1",
     )
-    claim = await service.claim_run(
-        executor_id="executor-1",
-        executor_kind="local_cli",
-    )
-    assert claim is not None
-
-    with pytest.raises(
-        PermissionError,
-        match="attached executor does not own this run",
-    ):
-        await service.heartbeat_run(
-            run_id="run-1",
-            executor_id="executor-2",
-            claim_token=claim.claim_token,
+    with pytest.raises(RemoteLoopOwnershipRetired, match="in-process"):
+        await service.claim_run(
+            executor_id="executor-1",
+            executor_kind="local_cli",
         )
 
 
@@ -331,26 +290,19 @@ async def test_attached_executor_claim_service_loads_session_and_wraps_claim() -
             session=loaded_session,
         )
 
-    envelope = await RuntimeAttachedExecutorClaimService(
-        attached_executor=lambda: attached_service,
-        load_session=load_session,
-        claim_factory=claim_factory,
-    ).claim_run(
-        executor_id="executor-1",
-        executor_kind="local_cli",
-        session_id="session-1",
-        capabilities={"streaming": True},
-    )
+    with pytest.raises(RemoteLoopOwnershipRetired, match="in-process"):
+        await RuntimeAttachedExecutorClaimService(
+            attached_executor=lambda: attached_service,
+            load_session=load_session,
+            claim_factory=claim_factory,
+        ).claim_run(
+            executor_id="executor-1",
+            executor_kind="local_cli",
+            session_id="session-1",
+            capabilities={"streaming": True},
+        )
 
-    assert envelope is not None
-    assert envelope.run.run_id == "run-1"
-    assert envelope.run.status == "claimed"
-    assert envelope.run.metadata["executor_id"] == "executor-1"
-    assert envelope.run.metadata["capabilities"] == {"streaming": True}
-    assert envelope.claim_token == "claim-token"
-    assert envelope.prompt == "run attached"
-    assert envelope.session is session
-    assert loaded_sessions == ["session-1"]
+    assert loaded_sessions == []
 
 
 @pytest.mark.asyncio
@@ -361,20 +313,20 @@ async def test_attached_executor_claim_service_returns_none_without_claim() -> N
         loaded_sessions.append(session_id)
         return FakeSession()
 
-    envelope = await RuntimeAttachedExecutorClaimService(
-        attached_executor=lambda: RuntimeAttachedExecutorService(
-            store=FakeAttachedExecutorStore(),
-            metadata_for_session=_metadata_for_session,
-        ),
-        load_session=load_session,
-        claim_factory=lambda claim, session: claim,
-    ).claim_run(
-        executor_id="executor-1",
-        executor_kind="local_cli",
-        session_id="session-1",
-    )
+    with pytest.raises(RemoteLoopOwnershipRetired, match="in-process"):
+        await RuntimeAttachedExecutorClaimService(
+            attached_executor=lambda: RuntimeAttachedExecutorService(
+                store=FakeAttachedExecutorStore(),
+                metadata_for_session=_metadata_for_session,
+            ),
+            load_session=load_session,
+            claim_factory=lambda claim, session: claim,
+        ).claim_run(
+            executor_id="executor-1",
+            executor_kind="local_cli",
+            session_id="session-1",
+        )
 
-    assert envelope is None
     assert loaded_sessions == []
 
 
@@ -397,11 +349,12 @@ async def test_attached_executor_finalize_service_saves_tape_before_final_status
         prompt="run attached",
         run_id="run-1",
     )
-    claim = await attached_service.claim_run(
-        executor_id="executor-1",
+    claimed = await store.claim_attached_executor_run(
+        session_id="session-1",
         executor_kind="local_cli",
+        claim_metadata=_historical_claim_metadata(now),
     )
-    assert claim is not None
+    assert claimed is not None
     persisted_sessions: list[FakeSession] = []
 
     async def load_session(session_id: str) -> FakeSession:
@@ -428,7 +381,7 @@ async def test_attached_executor_finalize_service_saves_tape_before_final_status
     ).finalize_run(
         run_id="run-1",
         executor_id="executor-1",
-        claim_token=claim.claim_token,
+        claim_token="claim-token",
         status="completed",
         result={"ok": True},
         error=None,
@@ -473,11 +426,12 @@ async def test_attached_executor_finalize_service_does_not_finalize_when_tape_sa
         prompt="run attached",
         run_id="run-1",
     )
-    claim = await attached_service.claim_run(
-        executor_id="executor-1",
+    claimed = await store.claim_attached_executor_run(
+        session_id="session-1",
         executor_kind="local_cli",
+        claim_metadata=_historical_claim_metadata(now),
     )
-    assert claim is not None
+    assert claimed is not None
 
     async def load_session(session_id: str) -> FakeSession:
         del session_id
@@ -506,7 +460,7 @@ async def test_attached_executor_finalize_service_does_not_finalize_when_tape_sa
         ).finalize_run(
             run_id="run-1",
             executor_id="executor-1",
-            claim_token=claim.claim_token,
+            claim_token="claim-token",
             status="completed",
             result={"ok": True},
             error=None,
@@ -520,6 +474,16 @@ async def test_attached_executor_finalize_service_does_not_finalize_when_tape_sa
     assert loaded.status == "claimed"
     assert session.turn_in_progress is True
     assert session.turn_status == "running"
+
+
+def _historical_claim_metadata(now: datetime) -> JSONObject:
+    return {
+        "worker_id": "executor-1",
+        "executor_id": "executor-1",
+        "claim_token_hash": hashlib.sha256(b"claim-token").hexdigest(),
+        "claimed_at": now.isoformat(),
+        "lease_expires_at": (now + timedelta(seconds=30)).isoformat(),
+    }
 
 
 def _metadata_for_session(

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, NoReturn, cast
 import click
 
 from coding_agent.remote.approval import APPROVAL_POLICIES
+from coding_agent.runs import REMOTE_LOOP_OWNERSHIP_RETIRED
 
 if TYPE_CHECKING:
     from coding_agent.remote.client import RemoteEndpoint
@@ -448,32 +449,8 @@ def remote_local_run(
     worker_id: str | None,
 ) -> None:
     """Create an o6n-managed session and execute it in the local workspace."""
-    import asyncio
-    import uuid
-
-    from coding_agent.remote.client import auth_headers, get_remote
-    from coding_agent.remote.worker import run_local_attached_executor_once
-
-    endpoint = get_remote(name)
-    repo_path = Path(repo).expanduser().resolve()
-    if not repo_path.is_dir():
-        raise click.ClickException(f"--repo must be an existing directory: {repo}")
-    resolved_executor_id = worker_id or f"local-cli-{uuid.uuid4().hex}"
-    status = asyncio.run(
-        run_local_attached_executor_once(
-            base_url=endpoint.url,
-            headers=auth_headers(endpoint),
-            repo_path=repo_path,
-            goal=goal,
-            approval_policy=approval_policy,
-            provider_name=None,
-            model_name=None,
-            base_url_override=None,
-            max_steps=max_steps,
-            worker_id=resolved_executor_id,
-        )
-    )
-    raise SystemExit(status)
+    del name, repo, goal, approval_policy, max_steps, worker_id
+    raise click.ClickException(REMOTE_LOOP_OWNERSHIP_RETIRED)
 
 
 def _run_remote_attached_executor(
@@ -484,26 +461,8 @@ def _run_remote_attached_executor(
     once: bool,
     poll_interval: float,
 ) -> None:
-    import asyncio
-
-    from coding_agent.remote.client import auth_headers, get_remote
-    from coding_agent.remote.worker import run_attached_executor_loop
-
-    endpoint = get_remote(name)
-    repo_path = Path(repo).expanduser().resolve()
-    if not repo_path.is_dir():
-        raise click.ClickException(f"--repo must be an existing directory: {repo}")
-    status = asyncio.run(
-        run_attached_executor_loop(
-            base_url=endpoint.url,
-            headers=auth_headers(endpoint),
-            repo_path=repo_path,
-            worker_id=executor_id,
-            once=once,
-            poll_interval_seconds=poll_interval,
-        )
-    )
-    raise SystemExit(status)
+    del name, repo, executor_id, once, poll_interval
+    raise click.ClickException(REMOTE_LOOP_OWNERSHIP_RETIRED)
 
 
 @remote.command("executor")

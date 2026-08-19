@@ -28,6 +28,8 @@ from .checkpoint_capture import (
 )
 from .attached_executor import (
     ATTACHED_EXECUTOR_REF_KINDS,
+    REMOTE_LOOP_OWNERSHIP_RETIRED,
+    RemoteLoopOwnershipRetired,
     RuntimeAttachedExecutorClaim,
     RuntimeAttachedExecutorClaimEnvelope,
     RuntimeAttachedExecutorClaimFactory,
@@ -238,6 +240,8 @@ __all__ = [
     "UnsetType",
     "CloudWorkspaceRef",
     "ATTACHED_EXECUTOR_REF_KINDS",
+    "REMOTE_LOOP_OWNERSHIP_RETIRED",
+    "RemoteLoopOwnershipRetired",
     "CHECKPOINT_SESSION_CONFIG_KEY",
     "CheckpointRestoreService",
     "CheckpointRestoreSession",
