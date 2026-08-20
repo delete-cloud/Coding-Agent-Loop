@@ -47,6 +47,7 @@ uv run ruff format src/
 - Use `README.md` as the default source of truth for workflows unless a more specific doc under `docs/` overrides it.
 - Do not add thin wrapper functions around existing functions unless the wrapper adds real value beyond renaming.
 - **Decision transparency**: At every decision point (choosing an approach, selecting a trade-off, deferring scope, picking a design pattern, interpreting ambiguous requirements), explicitly output the decision and its rationale before proceeding. This is not about seeking permission — it is about making the reasoning visible so that course corrections are cheap. A one-line statement of what was decided and why is sufficient.
+- **P2 review gate**: Fix P2 findings from review (including external reviewers) that this diff introduced or that this diff can close; do this before merge unless a human explicitly defers them on the PR. Do not auto-skip them as inherited or non-blocking. List P3 findings and out-of-scope items (real PostgreSQL, ADR status flips, compensation state machines); do not block merge on them.
 
 ## Postmortem Usage Rules
 
