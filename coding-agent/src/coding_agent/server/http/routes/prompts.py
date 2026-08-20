@@ -12,6 +12,7 @@ from typing import Literal, cast
 from fastapi import Depends, HTTPException, Query, Request
 from sse_starlette.sse import EventSourceResponse
 
+from coding_agent.runs.lifecycle import RuntimeTurnSessionState
 from coding_agent.server.auth import (
     AuthContext,
     auth_context_from_headers,
@@ -152,8 +153,10 @@ async def send_prompt(
                 session.task is None and has_admission_state
             )
             if finalize_needed:
-                turn_session_state = (
-                    _bindings.module()._sse_disconnect_turn_session_state()
+                session_manager = _bindings.module().session_manager
+                turn_session_state = RuntimeTurnSessionState(
+                    persist_session=session_manager._persist_session_async,
+                    persist_finalize=session_manager._persist_turn_settled,
                 )
                 await asyncio.shield(
                     turn_session_state.finalize(
