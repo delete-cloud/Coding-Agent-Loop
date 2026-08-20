@@ -3258,7 +3258,8 @@ async def send_prompt(
             )
             if finalize_needed:
                 turn_session_state = RuntimeTurnSessionState(
-                    persist_session=session_manager._persist_session_async
+                    persist_session=session_manager._persist_session_async,
+                    persist_finalize=session_manager._persist_turn_settled,
                 )
                 await asyncio.shield(
                     turn_session_state.finalize(

@@ -2575,6 +2575,7 @@ class AuthoritativeCommit:
     projection: str
     projection_epoch: str
     raw_cursor: RawCursor
+    idempotent: bool = False
 
     def __post_init__(self) -> None:
         if self.event.session_seq is None:
@@ -2587,6 +2588,10 @@ class AuthoritativeCommit:
             raise ValueError("raw cursor session_id must match the event")
         if self.raw_cursor.session_seq != self.event.session_seq:
             raise ValueError("raw cursor must land on the committed session_seq")
+        if self.event.projection_epoch != self.projection_epoch:
+            raise ValueError(
+                "committed event.projection_epoch must match commit.projection_epoch"
+            )
 
 
 __all__ = [

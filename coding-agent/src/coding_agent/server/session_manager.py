@@ -6,7 +6,6 @@ import asyncio
 import importlib
 import logging
 import os
-import sqlite3
 import threading
 import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
@@ -81,6 +80,7 @@ from coding_agent.stores.runtime_store import (
     AgentInteractionRecord,
     AgentRunRecord,
     AuthoritativeUnitOfWork,
+    EffectLedgerSlot,
     EventRecord,
     JSONLRuntimeStore,
     JSONObject,
@@ -878,23 +878,6 @@ class SemanticDogfoodTopicSeedResult:
     topic_id: str
     candidate_id: str | None
     warnings: tuple[str, ...] = ()
-
-
-def _is_duplicate_event_id_error(exc: BaseException) -> bool:
-    current: BaseException | None = exc
-    seen: set[int] = set()
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        text = str(current)
-        name = type(current).__name__
-        if "event_id" in text and (
-            isinstance(current, sqlite3.IntegrityError)
-            or name in {"IntegrityError", "UniqueViolationError"}
-            or "unique" in text.lower()
-        ):
-            return True
-        current = current.__cause__ or current.__context__
-    return False
 
 
 class SessionManager:
@@ -2476,6 +2459,9 @@ class SessionManager:
                 return request_id
         return None
 
+    def _approval_effect_id(self, session_id: str, request_id: str) -> str:
+        return f"{session_id}:approval:{request_id}"
+
     async def _commit_session_uow(
         self,
         session: Session,
@@ -2485,6 +2471,7 @@ class SessionManager:
         created_at: datetime,
         include_mailbox: bool,
         event_id_suffix: str | None = None,
+        effect: EffectLedgerSlot | None = None,
     ) -> None:
         self._session_cache[session.id] = session
         store = self._authoritative_store()
@@ -2504,29 +2491,25 @@ class SessionManager:
                 payload={"run_id": session.current_turn_id},
             )
         session_state = cast(JSONObject, session.to_store_data())
-        try:
-            await store.commit_authoritative_uow(
-                authority,
-                AuthoritativeUnitOfWork(
-                    event=EventRecord(
-                        event_id=self._boundary_event_id(
-                            session,
-                            event_kind,
-                            event_id_suffix,
-                        ),
-                        session_id=session.id,
-                        event_kind=event_kind,
-                        payload=payload,
-                        created_at=created_at,
+        await store.commit_authoritative_uow(
+            authority,
+            AuthoritativeUnitOfWork(
+                event=EventRecord(
+                    event_id=self._boundary_event_id(
+                        session,
+                        event_kind,
+                        event_id_suffix,
                     ),
-                    session_state=session_state,
-                    mailbox=mailbox,
+                    session_id=session.id,
+                    event_kind=event_kind,
+                    payload=payload,
+                    created_at=created_at,
                 ),
-            )
-        except Exception as exc:
-            if not _is_duplicate_event_id_error(exc):
-                raise
-            await store.save_session(authority, session_state)
+                session_state=session_state,
+                mailbox=mailbox,
+                effect=effect,
+            ),
+        )
 
     async def _persist_session_async(self, session: Session) -> None:
         self._session_cache[session.id] = session
@@ -2582,6 +2565,11 @@ class SessionManager:
             created_at=datetime.now(UTC),
             include_mailbox=session.current_turn_id is not None,
             event_id_suffix=request_id,
+            effect=EffectLedgerSlot(
+                effect_id=self._approval_effect_id(session.id, request_id),
+                status="prepared",
+                payload={"request_id": request_id},
+            ),
         )
 
     async def _persist_approval_decided(self, session: Session) -> None:
