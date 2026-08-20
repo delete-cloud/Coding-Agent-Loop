@@ -17,9 +17,6 @@ from coding_agent.server.auth import (
     auth_context_from_headers,
     verify_api_key,
 )
-from coding_agent.runs import (
-    RuntimeTurnSessionState,
-)
 from coding_agent.server.rate_limit import RateLimits, limiter
 from coding_agent.server.schemas import (
     ApprovalResponseSchema,
@@ -155,9 +152,8 @@ async def send_prompt(
                 session.task is None and has_admission_state
             )
             if finalize_needed:
-                turn_session_state = RuntimeTurnSessionState(
-                    persist_session=_bindings.module().session_manager._persist_session_async,
-                    persist_finalize=_bindings.module().session_manager._persist_turn_settled,
+                turn_session_state = (
+                    _bindings.module()._sse_disconnect_turn_session_state()
                 )
                 await asyncio.shield(
                     turn_session_state.finalize(

@@ -24,6 +24,7 @@ from coding_agent.server.developer_console import (
     safe_id_value,
 )
 
+from coding_agent.server.http import _bindings
 from coding_agent.server.http._bindings import LOGGER_NAME
 
 from coding_agent.server.http.console_run_meta import (
@@ -36,8 +37,6 @@ from coding_agent.server.http.console_run_meta import (
 from coding_agent.server.http.console_stores import (
     _auth_context_can_access_topic,
     _console_run_summary_from_run,
-    _console_scheduled_run_store,
-    _console_topic_store,
     _proactive_signal_summary_from_record,
     _schedule_summary_from_record,
     _schedule_trigger_summary_from_record,
@@ -150,7 +149,7 @@ async def _console_topic_detail(
 async def _console_topic_summaries_from_store(
     auth_context: AuthContext | None,
 ) -> list[ConsoleTopicSummary]:
-    store = _console_topic_store()
+    store = _bindings.module()._console_topic_store()
     if store is None:
         return []
     topics: list[TopicRecord] = []
@@ -177,7 +176,7 @@ async def _console_topic_detail_from_store(
     topic_id: str,
     auth_context: AuthContext | None,
 ) -> ConsoleTopicDetail | None:
-    store = _console_topic_store()
+    store = _bindings.module()._console_topic_store()
     if store is None:
         return None
     try:
@@ -232,7 +231,7 @@ async def _console_topic_detail_from_store(
 async def _console_schedules_page(
     auth_context: AuthContext | None,
 ) -> ConsoleSchedulesPage:
-    store = _console_scheduled_run_store()
+    store = _bindings.module()._console_scheduled_run_store()
     if store is None:
         return ConsoleSchedulesPage(schedules=(), triggers=(), signals=())
     try:

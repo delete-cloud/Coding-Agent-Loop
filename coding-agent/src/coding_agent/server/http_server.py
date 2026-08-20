@@ -29,6 +29,8 @@ from coding_agent.environment import (
     workspace_provider_capabilities_from_config,
 )
 from coding_agent.runs import UNSET
+from coding_agent.runs.lifecycle import RuntimeTurnSessionState
+from coding_agent.server.provider_models import list_provider_models
 from coding_agent.server.http.constants import (
     APPROVAL_TIMEOUT_SECONDS,
     SESSION_IDLE_TIMEOUT_MINUTES,
@@ -85,6 +87,14 @@ _build_session_manager = globals()["_build_session_manager"]
 session_manager = _build_session_manager()
 codex_oauth_flow_manager = CodexOAuthFlowManager()
 
+
+def _sse_disconnect_turn_session_state() -> RuntimeTurnSessionState:
+    return RuntimeTurnSessionState(
+        persist_session=session_manager._persist_session_async,
+        persist_finalize=session_manager._persist_turn_settled,
+    )
+
+
 from coding_agent.server.http.app import (  # noqa: E402
     _HTTPMetricsASGIMiddleware,
     create_app,
@@ -121,6 +131,7 @@ __all__ = [
     "httpx",
     "list_cloud_workspaces_from_config",
     "limiter",
+    "list_provider_models",
     "provision_cloud_binding_from_config",
     "result_from_turn_trace",
     "publish_workspace_branch_from_config",

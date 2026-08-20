@@ -1,9 +1,10 @@
 """Look up names on the stable http_server module.
 
 Tests monkeypatch ``coding_agent.server.http_server`` attributes
-(config loaders, cloud helpers, asyncio, EventSourceResponse, and
-background tasks). Implementation code must read those names from the
-stable module so setattr reaches the call site.
+(config loaders, cloud helpers, asyncio, EventSourceResponse,
+list_provider_models, console store getters, and background tasks).
+Implementation code must read those names from the stable module so
+setattr reaches the call site.
 """
 
 from __future__ import annotations

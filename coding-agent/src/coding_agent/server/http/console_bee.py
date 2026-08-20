@@ -24,6 +24,7 @@ from coding_agent.server.developer_console import (
     safe_label_value,
 )
 
+from coding_agent.server.http import _bindings
 from coding_agent.server.http._bindings import LOGGER_NAME
 
 from coding_agent.server.http.console_bee_packs import (
@@ -39,8 +40,6 @@ from coding_agent.server.http.console_bee_packs import (
     _console_bee_workspace_template_summaries,
 )
 from coding_agent.server.http.console_stores import (
-    _console_bee_launch_store,
-    _console_executor_run_store,
     _visible_console_runs,
     _visible_console_session_ids,
 )
@@ -134,7 +133,7 @@ async def _executor_run_summaries_from_store(
     auth_context: AuthContext | None,
     runs: Iterable[AgentRunRecord],
 ) -> tuple[ConsoleExecutorRunSummary, ...]:
-    store = _console_executor_run_store()
+    store = _bindings.module()._console_executor_run_store()
     if store is None:
         return ()
     visible_task_ids = {
@@ -208,7 +207,7 @@ async def _bee_launch_summaries(
 async def _bee_launch_summaries_from_store(
     auth_context: AuthContext | None,
 ) -> tuple[ConsoleBeeLaunchSummary, ...]:
-    store = _console_bee_launch_store()
+    store = _bindings.module()._console_bee_launch_store()
     if store is None:
         return ()
     launches: list[BeeLaunchRecord] = []

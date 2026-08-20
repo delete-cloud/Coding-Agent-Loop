@@ -9,7 +9,6 @@ from fastapi import Depends, HTTPException, Request
 from coding_agent.server.auth import (
     verify_api_key,
 )
-from coding_agent.server.provider_models import list_provider_models
 from coding_agent.server.rate_limit import RateLimits, limiter
 from coding_agent.server.schemas import (
     ProviderModelSchema,
@@ -17,6 +16,7 @@ from coding_agent.server.schemas import (
     validate_provider_value,
 )
 
+from coding_agent.server.http import _bindings
 from coding_agent.server.http._bindings import LOGGER_NAME
 
 from fastapi import APIRouter
@@ -44,7 +44,7 @@ async def list_provider_models_endpoint(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     try:
-        model_ids = await list_provider_models(provider)
+        model_ids = await _bindings.module().list_provider_models(provider)
     except Exception:
         logger.info(
             "Provider model listing unavailable provider=%s",
