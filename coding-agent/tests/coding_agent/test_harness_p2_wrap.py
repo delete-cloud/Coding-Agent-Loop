@@ -1,20 +1,24 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import types
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from starlette.requests import Request
 
 from agentkit.checkpoint.models import CheckpointMeta, CheckpointSnapshot
 from agentkit.runtime.context import AgentRunContext
 from agentkit.tape.tape import Tape
 from coding_agent.adapter.types import StopReason, TurnOutcome
 from coding_agent.environment import LocalEnvironment
-from coding_agent.runs.lifecycle import RuntimeTurnSessionState
+import coding_agent.server.http_server as http_server
+from coding_agent.server.http.routes.prompts import send_prompt
 from coding_agent.server.session_manager import SessionManager
 from coding_agent.server.stores.session_owner_store import SQLiteSessionOwnerStore
 from coding_agent.stores.local import local_sqlite_path, local_sqlite_storage_config
@@ -48,13 +52,6 @@ _SESSION_MANAGER = (
     / "coding_agent"
     / "server"
     / "session_manager.py"
-)
-_HTTP_SERVER = (
-    Path(__file__).resolve().parents[2]
-    / "src"
-    / "coding_agent"
-    / "server"
-    / "http_server.py"
 )
 
 
@@ -306,34 +303,80 @@ def test_commit_session_uow_does_not_parse_duplicate_event_id_text() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sse_disconnect_finalize_commits_turn_settled(tmp_path: Path) -> None:
-    http_source = _HTTP_SERVER.read_text()
-    assert "persist_finalize=session_manager._persist_turn_settled" in http_source
+async def test_sse_disconnect_finalize_commits_turn_settled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    disconnect_source = inspect.getsource(send_prompt)
+    assert "persist_finalize=session_manager._persist_turn_settled" in disconnect_source
+    assert "_sse_disconnect_turn_session_state" not in disconnect_source
 
     manager = _durable_manager(tmp_path)
     session_id = await manager.create_session()
     store = manager._local_durable_store
     assert store is not None
-    session = await manager.get_session_async(session_id)
-    session.current_turn_id = "run-disconnect"
-    session.turn_in_progress = True
-    session.turn_status = "running"
-    await manager._persist_turn_started(session)
+    turn_id = "run-disconnect"
+    run_started = asyncio.Event()
 
-    turn_session_state = RuntimeTurnSessionState(
-        persist_session=manager._persist_session_async,
-        persist_finalize=manager._persist_turn_settled,
+    class FakeEventSourceResponse:
+        def __init__(self, body_iterator, **kwargs: object) -> None:
+            del kwargs
+            self.body_iterator = body_iterator
+
+    async def fake_run_agent(_session_id: str, _prompt: str) -> None:
+        session = await manager.get_session_async(_session_id)
+        session.current_turn_id = turn_id
+        session.turn_status = "running"
+        await manager._persist_turn_started(session)
+        run_started.set()
+        await asyncio.Event().wait()
+
+    async def fake_stream_wire_messages(
+        wire: object,
+        task: asyncio.Task[object] | None = None,
+    ) -> AsyncIterator[dict[str, str]]:
+        del wire, task
+        await run_started.wait()
+        yield {"event": "StreamDelta", "data": "{}"}
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(http_server, "EventSourceResponse", FakeEventSourceResponse)
+    monkeypatch.setattr(http_server, "session_manager", manager)
+    monkeypatch.setattr(http_server, "stream_wire_messages", fake_stream_wire_messages)
+    monkeypatch.setattr(manager, "run_agent", fake_run_agent)
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": f"/sessions/{session_id}/prompt",
+            "headers": [],
+        }
     )
-    await turn_session_state.finalize(
-        session,
-        current_task=object(),
-        turn_finished=False,
+    response = await send_prompt(
+        request,
+        session_id,
+        body=http_server.PromptRequest(prompt="Hello"),
+        prompt=None,
+        event_format="wire",
+        api_key=None,
     )
+    event_generator = cast(AsyncIterator[dict[str, str]], response.body_iterator)
+    first_event = await asyncio.wait_for(anext(event_generator), timeout=1)
+    assert first_event["event"] == "StreamDelta"
+
+    before = await store.replay_from_retention_floor(session_id)
+    assert [event.event_kind for event in before.events] == ["harness.TurnStarted"]
+    inflight = await store.load_mailbox_slot(session_id, f"turn:{turn_id}")
+    assert inflight is not None
+    assert inflight.disposition == "in_flight"
+
+    await asyncio.wait_for(event_generator.aclose(), timeout=1)
 
     replay = await store.replay_from_retention_floor(session_id)
     kinds = [event.event_kind for event in replay.events]
-    assert _TURN_SETTLED in kinds
-    mailbox = await store.load_mailbox_slot(session_id, "turn:run-disconnect")
+    assert kinds == ["harness.TurnStarted", _TURN_SETTLED]
+    mailbox = await store.load_mailbox_slot(session_id, f"turn:{turn_id}")
     assert mailbox is not None
     assert mailbox.disposition == "settled"
 
