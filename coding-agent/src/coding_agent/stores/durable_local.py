@@ -1402,6 +1402,14 @@ class SQLiteLocalDurableStore:
                 """,
                 (meta.tape_id, authority.session_id, meta.entry_count),
             )
+            connection.execute(
+                """
+                DELETE FROM session_mailbox_slots
+                WHERE session_id = ?
+                  AND slot_id LIKE 'turn:%'
+                """,
+                (authority.session_id,),
+            )
             self._open_projection_epoch(connection, authority.session_id)
 
     def _reconcile_topics_after_checkpoint_restore(
@@ -1540,33 +1548,89 @@ class SQLiteLocalDurableStore:
                     session_id=authority.session_id,
                 )
             fact = self._ensure_fact_source(connection, authority.session_id)
-            next_seq = fact.session_seq_int + 1
-            connection.execute(
+            existing_row = connection.execute(
                 """
-                UPDATE session_fact_source
-                SET session_seq = ?
-                WHERE session_id = ?
+                SELECT * FROM session_event_records
+                WHERE event_id = ?
                 """,
-                (next_seq, authority.session_id),
-            )
-            connection.execute(
-                """
-                INSERT INTO session_event_records (
-                    session_id, session_seq, event_id, event_kind, payload,
-                    created_at, projection_epoch
+                (unit.event.event_id,),
+            ).fetchone()
+            idempotent = False
+            if existing_row is not None:
+                existing_event = _event_record_from_sqlite_row(existing_row)
+                if existing_event.session_id != authority.session_id:
+                    raise SessionOwnershipConflictError(
+                        "event belongs to another session"
+                    )
+                if existing_event.session_seq is None:
+                    raise ValueError("existing event must include session_seq")
+                if existing_event.projection_epoch is None:
+                    raise ValueError("existing event must include projection_epoch")
+                next_seq = parse_u64(
+                    existing_event.session_seq, field_name="session_seq"
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    authority.session_id,
-                    next_seq,
-                    unit.event.event_id,
-                    unit.event.event_kind,
-                    _json_to_sql(unit.event.payload),
-                    _datetime_to_json(unit.event.created_at),
-                    fact.projection_epoch_int,
-                ),
-            )
+                existing_epoch = parse_u64(
+                    existing_event.projection_epoch, field_name="projection_epoch"
+                )
+                if existing_epoch != fact.projection_epoch_int:
+                    connection.execute(
+                        """
+                        UPDATE session_event_records
+                        SET projection_epoch = ?
+                        WHERE event_id = ?
+                        """,
+                        (fact.projection_epoch_int, unit.event.event_id),
+                    )
+                    promoted_row = connection.execute(
+                        """
+                        SELECT * FROM session_event_records
+                        WHERE event_id = ?
+                        """,
+                        (unit.event.event_id,),
+                    ).fetchone()
+                    if promoted_row is None:
+                        raise RuntimeError("failed to promote event projection_epoch")
+                    event = _event_record_from_sqlite_row(promoted_row)
+                else:
+                    event = existing_event
+                idempotent = True
+            else:
+                next_seq = fact.session_seq_int + 1
+                connection.execute(
+                    """
+                    UPDATE session_fact_source
+                    SET session_seq = ?
+                    WHERE session_id = ?
+                    """,
+                    (next_seq, authority.session_id),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO session_event_records (
+                        session_id, session_seq, event_id, event_kind, payload,
+                        created_at, projection_epoch
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        authority.session_id,
+                        next_seq,
+                        unit.event.event_id,
+                        unit.event.event_kind,
+                        _json_to_sql(unit.event.payload),
+                        _datetime_to_json(unit.event.created_at),
+                        fact.projection_epoch_int,
+                    ),
+                )
+                event = EventRecord(
+                    event_id=unit.event.event_id,
+                    session_id=authority.session_id,
+                    event_kind=unit.event.event_kind,
+                    payload=unit.event.payload,
+                    created_at=unit.event.created_at,
+                    session_seq=format_u64(next_seq),
+                    projection_epoch=format_u64(fact.projection_epoch_int),
+                )
             connection.execute(
                 """
                 INSERT INTO agent_http_sessions (session_id, payload, updated_at)
@@ -1695,15 +1759,6 @@ class SQLiteLocalDurableStore:
                             unit.receipt.compensation_effect_id,
                         ),
                     )
-            event = EventRecord(
-                event_id=unit.event.event_id,
-                session_id=authority.session_id,
-                event_kind=unit.event.event_kind,
-                payload=unit.event.payload,
-                created_at=unit.event.created_at,
-                session_seq=format_u64(next_seq),
-                projection_epoch=format_u64(fact.projection_epoch_int),
-            )
         return AuthoritativeCommit(
             event=event,
             projection=fact.projection,
@@ -1712,6 +1767,7 @@ class SQLiteLocalDurableStore:
                 session_id=authority.session_id,
                 session_seq=format_u64(next_seq),
             ),
+            idempotent=idempotent,
         )
 
     async def load_session_fact_source(

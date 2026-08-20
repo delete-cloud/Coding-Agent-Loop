@@ -199,6 +199,14 @@ class HarnessFakePGConnection:
                 }
             )
             return "INSERT"
+        if "UPDATE session_event_records" in query and "projection_epoch" in query:
+            event_id = args[0]
+            new_epoch = args[1]
+            for event in self.events:
+                if event["event_id"] == event_id:
+                    event["projection_epoch"] = new_epoch
+                    return "UPDATE"
+            return "UPDATE"
         if "INSERT INTO session_mailbox_slots" in query:
             self.mailbox[(cast(str, args[0]), cast(str, args[1]))] = {
                 "session_id": args[0],
@@ -245,6 +253,14 @@ class HarnessFakePGConnection:
             return "INSERT"
         if "UPDATE agent_runs" in query and "superseded_at IS NULL" in query:
             return "UPDATE"
+        if "DELETE FROM session_mailbox_slots" in query:
+            session_id = cast(str, args[0])
+            self.mailbox = {
+                key: value
+                for key, value in self.mailbox.items()
+                if not (key[0] == session_id and str(key[1]).startswith("turn:"))
+            }
+            return "DELETE"
         if "DELETE FROM tape_entries" in query or "TRUNCATE" in query:
             return "DELETE"
         if "DELETE FROM checkpoints" in query:
@@ -267,6 +283,12 @@ class HarnessFakePGConnection:
             return None if session_id is None else {"session_id": session_id}
         if "FROM session_fact_source" in query:
             return self.fact_source.get(cast(str, args[0]))
+        if "FROM session_event_records" in query and "event_id = $1" in query:
+            event_id = args[0]
+            for event in self.events:
+                if event["event_id"] == event_id:
+                    return event
+            return None
         if "FROM session_event_records" in query and "session_seq = $2" in query:
             session_id = cast(str, args[0])
             session_seq = args[1]
@@ -297,6 +319,13 @@ class HarnessFakePGConnection:
         if "UPDATE session_fact_source" in query:
             await self.execute(query, *args)
             return self.fact_source.get(cast(str, args[0]))
+        if "UPDATE session_event_records" in query:
+            await self.execute(query, *args)
+            event_id = args[0]
+            for event in self.events:
+                if event["event_id"] == event_id:
+                    return event
+            return None
         if "INSERT INTO session_event_records" in query:
             await self.execute(query, *args)
             return self.events[-1]
@@ -331,7 +360,10 @@ class HarnessFakePGConnection:
                 seq = event["session_seq"]
                 if event["session_id"] != session_id:
                     continue
-                if epoch_filter is not None and event["projection_epoch"] != epoch_filter:
+                if (
+                    epoch_filter is not None
+                    and event["projection_epoch"] != epoch_filter
+                ):
                     continue
                 if inclusive and seq >= after:
                     rows.append(event)

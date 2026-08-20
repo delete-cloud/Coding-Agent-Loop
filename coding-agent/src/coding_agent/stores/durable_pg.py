@@ -447,6 +447,21 @@ class PGDurableStore:
     SELECT * FROM session_event_records
     WHERE session_id = $1 AND session_seq = $2
     """
+    _SELECT_SESSION_EVENT_BY_ID_SQL = """
+    SELECT * FROM session_event_records
+    WHERE event_id = $1
+    """
+    _PROMOTE_SESSION_EVENT_EPOCH_SQL = """
+    UPDATE session_event_records
+    SET projection_epoch = $2
+    WHERE event_id = $1
+    RETURNING *
+    """
+    _DELETE_TURN_MAILBOX_SLOTS_SQL = """
+    DELETE FROM session_mailbox_slots
+    WHERE session_id = $1
+      AND slot_id LIKE 'turn:%'
+    """
     _REPLAY_SESSION_EVENTS_AFTER_SQL = """
     SELECT * FROM session_event_records
     WHERE session_id = $1 AND session_seq > $2
@@ -953,6 +968,10 @@ class PGDurableStore:
                 authority.session_id,
                 meta.entry_count,
             )
+            await connection.execute(
+                self._DELETE_TURN_MAILBOX_SLOTS_SQL,
+                authority.session_id,
+            )
             await self._open_projection_epoch(connection, authority.session_id)
 
         await self._with_transaction(body)
@@ -987,22 +1006,59 @@ class PGDurableStore:
                     connection, authority, unit.run_state.tape_id
                 )
             fact = await self._ensure_fact_source(connection, authority.session_id)
-            next_seq = fact.session_seq_int + 1
-            _ = await connection.fetchrow(
-                self._UPDATE_FACT_SOURCE_SEQ_SQL,
-                authority.session_id,
-                next_seq,
-            )
-            event_row = await connection.fetchrow(
-                self._INSERT_SESSION_EVENT_SQL,
-                authority.session_id,
-                next_seq,
+            existing_row = await connection.fetchrow(
+                self._SELECT_SESSION_EVENT_BY_ID_SQL,
                 unit.event.event_id,
-                unit.event.event_kind,
-                unit.event.payload,
-                unit.event.created_at,
-                fact.projection_epoch_int,
             )
+            idempotent = False
+            if existing_row is not None:
+                existing_event = _event_record_from_pg_row(dict(existing_row))
+                if existing_event.session_id != authority.session_id:
+                    raise SessionOwnershipConflictError(
+                        "event belongs to another session"
+                    )
+                if existing_event.session_seq is None:
+                    raise ValueError("existing event must include session_seq")
+                if existing_event.projection_epoch is None:
+                    raise ValueError("existing event must include projection_epoch")
+                next_seq = parse_u64(
+                    existing_event.session_seq, field_name="session_seq"
+                )
+                existing_epoch = parse_u64(
+                    existing_event.projection_epoch, field_name="projection_epoch"
+                )
+                if existing_epoch != fact.projection_epoch_int:
+                    promoted_row = await connection.fetchrow(
+                        self._PROMOTE_SESSION_EVENT_EPOCH_SQL,
+                        unit.event.event_id,
+                        fact.projection_epoch_int,
+                    )
+                    event = _event_record_from_pg_row(
+                        _required_row(promoted_row, "session event epoch promote")
+                    )
+                else:
+                    event = existing_event
+                idempotent = True
+            else:
+                next_seq = fact.session_seq_int + 1
+                _ = await connection.fetchrow(
+                    self._UPDATE_FACT_SOURCE_SEQ_SQL,
+                    authority.session_id,
+                    next_seq,
+                )
+                event_row = await connection.fetchrow(
+                    self._INSERT_SESSION_EVENT_SQL,
+                    authority.session_id,
+                    next_seq,
+                    unit.event.event_id,
+                    unit.event.event_kind,
+                    unit.event.payload,
+                    unit.event.created_at,
+                    fact.projection_epoch_int,
+                )
+                event = _event_record_from_pg_row(
+                    _required_row(event_row, "session event insert")
+                )
             await connection.execute(
                 self._UPSERT_SESSION_SQL,
                 authority.session_id,
@@ -1070,9 +1126,6 @@ class PGDurableStore:
                         unit.receipt.payload,
                         unit.receipt.compensation_effect_id,
                     )
-            event = _event_record_from_pg_row(
-                _required_row(event_row, "session event insert")
-            )
             return AuthoritativeCommit(
                 event=event,
                 projection=fact.projection,
@@ -1081,6 +1134,7 @@ class PGDurableStore:
                     session_id=authority.session_id,
                     session_seq=format_u64(next_seq),
                 ),
+                idempotent=idempotent,
             )
 
         return cast(AuthoritativeCommit, await self._with_transaction(body))
