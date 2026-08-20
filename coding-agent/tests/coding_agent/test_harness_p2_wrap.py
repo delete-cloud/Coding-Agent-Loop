@@ -26,7 +26,12 @@ from coding_agent.stores.runtime_store import (
     MailboxDispositionSlot,
     ProjectionCursor,
 )
-from coding_agent.wire.protocol import ApprovalRequest, StreamDelta, ToolCallDelta
+from coding_agent.wire.protocol import (
+    ApprovalRequest,
+    ApprovalResponse,
+    StreamDelta,
+    ToolCallDelta,
+)
 from test_harness_p2_fact_source import (
     SESSION_ID,
     SESSION_PAYLOAD,
@@ -364,7 +369,7 @@ async def test_restore_clears_stale_turn_mailbox(
     await _restore(store, owner)
 
     after = await store.load_mailbox_slot(SESSION_ID, "turn:run-after")
-    assert after is None or after.disposition != "in_flight"
+    assert after is None
 
 
 @pytest.mark.asyncio
@@ -389,6 +394,50 @@ async def test_effect_id_allocated_when_approval_wait_is_established(
     assert effect.effect_id == effect_id
     assert effect.status == "prepared"
     assert effect.payload["request_id"] == request.request_id
+
+
+@pytest.mark.asyncio
+async def test_approval_decided_advances_same_effect_off_prepared(
+    tmp_path: Path,
+) -> None:
+    manager = _durable_manager(tmp_path)
+    session_id = await manager.create_session()
+    store = manager._local_durable_store
+    assert store is not None
+    session = await manager.get_session_async(session_id)
+    session.current_turn_id = "run-approval-decided"
+    session.turn_in_progress = True
+    request = _approval_request(session_id, request_id="request-decided")
+    session.begin_approval_request(request)
+    await manager._persist_approval_requested(session)
+    effect_id = f"{session_id}:approval:{request.request_id}"
+    prepared = await store.load_effect_slot(session_id, effect_id)
+    assert prepared is not None
+    assert prepared.status == "prepared"
+
+    applied = session.approval_coordinator.respond(
+        ApprovalResponse(
+            session_id=session_id,
+            request_id=request.request_id,
+            approved=True,
+            feedback="ok",
+        )
+    )
+    assert applied is True
+    session.expose_approval_response(
+        {
+            "request_id": request.request_id,
+            "decision": "approve",
+            "feedback": "ok",
+        }
+    )
+    await manager._persist_approval_decided(session)
+
+    decided = await store.load_effect_slot(session_id, effect_id)
+    assert decided is not None
+    assert decided.effect_id == effect_id
+    assert decided.status == "settled"
+    assert decided.payload["request_id"] == request.request_id
 
 
 @pytest.mark.asyncio

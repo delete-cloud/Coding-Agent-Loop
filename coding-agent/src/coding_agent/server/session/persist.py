@@ -196,6 +196,11 @@ class PersistOps:
             created_at=datetime.now(UTC),
             include_mailbox=session.current_turn_id is not None,
             event_id_suffix=request_id,
+            effect=EffectLedgerSlot(
+                effect_id=self._approval_effect_id(session.id, request_id),
+                status="settled",
+                payload={"request_id": request_id},
+            ),
         )
 
     def _persist_session(self, session: Session) -> None:
