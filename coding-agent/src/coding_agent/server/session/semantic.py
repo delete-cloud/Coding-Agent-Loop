@@ -35,10 +35,8 @@ from coding_agent.topics.lifecycle import (
     TOPIC_FINALIZED,
     TOPIC_INITIAL,
 )
-from coding_agent.topics.memory import (
-    MemoryReviewStore,
-    propose_memory_candidate_from_topic,
-)
+from coding_agent.topics.memory import MemoryReviewStore
+from coding_agent.server.session import _bindings
 from coding_agent.server.session.models import _runtime_memory_write_enabled
 
 logger = logging.getLogger("coding_agent.server.session_manager")
@@ -300,7 +298,9 @@ class SemanticOps:
                 raise RuntimeError("semantic dogfood topic seed did not finalize topic")
             if memory_write_enabled and review_store.candidate_writes_enabled:
                 try:
-                    candidate = propose_memory_candidate_from_topic(finalized)
+                    candidate = _bindings.module().propose_memory_candidate_from_topic(
+                        finalized
+                    )
                     if candidate is not None:
                         stored_candidate = review_store.add_candidate(candidate)
                         stored_candidate_id = stored_candidate.candidate.candidate_id
