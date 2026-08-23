@@ -1,0 +1,268 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://coding-agent.local/protocol/harness/schema/types.json",
+  "title": "Harness control-plane wire types",
+  "description": "ADR-0076 P3 contract types. This document freezes the wire shape only: no handlers exist for these methods yet. u64 values travel as decimal strings. The IDL carries EffectRef; in-process execution handles are not wire types and never appear here.",
+  "definitions": {
+    "U64": {
+      "type": "string",
+      "maxLength": 20,
+      "pattern": "^(?:0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|18446744073709550[0-9]{3}|18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]|1844674407370955161[0-4]|18446744073709551615)$",
+      "description": "Unsigned 64-bit integer encoded as a decimal string on the wire. Bounded to 0..18446744073709551615; no leading zeros."
+    },
+    "SessionId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Session identifier."
+    },
+    "OwnerId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Owner identifier for the ADR-0068 session fence."
+    },
+    "TurnId": {
+      "$ref": "#/definitions/U64",
+      "description": "Turn identifier; monotonic u64 as a decimal string."
+    },
+    "CheckpointId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Checkpoint identifier used by checkpoint/restore."
+    },
+    "SessionFence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "owner_id", "epoch"],
+      "properties": {
+        "session_id": { "$ref": "#/definitions/SessionId" },
+        "owner_id": { "$ref": "#/definitions/OwnerId" },
+        "epoch": { "$ref": "#/definitions/U64" }
+      },
+      "description": "ADR-0068 per-session fence {session_id, owner_id, epoch}. P1 through P3 use only this fence; a storage-instance writer lease is P4."
+    },
+    "EffectRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["effect_id", "session_id"],
+      "properties": {
+        "effect_id": { "$ref": "#/definitions/U64" },
+        "session_id": { "$ref": "#/definitions/SessionId" },
+        "kind": {
+          "type": "string",
+          "description": "Optional effect classification (attempt, compensation, ...)."
+        }
+      },
+      "description": "Wire reference to a ledger effect. The IDL stops at EffectRef; in-process execution handles never appear on the wire."
+    },
+    "ApprovalDecision": {
+      "type": "string",
+      "enum": ["approve", "reject"],
+      "description": "Client decision on a pending approval wait."
+    },
+    "UnixSocketStatus": {
+      "type": "string",
+      "const": "unavailable",
+      "description": "P3 marks the unix socket unavailable. Binding AF_UNIX, a --socket CLI flag, singleton daemon, and instance lease are all P4."
+    },
+    "InitializeParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["client_name", "protocol_version"],
+      "properties": {
+        "client_name": { "type": "string", "minLength": 1 },
+        "protocol_version": { "type": "string", "minLength": 1 }
+      },
+      "description": "Handshake parameters. No handler is bound in P3."
+    },
+    "InitializeResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["server_name", "protocol_version", "unix_socket_status"],
+      "properties": {
+        "server_name": { "type": "string", "minLength": 1 },
+        "protocol_version": { "type": "string", "minLength": 1 },
+        "unix_socket_status": { "$ref": "#/definitions/UnixSocketStatus" }
+      },
+      "description": "Handshake result. Reports unix_socket_status as the constant 'unavailable' for P3."
+    },
+    "SessionSubscribeParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fence"],
+      "properties": {
+        "fence": { "$ref": "#/definitions/SessionFence" },
+        "cursor": {
+          "type": "string",
+          "description": "Optional raw cursor for replay; delta/settled cursors bind (projection, epoch) per ADR-0076."
+        }
+      }
+    },
+    "SessionSubscribeResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["subscribed"],
+      "properties": {
+        "subscribed": { "const": true }
+      }
+    },
+    "TurnStartParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fence", "prompt"],
+      "properties": {
+        "fence": { "$ref": "#/definitions/SessionFence" },
+        "prompt": { "type": "string" }
+      }
+    },
+    "TurnStartResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["turn_id"],
+      "properties": {
+        "turn_id": { "$ref": "#/definitions/TurnId" }
+      }
+    },
+    "TurnSteerParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fence", "turn_id", "input"],
+      "properties": {
+        "fence": { "$ref": "#/definitions/SessionFence" },
+        "turn_id": { "$ref": "#/definitions/TurnId" },
+        "input": { "type": "string" }
+      }
+    },
+    "TurnInterruptParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fence", "turn_id"],
+      "properties": {
+        "fence": { "$ref": "#/definitions/SessionFence" },
+        "turn_id": { "$ref": "#/definitions/TurnId" }
+      }
+    },
+    "TurnResumeWaitParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fence", "effect_ref"],
+      "properties": {
+        "fence": { "$ref": "#/definitions/SessionFence" },
+        "effect_ref": { "$ref": "#/definitions/EffectRef" }
+      },
+      "description": "Resume a durable approval wait on the effect ledger. Reuses the allocated effect_id; never dispatches a second attempt."
+    },
+    "SessionResumeParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fence"],
+      "properties": {
+        "fence": { "$ref": "#/definitions/SessionFence" }
+      },
+      "description": "Resume creates a new run per ADR-0055; it never reconnects a dead process."
+    },
+    "ApprovalDecideParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fence", "effect_ref", "decision"],
+      "properties": {
+        "fence": { "$ref": "#/definitions/SessionFence" },
+        "effect_ref": { "$ref": "#/definitions/EffectRef" },
+        "decision": { "$ref": "#/definitions/ApprovalDecision" }
+      }
+    },
+    "CheckpointRestoreParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fence", "checkpoint_id"],
+      "properties": {
+        "fence": { "$ref": "#/definitions/SessionFence" },
+        "checkpoint_id": { "$ref": "#/definitions/CheckpointId" }
+      },
+      "description": "Maintenance verb. Applies ADR-0075 supersession; never deletes runs or events."
+    },
+    "EffectReconcileParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fence", "effect_ref"],
+      "properties": {
+        "fence": { "$ref": "#/definitions/SessionFence" },
+        "effect_ref": { "$ref": "#/definitions/EffectRef" }
+      },
+      "description": "Maintenance verb. Crash-repair read/classify over the A/B ledger."
+    },
+    "EffectCompensateParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fence", "effect_ref", "generation"],
+      "properties": {
+        "fence": { "$ref": "#/definitions/SessionFence" },
+        "effect_ref": { "$ref": "#/definitions/EffectRef" },
+        "generation": {
+          "$ref": "#/definitions/U64",
+          "description": "Client operation generation; receipt identity {generation, compensation_effect_id} is first-write-wins."
+        }
+      },
+      "description": "Maintenance verb. Compensation is a separate effect with its own A/B records. generation is the client replay key."
+    },
+    "EffectAttemptState": {
+      "type": "string",
+      "enum": ["prepared", "dispatched", "unknown", "failed", "completed"],
+      "description": "Live A-record attempt state. unknown is transient and must not be frozen onto later reads."
+    },
+    "EffectSettlement": {
+      "type": "string",
+      "enum": ["absent", "resolved"],
+      "description": "Live B-record settlement. Only resolved lifts the quiescent gate."
+    },
+    "EffectClassification": {
+      "type": "string",
+      "enum": [
+        "unobserved",
+        "observed_failed",
+        "observed_completed",
+        "repair_only",
+        "a_failed",
+        "settled"
+      ],
+      "description": "A/B ledger classification from the ADR-0076 crash-repair rules. Wire shape only in P3."
+    },
+    "EffectReconcileResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["effect_ref", "classification", "attempt_state", "settlement"],
+      "properties": {
+        "effect_ref": { "$ref": "#/definitions/EffectRef" },
+        "classification": { "$ref": "#/definitions/EffectClassification" },
+        "attempt_state": { "$ref": "#/definitions/EffectAttemptState" },
+        "settlement": { "$ref": "#/definitions/EffectSettlement" }
+      },
+      "description": "Crash-repair read/classify over the A/B ledger. No handler in P3; this freezes the result shape."
+    },
+    "EffectCompensateResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "generation",
+        "compensation_effect_id",
+        "attempt_state",
+        "settlement"
+      ],
+      "properties": {
+        "generation": { "$ref": "#/definitions/U64" },
+        "compensation_effect_id": { "$ref": "#/definitions/U64" },
+        "attempt_state": { "$ref": "#/definitions/EffectAttemptState" },
+        "settlement": { "$ref": "#/definitions/EffectSettlement" }
+      },
+      "description": "Receipt identity {generation, compensation_effect_id} is first-write-wins. attempt_state and settlement are live A/B reads; a first-response unknown must not be frozen."
+    },
+    "AckResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ok"],
+      "properties": {
+        "ok": { "const": true }
+      },
+      "description": "Generic acknowledgement result for verbs without a dedicated payload."
+    }
+  }
+}

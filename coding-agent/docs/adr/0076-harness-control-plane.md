@@ -21,8 +21,9 @@ exist beside coding-agent stores and must not be migrated by this work.
 record is therefore ADR-0076. It must compose with ADR-0075's superseded-run
 fields rather than invent a second way to hide or delete restored runs.
 
-This ADR is the P0 markdown decision. It names later IDL and spike artifacts. It
-does not implement protocol, storage, daemon, or frontend code.
+This ADR began as the P0 markdown decision. The P3 first cut later froze
+`protocol/harness/` (OpenRPC + Draft 7) and the IDL contract tests. It still
+does not implement handlers, storage, daemon, or frontend code.
 
 ## Decision
 
@@ -179,6 +180,35 @@ IDL-first comes after this ADR: OpenRPC plus JSON Schema Draft 7 as the later
 source of truth, generating Pydantic and TypeScript. Do not hand-write a
 parallel wire type system. `u64` sequences travel as decimal strings.
 
+### P3 control protocol surface (D14)
+
+The P3 first cut freezes the method contract in
+`protocol/harness/openrpc.yaml` plus JSON Schema Draft 7 documents under
+`protocol/harness/schema/`. All eleven D14 verbs are declared with zero
+handlers; nothing is hung on the existing HTTP control plane, and the unix
+socket is marked `unavailable` until P4.
+
+| Method | Kind | Summary |
+| --- | --- | --- |
+| `initialize` | handshake | Handshake; reports `unix_socket_status: "unavailable"`. |
+| `session/subscribe` | session | Subscribe to session events from an optional cursor. |
+| `turn/start` | turn | Start a turn from a prompt. |
+| `turn/steer` | turn | Steer an in-flight turn with additional input. |
+| `turn/interrupt` | turn | Interrupt an in-flight turn. |
+| `turn/resume-wait` | turn | Resume a durable approval wait, reusing the allocated `effect_id`. |
+| `session/resume` | session | Resume a session as a new run; never reconnects a dead process. |
+| `approval/decide` | approval | Approve or reject a pending approval wait on the effect ledger. |
+| `checkpoint/restore` | maintenance | Restore a checkpoint, applying ADR-0075 supersession. |
+| `effect/reconcile` | maintenance | Crash-repair read/classify over the A/B effect ledger. Result carries classification plus live A/B state. |
+| `effect/compensate` | maintenance | Admit a compensation effect. Result is receipt identity `{generation, compensation_effect_id}` plus live A/B status. |
+
+P3 fencing: every verb except `initialize` carries ADR-0068
+`{session_id, owner_id, epoch}`. `initialize` is the handshake and has no
+session yet. The IDL carries `EffectRef` and must not carry `ExecutionHandle`.
+Declaring a verb here is not wiring it: handlers, codegen, and the socket are
+later cuts. `effect/reconcile` and `effect/compensate` freeze their result
+shapes in this cut; they still have zero handlers.
+
 P5 frontend is React only: a three-pane shell plus a node registry. Do not port
 Cordis. A single-file `index.html` UI is not the target.
 
@@ -194,9 +224,11 @@ Cordis. A single-file `index.html` UI is not the target.
 P1–P3 use only ADR-0068 per-session fencing. Do not implement or document a
 storage-instance writer lease before P4.
 
-Intended later artifacts (not part of this change):
+Artifacts:
 
-- `protocol/harness/openrpc.yaml` and JSON Schema Draft 7 documents
+- `protocol/harness/openrpc.yaml` and JSON Schema Draft 7 documents — landed
+  by the P3 first cut with all eleven D14 verbs and zero handlers; codegen and
+  runtime wiring remain later cuts
 - a compensation spike covering A/B/receipt, `compensation_cas`, and C2
 - a restore spike covering mailbox lane cuts, effect reuse, and ADR-0075
   supersession
@@ -223,8 +255,9 @@ Intended later artifacts (not part of this change):
 - Port Cordis or keep a single-file HTML UI as the product frontend —
   rejected. The browser UI consumes a network contract; React plus a node
   registry is the P5 target.
-- Implement protocol, daemon, or frontend in this packet — rejected. P0 is the
-  decision record plus named follow-up artifacts.
+- Implement handlers, daemon, or frontend in the P0 packet — rejected. P0 is
+  the decision record. The later P3 cut freezes the IDL only; it still has
+  zero handlers.
 - Freeze receipt status on first `unknown`, or treat `A(completed) ∧ B absent`
   as a new-admission window — rejected. Receipt identity is immutable; receipt
   status is live. Completed-without-B is repair-only.
@@ -233,8 +266,10 @@ Intended later artifacts (not part of this change):
 
 ## Acceptance Criteria
 
-These tests do not exist yet. They are the intended gate for later
-implementation packets, not for this markdown-only change.
+The P3 IDL gate now lives in
+`tests/coding_agent/test_harness_control_plane_adr_0076.py`
+(`idl` / `unix_socket` / `effect_ref`). The remaining boxes are still the
+intended gate for later implementation packets.
 
 - [ ] `test_cutover_session_rejects_bee_tape_or_uow_mutation`
 - [ ] `test_bee_legacy_store_writes_remain_outside_harness_uow`

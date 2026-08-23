@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Harness P3 第一刀方案 · 已拍板</title>
+  <style>
+    :root {
+      --ink: #1c1917;
+      --muted: #57534e;
+      --rule: #d6cfc3;
+      --paper: #f4efe6;
+      --card: #fffdf8;
+      --do: #14532d;
+      --do-bg: #e7f2e9;
+      --dont: #9f1239;
+      --dont-bg: #f8e8eb;
+      --later: #854d0e;
+      --later-bg: #f6edd6;
+      --info: #1e3a5f;
+      --info-bg: #e8eef6;
+      --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+      --sans: ui-sans-serif, system-ui, -apple-system, "PingFang SC", "Hiragino Sans GB",
+        "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    html { font-size: 18px; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--paper);
+      font-family: var(--sans);
+      line-height: 1.55;
+    }
+
+    .wrap {
+      max-width: 52rem;
+      margin: 0 auto;
+      padding: 2.25rem 1.5rem 3.5rem;
+    }
+
+    header.mast {
+      border-bottom: 2px solid var(--ink);
+      padding-bottom: 1.1rem;
+      margin-bottom: 1.5rem;
+    }
+    .kicker {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem 0.75rem;
+      align-items: center;
+      font-size: 0.78rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 0.55rem;
+    }
+    .stamp {
+      display: inline-block;
+      border: 1px solid var(--ink);
+      padding: 0.08rem 0.4rem;
+      letter-spacing: 0.12em;
+      font-weight: 700;
+      color: var(--ink);
+    }
+    h1 {
+      font-size: 1.85rem;
+      line-height: 1.2;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin: 0 0 0.55rem;
+    }
+    .lede {
+      margin: 0;
+      color: var(--muted);
+      font-size: 1.02rem;
+    }
+
+    nav.toc {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem 1rem;
+      margin: 0 0 1.6rem;
+      font-size: 0.86rem;
+    }
+    nav.toc a { color: var(--info); }
+
+    h2 {
+      font-size: 1.15rem;
+      margin: 2rem 0 0.7rem;
+      padding-top: 0.35rem;
+      border-top: 1px solid var(--rule);
+    }
+    h3 {
+      font-size: 0.95rem;
+      margin: 0 0 0.45rem;
+    }
+    p { margin: 0 0 0.75rem; }
+    a { color: inherit; }
+
+    .recite {
+      background: var(--card);
+      border: 1px solid var(--ink);
+      padding: 1rem 1.1rem;
+      margin-bottom: 1.4rem;
+    }
+    .recite strong { font-weight: 700; }
+
+    .split {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      gap: 0.7rem;
+      align-items: stretch;
+      margin: 0.8rem 0 0.2rem;
+    }
+    .neq {
+      align-self: center;
+      font-size: 1.6rem;
+      font-weight: 800;
+      color: var(--dont);
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--rule);
+      padding: 0.95rem 1rem;
+    }
+    .card.do { border-color: var(--do); background: var(--do-bg); }
+    .card.dont { border-color: var(--dont); background: var(--dont-bg); }
+    .card.later { border-color: var(--later); background: var(--later-bg); }
+    .card.info { border-color: #9bb0c9; background: var(--info-bg); }
+    .tag {
+      display: inline-block;
+      font-size: 0.72rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      font-weight: 700;
+      margin-bottom: 0.35rem;
+    }
+    .tag.do { color: var(--do); }
+    .tag.dont { color: var(--dont); }
+    .tag.later { color: var(--later); }
+    .tag.info { color: var(--info); }
+
+    .grid2, .grid3, .grid4 {
+      display: grid;
+      gap: 0.7rem;
+    }
+    .grid2 { grid-template-columns: 1fr 1fr; }
+    .grid3 { grid-template-columns: 1fr 1fr 1fr; }
+    .grid4 { grid-template-columns: 1fr 1fr 1fr 1fr; }
+
+    .timeline {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 0.45rem;
+      margin: 0.6rem 0 0.8rem;
+    }
+    .phase {
+      background: var(--card);
+      border: 1px solid var(--rule);
+      padding: 0.55rem 0.5rem 0.65rem;
+      min-height: 7.2rem;
+    }
+    .phase .n {
+      font-family: var(--mono);
+      font-size: 0.75rem;
+      font-weight: 700;
+      color: var(--muted);
+    }
+    .phase b { display: block; margin: 0.15rem 0 0.25rem; font-size: 0.92rem; }
+    .phase small { color: var(--muted); font-size: 0.78rem; }
+    .phase.now {
+      border: 2px solid var(--ink);
+      background: #fff;
+    }
+    .phase.wait {
+      border-style: dashed;
+      background: var(--later-bg);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--card);
+      font-size: 0.92rem;
+    }
+    th, td {
+      border: 1px solid var(--rule);
+      padding: 0.55rem 0.65rem;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #efe8da;
+      font-size: 0.78rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    td.yes { background: var(--do-bg); }
+    td.no { background: var(--dont-bg); }
+    td.next { background: var(--later-bg); }
+
+    .verbs {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 0.45rem;
+    }
+    .verb {
+      font-family: var(--mono);
+      font-size: 0.86rem;
+      background: var(--card);
+      border: 1px solid var(--rule);
+      padding: 0.45rem 0.6rem;
+    }
+    .verb.maint {
+      border-color: var(--later);
+      background: var(--later-bg);
+    }
+    .verb .kind {
+      display: block;
+      font-family: var(--sans);
+      font-size: 0.7rem;
+      color: var(--muted);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .bounds { display: grid; grid-template-columns: 1fr 1fr; gap: 0.7rem; }
+    .bounds ul, .card ul { margin: 0.2rem 0 0; padding-left: 1.1rem; }
+    .bounds li, .card li { margin: 0.25rem 0; }
+
+    pre, code { font-family: var(--mono); }
+    pre {
+      margin: 0;
+      padding: 0.8rem 0.9rem;
+      background: #1c1917;
+      color: #f5f0e8;
+      font-size: 0.78rem;
+      line-height: 1.45;
+      overflow-x: auto;
+      white-space: pre-wrap;
+    }
+    code.inline {
+      font-size: 0.86em;
+      background: #efe8da;
+      padding: 0.05rem 0.28rem;
+    }
+
+    .touch {
+      font-size: 0.78rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      margin-top: 0.55rem;
+    }
+    .touch.off { color: var(--dont); }
+    .touch.on { color: var(--do); }
+
+    footer {
+      margin-top: 2.2rem;
+      padding-top: 0.8rem;
+      border-top: 2px solid var(--ink);
+      color: var(--muted);
+      font-size: 0.86rem;
+    }
+    .note { color: var(--muted); font-size: 0.86rem; }
+
+    @media (max-width: 800px) {
+      html { font-size: 16px; }
+      .split, .grid2, .grid3, .grid4, .timeline, .verbs, .bounds {
+        grid-template-columns: 1fr;
+      }
+      .neq { justify-self: center; }
+      .phase { min-height: 0; }
+    }
+
+    @media print {
+      @page { size: A4; margin: 12mm; }
+      html { font-size: 11.5pt; }
+      body { background: #fff; }
+      .wrap { max-width: none; padding: 0; }
+      .card, .phase, .recite, table, pre { break-inside: avoid; }
+      nav.toc { display: none; }
+      h2 { break-after: avoid; }
+      a { text-decoration: none; }
+      pre { background: #f3f0ea; color: #1c1917; border: 1px solid #ccc; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="mast">
+      <div class="kicker">
+        <span class="stamp">已拍板</span>
+        <span>2026-08-21</span>
+        <span>ADR-0076 · Proposed</span>
+        <span>不改产品代码 · 本文件只是复述稿</span>
+      </div>
+      <h1>Harness P3 第一刀方案</h1>
+      <p class="lede">只冻 IDL + unavailable 测试。十一动词进 schema，零 handler。0076 补方法表，不 Accepted。REST+SSE 与 ACP 本阶段都不碰。</p>
+    </header>
+
+    <nav class="toc">
+      <a href="#two-p3">两个 P3</a>
+      <a href="#phases">P3 vs P4</a>
+      <a href="#contract">四条合同</a>
+      <a href="#scope">做 / 不做</a>
+      <a href="#verbs">十一动词</a>
+      <a href="#bounds">硬边界</a>
+      <a href="#artifacts">产物</a>
+      <a href="#accept">验收</a>
+      <a href="#planes">三套并存</a>
+      <a href="#next">下一刀</a>
+    </nav>
+
+    <section class="recite" id="recite">
+      <h3>三十秒复述</h3>
+      <p>两个「P3」不是一回事。<strong>#709 persist_finalize「P3」</strong>是 HTTP 重构收口，已进 main。本刀的 <strong>harness P3</strong> 是 ADR-0076 控制协议：先冻合同，不接线。</p>
+      <p style="margin-bottom:0">P3 = 协议合同，unix socket <strong>标 unavailable</strong>。P4 才 listen / 单例 daemon / instance lease。本刀：D14 十一动词进 schema，<strong>零 handler</strong>，不在现有 HTTP 上挂 <code class="inline">initialize</code>。0076 补方法表，保持 Proposed。REST+SSE 与 ACP 都不 remap、不改。</p>
+    </section>
+
+    <h2 id="two-p3">#709 的「P3」≠ harness P3</h2>
+    <div class="split">
+      <article class="card dont">
+        <div class="tag dont">已合入 · 别的列车</div>
+        <h3>#709 persist_finalize「P3」</h3>
+        <p>HTTP <code class="inline">send_prompt</code> 的重构收口：删 facade stub，finally 真接线 <code class="inline">persist_finalize=_persist_turn_settled</code>。断线测走 <code class="inline">aclose()</code>。</p>
+        <p class="note" style="margin:0">origin/main @ 8d68844e。重构列车停。不是控制协议。</p>
+      </article>
+      <div class="neq" aria-hidden="true">≠</div>
+      <article class="card info">
+        <div class="tag info">本简报 · 未开工</div>
+        <h3>harness P3（ADR-0076）</h3>
+        <p>本地 daemon 控制协议的合同刀：OpenRPC + Draft 7 方法表，加 unavailable 测试。不 listen，不 remap 现网。</p>
+        <p class="note" style="margin:0">有人说「P3 已做完」时，先问是 #709 还是 0076。</p>
+      </article>
+    </div>
+
+    <h2 id="phases">P3 是合同，P4 才是插座</h2>
+    <div class="timeline">
+      <div class="phase">
+        <div class="n">P0</div>
+        <b>决策记录</b>
+        <small>ADR-0076 已有，仍 Proposed</small>
+      </div>
+      <div class="phase">
+        <div class="n">P1</div>
+        <b>远端 loop</b>
+        <small>退役远程 loop 所有权</small>
+      </div>
+      <div class="phase">
+        <div class="n">P2</div>
+        <b>事实源</b>
+        <small>UoW / cursor / Bee 隔离</small>
+      </div>
+      <div class="phase now">
+        <div class="n">P3 · 本刀</div>
+        <b>协议合同</b>
+        <small>冻 IDL；socket 标 unavailable</small>
+      </div>
+      <div class="phase wait">
+        <div class="n">P4 · 不是本刀</div>
+        <b>listen / 单例</b>
+        <small>unix socket、daemon、instance lease</small>
+      </div>
+      <div class="phase">
+        <div class="n">P5</div>
+        <b>前端</b>
+        <small>React 三栏，与本刀无关</small>
+      </div>
+    </div>
+    <div class="grid2">
+      <article class="card">
+        <h3>本阶段 P3</h3>
+        <ul>
+          <li>控制协议的<strong>合同</strong>：方法表、类型、unavailable 断言</li>
+          <li>unix socket <strong>标</strong> <code class="inline">unavailable</code>，不 bind</li>
+          <li>fencing 仍只有 ADR-0068 per-session</li>
+        </ul>
+      </article>
+      <article class="card later">
+        <h3>下一阶段 P4</h3>
+        <ul>
+          <li>才 listen unix socket</li>
+          <li>才单例 daemon</li>
+          <li>才 storage-instance writer lease（共享 PG 用 store-domain lease）</li>
+        </ul>
+      </article>
+    </div>
+
+    <h2 id="contract">四条合同（不要改）</h2>
+    <div class="grid2">
+      <article class="card">
+        <div class="tag">1 · 厚度</div>
+        <h3>只冻 IDL + unavailable 测试</h3>
+        <p style="margin:0">不在现有 HTTP 上挂 <code class="inline">initialize</code>。先测试，再运行时。</p>
+      </article>
+      <article class="card">
+        <div class="tag">2 · 方法表</div>
+        <h3>D14 十一动词进 schema</h3>
+        <p style="margin:0">全集写入 OpenRPC / Draft 7。<strong>零 handler</strong>。进表 ≠ 接线。</p>
+      </article>
+      <article class="card">
+        <div class="tag">3 · ADR-0076</div>
+        <h3>补方法表进正文</h3>
+        <p style="margin:0">趁 Proposed 把 D14 表写进 ADR。本刀<strong>不 Accepted</strong>。0051–0053 也不翻 Superseded。</p>
+      </article>
+      <article class="card">
+        <div class="tag">4 · 并存</div>
+        <h3>REST+SSE 与 ACP 都不碰</h3>
+        <p style="margin:0">本阶段不 remap、不改路径、不改动词、不改宿主协议。</p>
+      </article>
+    </div>
+
+    <h2 id="scope">本刀做 / 不做</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>事项</th>
+          <th>本刀</th>
+          <th>说明</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code class="inline">protocol/harness/openrpc.yaml</code> + JSON Schema Draft 7</td>
+          <td class="yes">做</td>
+          <td>D14 十一动词进 schema</td>
+        </tr>
+        <tr>
+          <td>ADR-0076 正文补方法表</td>
+          <td class="yes">做</td>
+          <td>保持 Proposed，不 Accepted</td>
+        </tr>
+        <tr>
+          <td><code class="inline">test_harness_control_plane_adr_0076.py</code>（idl / unix_socket / effect_ref）</td>
+          <td class="yes">做</td>
+          <td>合同验收，不是运行时验收</td>
+        </tr>
+        <tr>
+          <td>可选 <code class="inline">unix_socket_status() == "unavailable"</code></td>
+          <td class="yes">做（可选）</td>
+          <td>常量即可。不 bind，不加 CLI</td>
+        </tr>
+        <tr>
+          <td>现有 HTTP 挂 <code class="inline">initialize</code> 或任一动词 handler</td>
+          <td class="no">不做</td>
+          <td>零 handler。进表 ≠ 接线</td>
+        </tr>
+        <tr>
+          <td>codegen（Pydantic / TypeScript）</td>
+          <td class="next">不做</td>
+          <td>下一刀，不是本 PR</td>
+        </tr>
+        <tr>
+          <td>把某一方法接到运行时</td>
+          <td class="next">不做</td>
+          <td>下一刀，不是本 PR</td>
+        </tr>
+        <tr>
+          <td>unix socket listen / 单例 daemon / instance lease</td>
+          <td class="next">不做</td>
+          <td>P4，不是本 PR</td>
+        </tr>
+        <tr>
+          <td>发明 <code class="inline">CommandExecutor</code> / 把 <code class="inline">ExecutionHandle</code> 上线</td>
+          <td class="no">不做</td>
+          <td>IDL 最多 <code class="inline">EffectRef</code></td>
+        </tr>
+        <tr>
+          <td>remap REST+SSE，或改 ACP stdio</td>
+          <td class="no">不做</td>
+          <td>三套并存，本刀只碰 harness schema</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2 id="verbs">十一动词 · 进 schema · 零 handler</h2>
+    <p>D14 全集。后三个是 maintenance。本刀只写名字与合同位，不实现语义，不注册路由。</p>
+    <div class="verbs">
+      <div class="verb"><span class="kind">握手</span>initialize</div>
+      <div class="verb"><span class="kind">会话</span>session/subscribe</div>
+      <div class="verb"><span class="kind">回合</span>turn/start</div>
+      <div class="verb"><span class="kind">回合</span>turn/steer</div>
+      <div class="verb"><span class="kind">回合</span>turn/interrupt</div>
+      <div class="verb"><span class="kind">回合</span>turn/resume-wait</div>
+      <div class="verb"><span class="kind">会话</span>session/resume</div>
+      <div class="verb"><span class="kind">审批</span>approval/decide</div>
+      <div class="verb maint"><span class="kind">maintenance</span>checkpoint/restore</div>
+      <div class="verb maint"><span class="kind">maintenance</span>effect/reconcile</div>
+      <div class="verb maint"><span class="kind">maintenance</span>effect/compensate</div>
+    </div>
+    <p class="note" style="margin-top:0.7rem">maintenance 将来带维护锁、管理员权限、expected revision。本刀不写 handler，也不提前做锁。</p>
+
+    <h2 id="bounds">硬边界</h2>
+    <div class="bounds">
+      <article class="card do">
+        <div class="tag do">必须</div>
+        <ul>
+          <li>OpenRPC + JSON Schema Draft 7</li>
+          <li><code class="inline">u64</code> 用十进制字符串走线</li>
+          <li>IDL 最多 <code class="inline">EffectRef</code></li>
+          <li>P1–P3 只有 ADR-0068 per-session fencing（<code class="inline">{session_id, owner_id, epoch}</code>）</li>
+        </ul>
+      </article>
+      <article class="card dont">
+        <div class="tag dont">禁止</div>
+        <ul>
+          <li>把 <code class="inline">ExecutionHandle</code> 放进 IDL</li>
+          <li>本刀发明或落地 <code class="inline">CommandExecutor</code></li>
+          <li>把 ADR-0068 写成 instance fencing</li>
+          <li>P1–P3 做 storage-instance writer lease</li>
+        </ul>
+      </article>
+    </div>
+
+    <h2 id="artifacts">产物</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>路径</th>
+          <th>本刀要求</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code class="inline">protocol/harness/openrpc.yaml</code> + Draft 7 schema</td>
+          <td>十一动词在表里。类型停在 <code class="inline">EffectRef</code>。</td>
+        </tr>
+        <tr>
+          <td><code class="inline">tests/coding_agent/test_harness_control_plane_adr_0076.py</code></td>
+          <td>至少三组：<code class="inline">idl</code> / <code class="inline">unix_socket</code> / <code class="inline">effect_ref</code>。</td>
+        </tr>
+        <tr>
+          <td>可选常量 <code class="inline">unix_socket_status() == "unavailable"</code></td>
+          <td>给测试钉住。不 bind，不加 CLI，不 listen。</td>
+        </tr>
+        <tr>
+          <td><code class="inline">docs/adr/0076-harness-control-plane.md</code></td>
+          <td>正文补方法表。Status 仍是 Proposed。</td>
+        </tr>
+      </tbody>
+    </table>
+    <p class="note">现状备忘：仓库里还没有 <code class="inline">protocol/harness</code> IDL，也没有 AF_UNIX；<code class="inline">serve</code> 与 <code class="inline">daemon</code> 都走 <code class="inline">_run_http_control_plane</code>。</p>
+
+    <h2 id="accept">验收命令</h2>
+    <pre>uv run pytest tests/coding_agent/test_harness_control_plane_adr_0076.py -k "idl or unix_socket or effect_ref" -v</pre>
+    <p class="note" style="margin-top:0.6rem">过这组过滤就够本刀。不要用「全套 harness / compensation / bee」命令冒充本刀验收。</p>
+
+    <h2 id="planes">三套并存 · 本刀碰谁</h2>
+    <p>现网两套继续服务各自宿主。第三套是 harness 控制协议，本刀只写合同，不切流。</p>
+    <div class="grid3">
+      <article class="card">
+        <div class="tag">现网</div>
+        <h3>REST + SSE</h3>
+        <p>服务 WebUI / HTTP 客户端。<code class="inline">serve</code> 与 <code class="inline">daemon</code> 都进 <code class="inline">_run_http_control_plane</code>。</p>
+        <div class="touch off">本刀：不 remap · 不改</div>
+      </article>
+      <article class="card">
+        <div class="tag">现网</div>
+        <h3>ACP stdio</h3>
+        <p>服务 IDE 宿主。另一套 JSON-RPC，走 <code class="inline">run_stdio</code>，不是 harness OpenRPC。</p>
+        <div class="touch off">本刀：不 remap · 不改</div>
+      </article>
+      <article class="card info">
+        <div class="tag info">本刀唯一落点</div>
+        <h3>Harness OpenRPC</h3>
+        <p>将来服务本地 daemon 控制面。本刀只有 yaml / Draft 7 / 测试。零 handler。</p>
+        <div class="touch on">本刀：冻 schema + unavailable</div>
+      </article>
+    </div>
+
+    <h2 id="next">下一刀不是本 PR</h2>
+    <div class="grid3">
+      <article class="card later">
+        <div class="tag later">以后</div>
+        <h3>codegen</h3>
+        <p style="margin:0">由 OpenRPC / Draft 7 生成类型。本 PR 手写平行类型系统也不做。</p>
+      </article>
+      <article class="card later">
+        <div class="tag later">以后</div>
+        <h3>接一条运行时</h3>
+        <p style="margin:0">把某一个动词接到现有 runtime。本 PR 连 <code class="inline">initialize</code> 都不挂 HTTP。</p>
+      </article>
+      <article class="card later">
+        <div class="tag later">以后 · P4</div>
+        <h3>socket / 单例 / lease</h3>
+        <p style="margin:0">listen、单例 daemon、instance lease。P3 只允许标 unavailable。</p>
+      </article>
+    </div>
+
+    <footer>
+      <p>简报位置：<code class="inline">docs/harness-p3-first-cut.html</code>。无外链、可 <code class="inline">open</code>、可打印。</p>
+      <p style="margin:0">复述检查：两个 P3 能分开 · P3/P4 插座边界清楚 · 十一动词在表不在 handler · 0076 不 Accepted · 现网两套没被改。</p>
+    </footer>
+  </div>
+</body>
+</html>
