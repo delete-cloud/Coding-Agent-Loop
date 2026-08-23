@@ -1,0 +1,66 @@
+{
+  "rail": {
+    "navLabel": "全局导航",
+    "sessions": "会话（视觉占位）",
+    "settings": "设置（视觉占位，无点击行为）",
+    "health": "连接健康点（中性静态占位，不表示真实连接状态）"
+  },
+  "sidebar": {
+    "label": "会话列表",
+    "searchLabel": "搜索会话",
+    "searchPlaceholder": "搜索会话…",
+    "newSession": "+ 新建会话",
+    "sessions": {
+      "s1": { "title": "refactor: 前端三栏骨架", "meta": "k3 · 2h ago · 48 msgs" },
+      "s2": { "title": "fix: SSE 重连抖动", "meta": "main · 5h ago · 21 msgs" },
+      "s3": { "title": "checkpoint 恢复语义校对", "meta": "k3 · yesterday · 12 msgs" },
+      "s4": { "title": "token 统计对齐 tabular-nums", "meta": "main · yesterday · 9 msgs" }
+    }
+  },
+  "sessionbar": {
+    "providerModel": "anthropic · claude-sonnet-4",
+    "readoutStatus": "interrupted",
+    "readoutMetrics": "12.4s · ctx 41%",
+    "settings": "设置（临时位置，Slice 5 并入 rail 后移除）",
+    "theme": "主题（临时位置）",
+    "detailsToggle": "详情面板（Esc 关闭）"
+  },
+  "timeline": {
+    "userRole": "user",
+    "assistantRole": "assistant",
+    "m1": {
+      "body": "把 AppFrame 拆成 rail / sidebar / conversation / details 四块，栏间只留 1px hairline，不要 gap。",
+      "meta": "14:02 · 318 tok"
+    },
+    "m2": {
+      "body": "已按 02-slice-1-spec.md 落地：sidebar 固定 240px，details 360px 可关（默认关闭、切会话即关、不落盘），conversation 弹性最小 480px。",
+      "meta": "14:02 · 12.4s · 1,204 tok"
+    },
+    "m3": { "body": "琥珀色现在用在哪里？", "meta": "14:03 · 9 tok" },
+    "m4": {
+      "body": "Slice 1 只有四处合法：sidebar 选中左边线、rail 激活态、focus 边框、interrupted 状态字。审批卡等决策组件留给 Slice 3。",
+      "meta": "14:03 · 2.1s · 356 tok"
+    }
+  },
+  "composer": {
+    "placeholder": "发消息…（Enter 发送，Shift+Enter 换行）"
+  },
+  "details": {
+    "label": "详情面板",
+    "sessionSection": "session",
+    "workspaceSection": "workspace",
+    "providerKey": "provider",
+    "providerValue": "anthropic",
+    "modelKey": "model",
+    "modelValue": "claude-sonnet-4",
+    "contextKey": "context",
+    "contextValue": "41%",
+    "tokensKey": "tokens",
+    "tokensValue": "1,897 / 200k",
+    "branchKey": "branch",
+    "branchValue": "k3-slice-1",
+    "changedKey": "changed",
+    "changedValue": "3 个文件",
+    "note": "details 内部 tab 与数据源在后续切片重构；本页仅呈现壳与令牌。生命周期：默认关闭、切会话即关、不落盘。"
+  }
+}

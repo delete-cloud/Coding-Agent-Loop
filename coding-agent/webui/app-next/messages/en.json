@@ -1,0 +1,66 @@
+{
+  "rail": {
+    "navLabel": "Global navigation",
+    "sessions": "Sessions (visual placeholder)",
+    "settings": "Settings (visual placeholder, no click behavior)",
+    "health": "Connection health dot (neutral static placeholder, not real status)"
+  },
+  "sidebar": {
+    "label": "Session list",
+    "searchLabel": "Search sessions",
+    "searchPlaceholder": "Search sessions…",
+    "newSession": "+ New session",
+    "sessions": {
+      "s1": { "title": "refactor: three-pane frontend shell", "meta": "k3 · 2h ago · 48 msgs" },
+      "s2": { "title": "fix: SSE reconnect jitter", "meta": "main · 5h ago · 21 msgs" },
+      "s3": { "title": "checkpoint restore semantics review", "meta": "k3 · yesterday · 12 msgs" },
+      "s4": { "title": "align token stats to tabular-nums", "meta": "main · yesterday · 9 msgs" }
+    }
+  },
+  "sessionbar": {
+    "providerModel": "anthropic · claude-sonnet-4",
+    "readoutStatus": "interrupted",
+    "readoutMetrics": "12.4s · ctx 41%",
+    "settings": "Settings (interim spot, moves to rail in Slice 5)",
+    "theme": "Theme (interim spot)",
+    "detailsToggle": "Details pane (Esc to close)"
+  },
+  "timeline": {
+    "userRole": "user",
+    "assistantRole": "assistant",
+    "m1": {
+      "body": "Split the AppFrame into rail / sidebar / conversation / details, with only 1px hairlines between panes — no gaps.",
+      "meta": "14:02 · 318 tok"
+    },
+    "m2": {
+      "body": "Landed per 02-slice-1-spec.md: sidebar fixed at 240px, details 360px and closable (closed by default, closes on session switch, never persisted), conversation flexes with a 480px floor.",
+      "meta": "14:02 · 12.4s · 1,204 tok"
+    },
+    "m3": { "body": "Where is amber allowed right now?", "meta": "14:03 · 9 tok" },
+    "m4": {
+      "body": "Exactly four legal spots in Slice 1: the selected sidebar row's left border, the rail's active slot, focus borders, and the interrupted status word. Approval cards and other decision components wait for Slice 3.",
+      "meta": "14:03 · 2.1s · 356 tok"
+    }
+  },
+  "composer": {
+    "placeholder": "Send a message… (Enter to send, Shift+Enter for newline)"
+  },
+  "details": {
+    "label": "Details pane",
+    "sessionSection": "session",
+    "workspaceSection": "workspace",
+    "providerKey": "provider",
+    "providerValue": "anthropic",
+    "modelKey": "model",
+    "modelValue": "claude-sonnet-4",
+    "contextKey": "context",
+    "contextValue": "41%",
+    "tokensKey": "tokens",
+    "tokensValue": "1,897 / 200k",
+    "branchKey": "branch",
+    "branchValue": "k3-slice-1",
+    "changedKey": "changed",
+    "changedValue": "3 files",
+    "note": "Details tabs and their data sources are rebuilt in later slices; this page shows the shell and tokens only. Lifecycle: closed by default, closes on session switch, never persisted."
+  }
+}
