@@ -3,7 +3,7 @@ import { useTranslations } from "next-intl";
 import { renderToString } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import RootLayout from "./layout";
+import RootLayout, { metadata } from "./layout";
 
 // The ENVIRONMENT_FALLBACK warning only fires on the SERVER pass of
 // useTranslations (use-intl gates it on `typeof window === 'undefined'`),
@@ -18,6 +18,18 @@ function TranslatedChild() {
 
 afterEach(() => {
   vi.restoreAllMocks();
+});
+
+describe("RootLayout document metadata", () => {
+  // Break this test should catch: removing the App Router metadata export,
+  // or changing title / applicationName away from the product identity.
+  // Next only serializes this export into static out/index.html <head>.
+  it("exports App Router metadata with the CAL Night Console product marker", () => {
+    expect(metadata).toMatchObject({
+      title: "CAL Night Console",
+      applicationName: "CAL Night Console",
+    });
+  });
 });
 
 describe("RootLayout i18n provider", () => {

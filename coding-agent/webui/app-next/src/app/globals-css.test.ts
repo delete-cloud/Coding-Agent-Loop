@@ -33,11 +33,16 @@ const rules = parseRules(css);
 // The four legal amber sites outside :root (01 §1.4 / 03 rule 3).
 const AMBER_SITE_ALLOWLIST = new Set([
   ":root", // token definitions + shadcn aliases (--primary, --ring)
+  '[data-theme="light"]',
   ".rail-btn.active",
   ".session.sel",
   ".search:focus",
   ".readout em",
 ]);
+
+function isTokenBlock(selector: string): boolean {
+  return selector === ":root" || selector === '[data-theme="light"]';
+}
 
 describe("globals.css amber discipline (01 §1.4)", () => {
   it("details toggle active state is neutral: --fg text, --hairline-2 border, no amber", () => {
@@ -66,10 +71,17 @@ describe("globals.css amber discipline (01 §1.4)", () => {
     expect(selectors).toContain(".readout em");
   });
 
-  it("raw hex / rgba values appear only inside :root (01 §6 / 04 §3)", () => {
+  it("raw hex / rgba values appear only inside :root and [data-theme=light]", () => {
     const hardCoded = rules.filter(
-      (r) => /#[0-9a-fA-F]{3,8}\b|rgba?\(/.test(r.body) && r.selector !== ":root",
+      (r) => /#[0-9a-fA-F]{3,8}\b|rgba?\(/.test(r.body) && !isTokenBlock(r.selector),
     );
     expect(hardCoded).toEqual([]);
+  });
+
+  it("defines [data-theme=light] token overrides", () => {
+    const light = rules.find((r) => r.selector === '[data-theme="light"]');
+    expect(light).toBeDefined();
+    expect(light?.body).toContain("--bg:");
+    expect(light?.body).toContain("--fg:");
   });
 });

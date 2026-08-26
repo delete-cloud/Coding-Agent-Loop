@@ -8,6 +8,8 @@ import { cn } from "@/lib/utils";
 interface DetailsPaneProps {
   open: boolean;
   paneRef: RefObject<HTMLElement | null>;
+  provider?: string | null;
+  model?: string | null;
 }
 
 function SetRow({ label, value }: { label: string; value: string }) {
@@ -26,7 +28,7 @@ function SetRow({ label, value }: { label: string; value: string }) {
  * keep the closed subtree out of the Tab order while preserving its state.
  * `.details-scroll` is the ONLY scroll container inside (02 §2).
  */
-export function DetailsPane({ open, paneRef }: DetailsPaneProps) {
+export function DetailsPane({ open, paneRef, provider, model }: DetailsPaneProps) {
   const t = useTranslations("details");
 
   return (
@@ -41,8 +43,14 @@ export function DetailsPane({ open, paneRef }: DetailsPaneProps) {
       <div className="details-scroll">
         <h4 className="details-h4">{t("sessionSection")}</h4>
         <div className="details-rows">
-          <SetRow label={t("providerKey")} value={t("providerValue")} />
-          <SetRow label={t("modelKey")} value={t("modelValue")} />
+          <SetRow
+            label={t("providerKey")}
+            value={provider && provider.trim().length > 0 ? provider : t("unset")}
+          />
+          <SetRow
+            label={t("modelKey")}
+            value={model && model.trim().length > 0 ? model : t("unset")}
+          />
           <SetRow label={t("contextKey")} value={t("contextValue")} />
           <SetRow label={t("tokensKey")} value={t("tokensValue")} />
         </div>

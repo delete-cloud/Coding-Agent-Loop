@@ -8,6 +8,9 @@ import { cn } from "@/lib/utils";
  * shadcn/ui Input, themed to the Night Console tokens (01/04 §3):
  * focus is signaled by the border turning amber (--ring), never by a
  * shadow ring (01 §5); transitions are color-family only, 120ms linear.
+ *
+ * Native <input> may appear only here (with button.tsx / textarea.tsx);
+ * business views must compose this primitive (04 §3).
  */
 function Input({ className, type, ...props }: React.ComponentProps<"input">) {
   return (

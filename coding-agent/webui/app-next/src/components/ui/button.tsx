@@ -13,8 +13,8 @@ import { cn } from "@/lib/utils";
  *   linear (01 §5) — no motion, no ring shadows (focus uses borders);
  * - all colors come from semantic theme aliases mapped in globals.css.
  *
- * This is the ONLY file (with input.tsx) where a native control element
- * may appear; every other directory must compose this component (04 §3).
+ * Native control elements may appear only in button.tsx, input.tsx, and
+ * textarea.tsx; every other directory must compose these components (04 §3).
  */
 const buttonVariants = cva(
   "inline-flex shrink-0 cursor-pointer items-center justify-center gap-2 whitespace-nowrap rounded-md text-[13px] transition-[color,background-color,border-color] duration-[120ms] ease-linear outline-none focus-visible:border-ring disabled:pointer-events-none disabled:text-muted-foreground [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",

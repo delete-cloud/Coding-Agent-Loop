@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "verify:i18n": "node scripts/verify-i18n.mjs",
+    "verify:packaging": "node scripts/verify-packaging.mjs",
     "verify": "pnpm typecheck && pnpm test && pnpm verify:i18n"
   },
   "dependencies": {
