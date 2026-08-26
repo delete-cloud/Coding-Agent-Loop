@@ -188,6 +188,7 @@ export function AppFrameView() {
     sessionId: string;
     provider: string;
     model: string;
+    baseUrl: string;
   } | null>(null);
   const [createError, setCreateError] = useState("");
   const openRef = useRef(detailsOpen);
@@ -290,6 +291,7 @@ export function AppFrameView() {
           sessionId: id,
           provider: request.provider,
           model: request.model,
+          baseUrl: request.base_url ?? "",
         });
         navigateToSession(id);
       },
@@ -300,10 +302,35 @@ export function AppFrameView() {
   };
 
   const applyRuntime = async (patch: RuntimeConfigPatch) => {
+    const summary =
+      selectedId === null
+        ? null
+        : (catalog.sessions.find((session) => session.session_id === selectedId) ?? null);
+    const sessionProvider =
+      runtimeOverlay && selectedId === runtimeOverlay.sessionId
+        ? runtimeOverlay.provider
+        : summary
+          ? sessionField(summary, "provider_name")
+          : "";
+    const sessionModel =
+      runtimeOverlay && selectedId === runtimeOverlay.sessionId
+        ? runtimeOverlay.model
+        : summary
+          ? sessionField(summary, "model_name")
+          : "";
+    const sessionBaseUrl =
+      runtimeOverlay && selectedId === runtimeOverlay.sessionId
+        ? runtimeOverlay.baseUrl
+        : summary && typeof summary.base_url === "string"
+          ? summary.base_url
+          : defaults.base_url;
     const nextDefaults = {
-      provider: resolveProviderAccount(patch.provider ?? defaults.provider, oauthProviders),
-      model: patch.model ?? defaults.model,
-      base_url: patch.base_url ?? defaults.base_url,
+      provider: resolveProviderAccount(
+        patch.provider ?? (sessionProvider || defaults.provider),
+        oauthProviders,
+      ),
+      model: patch.model ?? (sessionModel || defaults.model),
+      base_url: patch.base_url === undefined ? sessionBaseUrl : (patch.base_url ?? ""),
     };
     const resolvedPatch: RuntimeConfigPatch = { ...patch };
     if (patch.provider !== undefined) {
@@ -312,11 +339,19 @@ export function AppFrameView() {
     try {
       if (selectedId !== null && services !== null && isSettingsClient(services.catalog)) {
         const updated = await services.catalog.updateRuntimeConfig(selectedId, resolvedPatch);
-        setRuntimeOverlay({
-          sessionId: updated.session_id,
+        const persisted = {
           provider: updated.provider_name ?? nextDefaults.provider,
           model: updated.model_name ?? nextDefaults.model,
+          base_url: updated.base_url ?? nextDefaults.base_url,
+        };
+        setRuntimeOverlay({
+          sessionId: updated.session_id,
+          provider: persisted.provider,
+          model: persisted.model,
+          baseUrl: persisted.base_url,
         });
+        persistSessionDefaults(persisted);
+        setDefaults(persisted);
         setApiKey(patch.api_key ?? "");
         return;
       }
@@ -349,6 +384,12 @@ export function AppFrameView() {
       : selectedSummary
         ? sessionField(selectedSummary, "model_name")
         : "";
+  const liveBaseUrl =
+    runtimeOverlay && selectedId === runtimeOverlay.sessionId
+      ? runtimeOverlay.baseUrl
+      : selectedSummary && typeof selectedSummary.base_url === "string"
+        ? selectedSummary.base_url
+        : defaults.base_url;
 
   useEffect(() => {
     const provider = (liveProvider || defaults.provider).trim();
@@ -434,6 +475,14 @@ export function AppFrameView() {
             sessionId={selectedId}
             providerName={liveProvider || defaults.provider}
             modelName={liveModel || defaults.model}
+            currentBaseUrl={liveBaseUrl}
+            accounts={oauthAccounts}
+            onAccountsChange={(next) => {
+              setOauthAccounts(next.map((account) => ({
+                provider: account.provider,
+                label: account.label,
+              })));
+            }}
             client={services.catalog}
             onApply={applyRuntime}
           />

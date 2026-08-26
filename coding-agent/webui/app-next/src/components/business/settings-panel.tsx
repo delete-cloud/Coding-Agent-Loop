@@ -28,11 +28,16 @@ export interface SettingsClient extends CodexClient {
   ): Promise<RuntimeConfigUpdate>;
 }
 
+const EMPTY_ACCOUNTS: ReadonlyArray<{ provider: string; label: string }> = [];
+
 export interface SettingsPanelProps {
   open: boolean;
   sessionId: string | null;
   providerName: string | null;
   modelName: string | null;
+  currentBaseUrl?: string;
+  accounts?: ReadonlyArray<{ provider: string; label: string }>;
+  onAccountsChange?: (accounts: Array<{ provider: string; label: string }>) => void;
   client: SettingsClient;
   onApply: (patch: RuntimeConfigPatch) => Promise<void>;
 }
@@ -42,6 +47,9 @@ export function SettingsPanel({
   sessionId,
   providerName,
   modelName,
+  currentBaseUrl = "",
+  accounts = EMPTY_ACCOUNTS,
+  onAccountsChange,
   client,
   onApply,
 }: SettingsPanelProps) {
@@ -49,11 +57,10 @@ export function SettingsPanel({
   const [provider, setProvider] = useState(providerName ?? "anthropic");
   const [model, setModel] = useState(modelName ?? "");
   const [apiKey, setApiKey] = useState("");
-  const [baseUrl, setBaseUrl] = useState("");
-  const [oauthAccounts, setOauthAccounts] = useState<Array<{ provider: string; label: string }>>([]);
+  const [baseUrl, setBaseUrl] = useState(currentBaseUrl);
   const oauthProviders = useMemo(
-    () => oauthAccounts.map((account) => account.provider),
-    [oauthAccounts],
+    () => accounts.map((account) => account.provider),
+    [accounts],
   );
   const [liveModels, setLiveModels] = useState<string[]>([]);
   const [modelsStatus, setModelsStatus] = useState<"loading" | "ready">("loading");
@@ -67,22 +74,8 @@ export function SettingsPanel({
   }, [providerName, modelName, oauthProviders]);
 
   useEffect(() => {
-    let alive = true;
-    client
-      .listOAuthAccounts()
-      .then((accounts) => {
-        if (alive) setOauthAccounts(accounts.map((account) => ({
-          provider: account.provider,
-          label: account.label,
-        })));
-      })
-      .catch(() => {
-        if (alive) setOauthAccounts([]);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [client]);
+    setBaseUrl(currentBaseUrl);
+  }, [currentBaseUrl]);
 
   useEffect(() => {
     const nextProvider = provider.trim();
@@ -127,6 +120,7 @@ export function SettingsPanel({
       model: model.trim(),
     };
     if (baseUrl.trim()) patch.base_url = baseUrl.trim();
+    else if (sessionId !== null) patch.base_url = null;
     if (!hideApiKey && apiKey.trim()) patch.api_key = apiKey.trim();
     setApplying(true);
     setFeedback(null);
@@ -173,7 +167,7 @@ export function SettingsPanel({
         >
           {providerOptions.map((item) => (
             <option key={item} value={item}>
-              {formatProviderAccountLabel(item, oauthAccounts)}
+              {formatProviderAccountLabel(item, accounts)}
             </option>
           ))}
         </Select>
@@ -214,7 +208,7 @@ export function SettingsPanel({
       <Button disabled={applying || !provider.trim() || !model.trim()} onClick={() => void apply()}>
         {applying ? t("applying") : t("apply")}
       </Button>
-      <CodexAccountsCard client={client} />
+      <CodexAccountsCard client={client} onAccountsChange={onAccountsChange} />
     </section>
   );
 }

@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { NextIntlClientProvider } from "next-intl";
 import { describe, expect, it, vi } from "vitest";
 
@@ -38,5 +38,40 @@ describe("CodexAccountsCard 404 degrade", () => {
     );
 
     expect(await screen.findByText(zhMessages.codex.unsupported)).toBeTruthy();
+  });
+
+  it("notifies the parent after disconnect refreshes the account list", async () => {
+    const onAccountsChange = vi.fn();
+    const remaining = [{ provider: "codex:kept", label: "kept" }];
+    const listOAuthAccounts = vi
+      .fn()
+      .mockResolvedValueOnce([{ provider: "codex:gone", label: "gone" }])
+      .mockResolvedValueOnce(remaining);
+    const deleteOAuthAccount = vi.fn(async () => {});
+    vi.stubGlobal("confirm", () => true);
+
+    render(
+      <NextIntlClientProvider locale="zh" messages={zhMessages}>
+        <CodexAccountsCard
+          client={{
+            listOAuthAccounts,
+            listCodexFlows: vi.fn(async () => []),
+            startCodexOAuth: vi.fn(),
+            getCodexFlow: vi.fn(),
+            cancelCodexFlow: vi.fn(),
+            deleteOAuthAccount,
+          }}
+          onAccountsChange={onAccountsChange}
+        />
+      </NextIntlClientProvider>,
+    );
+
+    expect(await screen.findByText("gone")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: zhMessages.codex.disconnect }));
+
+    await waitFor(() => {
+      expect(deleteOAuthAccount).toHaveBeenCalledWith("codex:gone");
+      expect(onAccountsChange).toHaveBeenLastCalledWith(remaining);
+    });
   });
 });

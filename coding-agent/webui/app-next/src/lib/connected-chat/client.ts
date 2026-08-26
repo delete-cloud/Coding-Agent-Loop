@@ -74,7 +74,7 @@ export interface CreateSessionRequest {
 export interface RuntimeConfigPatch {
   provider?: string;
   model?: string;
-  base_url?: string;
+  base_url?: string | null;
   api_key?: string;
 }
 
@@ -86,11 +86,12 @@ export function isNotFoundError(error: unknown): boolean {
   return error instanceof Error && /HTTP 404\b/.test(error.message);
 }
 
-function sessionConfigBody(request: RuntimeConfigPatch): Record<string, string> {
-  const body: Record<string, string> = {};
+function sessionConfigBody(request: RuntimeConfigPatch): Record<string, string | null> {
+  const body: Record<string, string | null> = {};
   if (request.provider?.trim()) body.provider = request.provider.trim();
   if (request.model?.trim()) body.model = request.model.trim();
-  if (request.base_url?.trim()) body.base_url = request.base_url.trim();
+  if (request.base_url === null) body.base_url = null;
+  else if (request.base_url?.trim()) body.base_url = request.base_url.trim();
   if (request.api_key?.trim()) body.api_key = request.api_key.trim();
   return body;
 }

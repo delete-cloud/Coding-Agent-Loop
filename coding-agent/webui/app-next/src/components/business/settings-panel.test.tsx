@@ -76,6 +76,26 @@ describe("SettingsPanel apply", () => {
     });
   });
 
+  it("resets a custom session base URL by sending null", async () => {
+    const { onApply } = renderSettings({ currentBaseUrl: "https://api.deepseek.com" });
+
+    expect((screen.getByLabelText(zhMessages.settings.baseUrl) as HTMLInputElement).value).toBe(
+      "https://api.deepseek.com",
+    );
+    fireEvent.change(screen.getByLabelText(zhMessages.settings.baseUrl), {
+      target: { value: "" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: zhMessages.settings.apply }));
+
+    await waitFor(() => {
+      expect(onApply).toHaveBeenCalledWith({
+        provider: "anthropic",
+        model: "claude-sonnet-4",
+        base_url: null,
+      });
+    });
+  });
+
   it("never writes the pasted api_key to localStorage", async () => {
     renderSettings();
 
@@ -141,7 +161,7 @@ describe("SettingsPanel apply", () => {
     });
   });
 
-  it("persists next-session defaults when the tape cannot be rebound", async () => {
+  it("shows tape rebound feedback without writing session defaults itself", async () => {
     renderSettings({
       onApply: vi.fn(async () => {
         throw new ChatApiError(500, {
@@ -166,17 +186,14 @@ describe("SettingsPanel apply", () => {
       expect(status.toLowerCase()).not.toContain("tape");
       expect(status).not.toContain("磁带");
     });
-    expect(JSON.parse(localStorage.getItem(SETTINGS_LS_KEY) ?? "{}")).toEqual({
-      provider: "deepseek",
-      model: "deepseek-chat",
-      base_url: "",
-    });
+    expect(localStorage.getItem(SETTINGS_LS_KEY)).toBeNull();
   });
 });
 
 describe("SettingsPanel providers", () => {
   it("lists connected codex:<label> keys and hides bare codex", async () => {
     renderSettings({
+      accounts: [{ provider: "codex:kina0630test-gmail-com", label: "kina" }],
       client: {
         listProviderModels: vi.fn(async () => ({
           provider: "anthropic",
@@ -209,6 +226,7 @@ describe("SettingsPanel providers", () => {
     const { onApply } = renderSettings({
       providerName: "codex",
       modelName: "gpt-5.4",
+      accounts: [{ provider: "codex:kina0630test-gmail-com", label: "kina" }],
       client: {
         listProviderModels: vi.fn(async () => ({
           provider: "codex:kina0630test-gmail-com",
@@ -238,6 +256,7 @@ describe("SettingsPanel providers", () => {
       expect(onApply).toHaveBeenCalledWith({
         provider: "codex:kina0630test-gmail-com",
         model: "gpt-5.4",
+        base_url: null,
       });
     });
   });

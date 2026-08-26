@@ -29,9 +29,11 @@ function errorText(error: unknown): string {
 export function CodexAccountsCard({
   client,
   pollMs = 3000,
+  onAccountsChange,
 }: {
   client: CodexClient;
   pollMs?: number;
+  onAccountsChange?: (accounts: OAuthAccount[]) => void;
 }) {
   const t = useTranslations("codex");
   const [accounts, setAccounts] = useState<OAuthAccount[] | null>(null);
@@ -46,12 +48,14 @@ export function CodexAccountsCard({
 
   const refreshAccounts = useCallback(async () => {
     try {
-      setAccounts(await client.listOAuthAccounts());
+      const next = await client.listOAuthAccounts();
+      setAccounts(next);
+      onAccountsChange?.(next);
     } catch (error) {
       if (isNotFoundError(error)) setUnsupported(true);
       else setNotice({ kind: "error", text: errorText(error) });
     }
-  }, [client]);
+  }, [client, onAccountsChange]);
 
   useEffect(() => {
     let alive = true;

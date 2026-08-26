@@ -226,6 +226,34 @@ describe("ConnectedChatClient.updateRuntimeConfig", () => {
     expect(updated).not.toHaveProperty("api_key");
   });
 
+  it("sends explicit base_url null to reset the session endpoint", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse(
+        {
+          session_id: SESSION,
+          provider_name: "deepseek",
+          model_name: "deepseek-chat",
+          base_url: null,
+        },
+        200,
+      ),
+    );
+    const client = clientWith(fetchImpl as unknown as typeof fetch);
+
+    await client.updateRuntimeConfig(SESSION, {
+      provider: "deepseek",
+      model: "deepseek-chat",
+      base_url: null,
+    });
+
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(JSON.parse(String(init.body))).toEqual({
+      provider: "deepseek",
+      model: "deepseek-chat",
+      base_url: null,
+    });
+  });
+
   it("surfaces FastAPI detail text from a failed PATCH instead of a contract violation", async () => {
     const fetchImpl = vi.fn(async () =>
       jsonResponse({ detail: "session tape target cannot be rebound" }, 500),
