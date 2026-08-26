@@ -280,6 +280,7 @@ class SessionManager(
             )
             task: asyncio.Task[Any] | None = None
             owns_task = False
+            saw_terminal = False
             try:
                 task = await self._claim_admitted_command(session_id, admission)
                 owns_task = task is not None
@@ -291,10 +292,16 @@ class SessionManager(
                         event.kind == "root_terminal"
                         and event.run_id == admission.run_id
                     ):
+                        saw_terminal = True
                         return
             finally:
                 await follow.aclose()
-                if owns_task and task is not None and not task.done():
+                if (
+                    owns_task
+                    and task is not None
+                    and not task.done()
+                    and not saw_terminal
+                ):
                     settlement = asyncio.create_task(
                         self.settle_root_run(
                             session_id,

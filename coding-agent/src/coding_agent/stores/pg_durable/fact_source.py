@@ -226,6 +226,10 @@ class PgFactSourceMixin:
                 DEFAULT_HARNESS_PROJECTION,
                 0,
             )
+            if fact_row is None:
+                fact_row = await pool.fetchrow(
+                    self._SELECT_FACT_SOURCE_SQL, session_id
+                )
             state = _fact_source_from_pg_row(
                 _required_row(fact_row, "session fact source insert")
             ).state

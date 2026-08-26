@@ -196,6 +196,14 @@ class PersistOps:
         run_id = session.current_turn_id
         if run_id is None:
             return
+        run = await self._require_runtime_store().load_agent_run(run_id)
+        if run is not None and run.status in {
+            "completed",
+            "failed",
+            "cancelled",
+            "interrupted",
+        }:
+            return
         if isinstance(message, StreamDelta):
             buffers = self._chat_assistant_buffers
             buffers[session.id] = buffers.get(session.id, "") + message.content
