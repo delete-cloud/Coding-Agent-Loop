@@ -4,11 +4,10 @@ when:
 
 steps:
   deploy:
-    # Image name comes from the Woodpecker secret deploy_tools_image.
+    # Set DEPLOY_TOOLS_IMAGE as a Woodpecker repo/global variable so the
+    # preprocessor can pull it. Step secrets are not available at image pull.
     image: "${DEPLOY_TOOLS_IMAGE}"
     environment:
-      DEPLOY_TOOLS_IMAGE:
-        from_secret: deploy_tools_image
       KUBECONFIG_CONTENT:
         from_secret: kubeconfig
       IMAGE_REPOSITORY:

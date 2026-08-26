@@ -28,6 +28,7 @@ bub/
 
 # design-only trees stay on the machine, not GitHub
 /docs/superpowers/
+/docs/review-lesson-from-copilot-fixes.md
 /coding-agent/docs/superpowers/
 /coding-agent/docs/action_safety/
 /coding-agent/docs/bee_command_bridge/

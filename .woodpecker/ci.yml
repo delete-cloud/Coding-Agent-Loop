@@ -68,9 +68,9 @@ steps:
       - test -n "$PYTHON_BASE_IMAGE"
       - auth="$(printf '%s:%s' "$REGISTRY_USERNAME" "$REGISTRY_PASSWORD" | base64 | tr -d '\n')"
       - printf '{"auths":{"%s":{"auth":"%s"}}}\n' "$REGISTRY_HOST" "$auth" > /kaniko/.docker/config.json
-      - export no_proxy="localhost,127.0.0.1,.svc,.cluster.local${NO_PROXY_EXTRA:+,$NO_PROXY_EXTRA}"
+      - export no_proxy="localhost,127.0.0.1,.svc,.cluster.local$${NO_PROXY_EXTRA:+,$NO_PROXY_EXTRA}"
       - export NO_PROXY="$no_proxy"
-      - /kaniko/executor --context "$CI_WORKSPACE/coding-agent" --dockerfile "$CI_WORKSPACE/coding-agent/Dockerfile" --cache=true --cache-repo "${REGISTRY_HOST}/${REGISTRY_NAMESPACE}/coding-agent/cache" --build-arg NODE_BASE_IMAGE="$NODE_BASE_IMAGE" --build-arg PYTHON_BASE_IMAGE="$PYTHON_BASE_IMAGE" --build-arg PIP_DEFAULT_TIMEOUT="$PIP_DEFAULT_TIMEOUT" --build-arg PIP_INDEX_URL="$PIP_INDEX_URL" --build-arg UV_DEFAULT_INDEX="$UV_DEFAULT_INDEX" --build-arg APT_DEBIAN_MIRROR="$APT_DEBIAN_MIRROR" --build-arg APT_DEBIAN_SECURITY_MIRROR="$APT_DEBIAN_SECURITY_MIRROR" --destination "${REGISTRY_HOST}/${REGISTRY_NAMESPACE}/coding-agent:${CI_COMMIT_SHA}" --destination "${REGISTRY_HOST}/${REGISTRY_NAMESPACE}/coding-agent:main"
+      - /kaniko/executor --context "$CI_WORKSPACE/coding-agent" --dockerfile "$CI_WORKSPACE/coding-agent/Dockerfile" --cache=true --cache-repo "$REGISTRY_HOST/$REGISTRY_NAMESPACE/coding-agent/cache" --build-arg NODE_BASE_IMAGE="$NODE_BASE_IMAGE" --build-arg PYTHON_BASE_IMAGE="$PYTHON_BASE_IMAGE" --build-arg PIP_DEFAULT_TIMEOUT="$PIP_DEFAULT_TIMEOUT" --build-arg PIP_INDEX_URL="$PIP_INDEX_URL" --build-arg UV_DEFAULT_INDEX="$UV_DEFAULT_INDEX" --build-arg APT_DEBIAN_MIRROR="$APT_DEBIAN_MIRROR" --build-arg APT_DEBIAN_SECURITY_MIRROR="$APT_DEBIAN_SECURITY_MIRROR" --destination "$REGISTRY_HOST/$REGISTRY_NAMESPACE/coding-agent:${CI_COMMIT_SHA}" --destination "$REGISTRY_HOST/$REGISTRY_NAMESPACE/coding-agent:main"
     when:
       - event:
           - push
@@ -111,9 +111,9 @@ steps:
       - test -n "$PYTHON_BASE_IMAGE"
       - auth="$(printf '%s:%s' "$REGISTRY_USERNAME" "$REGISTRY_PASSWORD" | base64 | tr -d '\n')"
       - printf '{"auths":{"%s":{"auth":"%s"}}}\n' "$REGISTRY_HOST" "$auth" > /kaniko/.docker/config.json
-      - export no_proxy="localhost,127.0.0.1,.svc,.cluster.local${NO_PROXY_EXTRA:+,$NO_PROXY_EXTRA}"
+      - export no_proxy="localhost,127.0.0.1,.svc,.cluster.local$${NO_PROXY_EXTRA:+,$NO_PROXY_EXTRA}"
       - export NO_PROXY="$no_proxy"
-      - /kaniko/executor --context "$CI_WORKSPACE" --dockerfile "$CI_WORKSPACE/docker/deploy-tools.Dockerfile" --build-arg PYTHON_BASE_IMAGE="$PYTHON_BASE_IMAGE" --build-arg APT_DEBIAN_MIRROR="$APT_DEBIAN_MIRROR" --build-arg APT_DEBIAN_SECURITY_MIRROR="$APT_DEBIAN_SECURITY_MIRROR" --destination "${REGISTRY_HOST}/${REGISTRY_NAMESPACE}/coding-agent-deploy-tools:${DEPLOY_TOOLS_TAG}"
+      - /kaniko/executor --context "$CI_WORKSPACE" --dockerfile "$CI_WORKSPACE/docker/deploy-tools.Dockerfile" --build-arg PYTHON_BASE_IMAGE="$PYTHON_BASE_IMAGE" --build-arg APT_DEBIAN_MIRROR="$APT_DEBIAN_MIRROR" --build-arg APT_DEBIAN_SECURITY_MIRROR="$APT_DEBIAN_SECURITY_MIRROR" --destination "$REGISTRY_HOST/$REGISTRY_NAMESPACE/coding-agent-deploy-tools:$DEPLOY_TOOLS_TAG"
     when:
       - event:
           - manual

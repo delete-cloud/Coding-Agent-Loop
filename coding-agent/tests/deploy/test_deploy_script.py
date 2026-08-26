@@ -140,12 +140,16 @@ def test_woodpecker_builds_deploy_tools_image_used_by_manual_deploy() -> None:
     assert "git.mesh.kinaz.me" not in ci
     assert "git.mesh.kinaz.me" not in deploy
     assert 'image: "${DEPLOY_TOOLS_IMAGE}"' in deploy
-    assert "from_secret: deploy_tools_image" in deploy
+    assert "from_secret: deploy_tools_image" not in deploy
     assert "from_secret: registry_host" in ci
     assert "from_secret: registry_namespace" in ci
+    assert "${REGISTRY_HOST}" not in ci
+    assert "${REGISTRY_NAMESPACE}" not in ci
+    assert "${DEPLOY_TOOLS_TAG}" not in ci
+    assert "$${NO_PROXY_EXTRA:+,$NO_PROXY_EXTRA}" in ci
     assert (
-        '--destination "${REGISTRY_HOST}/${REGISTRY_NAMESPACE}/'
-        'coding-agent-deploy-tools:${DEPLOY_TOOLS_TAG}"'
+        "--destination \"$REGISTRY_HOST/$REGISTRY_NAMESPACE/"
+        "coding-agent-deploy-tools:$DEPLOY_TOOLS_TAG\""
     ) in ci
     assert f"DEPLOY_TOOLS_TAG: {DEPLOY_TOOLS_TAG}" in ci
     assert "ARG KUBECTL_VERSION=1.36.0" in dockerfile
