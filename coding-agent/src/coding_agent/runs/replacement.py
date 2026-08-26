@@ -31,6 +31,7 @@ class RuntimeReplacementSession(Protocol):
     provider_name: str | None
     model_name: str | None
     base_url: str | None
+    api_key: str | None
     tape_id: str | None
 
     def runtime_binding_snapshot(self) -> RuntimeBindingSnapshot: ...
@@ -61,6 +62,7 @@ class RuntimeReplacementBuilder(Protocol):
         model_name: str,
         provider_name: str | None = None,
         base_url: str | None | UnsetType = UNSET,
+        api_key: str | None | UnsetType = UNSET,
     ) -> Awaitable[tuple[object, object, object]]: ...
 
 
@@ -75,6 +77,7 @@ class RuntimeReplacementService:
         model_name: str,
         provider_name: str | None = None,
         base_url: str | None | UnsetType = UNSET,
+        api_key: str | None | UnsetType = UNSET,
         build_runtime: RuntimeReplacementBuilder,
         persist_session: RuntimeReplacementPersister,
     ) -> RuntimeReplacementSession:
@@ -82,15 +85,25 @@ class RuntimeReplacementService:
         old_provider_name = session.provider_name
         old_model_name = session.model_name
         old_base_url = session.base_url
+        old_api_key = session.api_key
         old_tape_id = session.tape_id
         old_runtime_binding = session.runtime_binding_snapshot()
 
-        pipeline, ctx, adapter = await build_runtime(
-            session,
-            model_name=model_name,
-            provider_name=provider_name,
-            base_url=base_url,
-        )
+        if isinstance(api_key, UnsetType):
+            pipeline, ctx, adapter = await build_runtime(
+                session,
+                model_name=model_name,
+                provider_name=provider_name,
+                base_url=base_url,
+            )
+        else:
+            pipeline, ctx, adapter = await build_runtime(
+                session,
+                model_name=model_name,
+                provider_name=provider_name,
+                base_url=base_url,
+                api_key=api_key,
+            )
 
         session.provider = None
         session.model_name = model_name
@@ -98,6 +111,8 @@ class RuntimeReplacementService:
             session.provider_name = provider_name
         if not isinstance(base_url, UnsetType):
             session.base_url = base_url
+        if not isinstance(api_key, UnsetType):
+            session.api_key = api_key
         session.attach_runtime_binding(
             pipeline=pipeline,
             ctx=ctx,
@@ -111,6 +126,7 @@ class RuntimeReplacementService:
             session.provider_name = old_provider_name
             session.model_name = old_model_name
             session.base_url = old_base_url
+            session.api_key = old_api_key
             session.restore_runtime_binding(old_runtime_binding)
             session.tape_id = old_tape_id
             await self.close_runtime_adapter(adapter)

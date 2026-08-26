@@ -174,8 +174,13 @@ class RecordingRuntimeStore:
 def test_runtime_turn_outcome_helpers_map_result_and_status() -> None:
     completed = TurnOutcome(
         stop_reason=StopReason.NO_TOOL_CALLS,
-        final_message="not persisted",
+        final_message="persisted answer",
         steps_taken=3,
+    )
+    empty = TurnOutcome(
+        stop_reason=StopReason.NO_TOOL_CALLS,
+        final_message=None,
+        steps_taken=0,
     )
     failed = TurnOutcome(stop_reason=StopReason.ERROR, error="model failed")
     interrupted = TurnOutcome(
@@ -187,10 +192,34 @@ def test_runtime_turn_outcome_helpers_map_result_and_status() -> None:
     assert runtime_result_from_turn_outcome(completed) == {
         "stop_reason": "no_tool_calls",
         "steps_taken": 3,
+        "text": "persisted answer",
     }
     assert runtime_status_from_turn_outcome(completed) == "completed"
+    assert runtime_status_from_turn_outcome(empty) == "failed"
     assert runtime_status_from_turn_outcome(failed) == "failed"
     assert runtime_status_from_turn_outcome(interrupted) == "interrupted"
+
+
+@pytest.mark.parametrize(
+    "stop_reason",
+    [
+        StopReason.NO_TOOL_CALLS,
+        StopReason.MAX_STEPS_REACHED,
+        StopReason.DOOM_LOOP,
+    ],
+)
+def test_runtime_turn_outcome_status_rejects_any_empty_success(
+    stop_reason: StopReason,
+) -> None:
+    outcome = TurnOutcome(
+        stop_reason=stop_reason,
+        final_message=" ",
+        steps_taken=0,
+    )
+
+    assert runtime_status_from_turn_outcome(outcome) == "failed"
+
+
 
 
 @pytest.mark.asyncio
@@ -390,7 +419,7 @@ async def test_runtime_turn_finalizer_finishes_store_backed_outcome() -> None:
         ctx=ctx,
         outcome=TurnOutcome(
             stop_reason=StopReason.NO_TOOL_CALLS,
-            final_message="not persisted",
+            final_message="persisted answer",
             steps_taken=2,
         ),
         run_id="run-1",
@@ -406,13 +435,91 @@ async def test_runtime_turn_finalizer_finishes_store_backed_outcome() -> None:
             "session_id": "session-1",
             "run_id": "run-1",
             "status": "completed",
-            "result": {"stop_reason": "no_tool_calls", "steps_taken": 2},
+            "result": {
+                "stop_reason": "no_tool_calls",
+                "steps_taken": 2,
+                "text": "persisted answer",
+            },
             "error": None,
             "resume_context": resume_context,
         }
     ]
     assert persisted == [session]
     assert observations == [("tape-finished", "completed")]
+
+
+@pytest.mark.asyncio
+async def test_runtime_turn_finalizer_fails_empty_completed_response() -> None:
+    session = FakeTurnSession(id="session-1", tape_id=None)
+    ctx = FakeRuntimeContext("tape-empty")
+    finishes: list[dict[str, object]] = []
+
+    async def save_snapshot(
+        session: FakeTurnSession,
+        ctx: FakeRuntimeContext,
+        *,
+        run_id: str,
+    ) -> None:
+        del session, ctx, run_id
+
+    async def finish_run(
+        session: FakeTurnSession,
+        *,
+        run_id: str,
+        status: str,
+        result: JSONObject,
+        error: str | None,
+        resume_context: FakeResumeContext | None = None,
+        extra_metadata: JSONObject | None = None,
+    ) -> None:
+        del session, resume_context, extra_metadata
+        finishes.append(
+            {
+                "run_id": run_id,
+                "status": status,
+                "result": result,
+                "error": error,
+            }
+        )
+
+    async def persist_session(session: FakeTurnSession) -> None:
+        del session
+
+    finalizer = RuntimeTurnFinalizer(
+        has_runtime_store=True,
+        save_message_snapshot=save_snapshot,
+        finish_run=finish_run,
+        persist_session=persist_session,
+    )
+
+    await finalizer.complete(
+        session,
+        ctx=ctx,
+        outcome=TurnOutcome(
+            stop_reason=StopReason.NO_TOOL_CALLS,
+            final_message=None,
+            steps_taken=0,
+        ),
+        run_id="run-empty",
+    )
+
+    assert finishes == [
+        {
+            "run_id": "run-empty",
+            "status": "failed",
+            "result": {
+                "stop_reason": "no_tool_calls",
+                "steps_taken": 0,
+                "text": None,
+            },
+            "error": "Agent completed without an assistant response",
+        }
+    ]
+    assert session.turn_status == "failed"
+    assert (
+        session.last_failure_details
+        == "Agent turn failed: Agent completed without an assistant response"
+    )
 
 
 @pytest.mark.asyncio

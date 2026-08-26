@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import logging
 import re
 import shutil
 import subprocess
@@ -3073,6 +3074,101 @@ class TestSessionCreation:
         assert info["base_url"] == "http://llm.local/v1"
         assert info["max_steps"] == 9
 
+    async def test_omitted_api_key_falls_back_to_env(self, client, monkeypatch):
+        env_api_key = "sk-anthropic-env-fallback"
+        monkeypatch.delenv("AGENT_API_KEY", raising=False)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", env_api_key)
+
+        response = await client.post(
+            "/sessions",
+            json={"provider": "anthropic", "model": "claude-test-http"},
+        )
+
+        assert response.status_code == 200
+        session_id = response.json()["session_id"]
+        session = session_manager.get_session(session_id)
+        assert session.api_key is None
+
+        await session_manager.ensure_session_runtime(session_id)
+
+        llm_plugin = session.runtime_pipeline._registry.get("llm_provider")
+        assert llm_plugin._api_key == env_api_key
+
+    async def test_create_session_accepts_api_key_and_does_not_echo_it(self, client):
+        secret = "sk-session-create-secret"
+
+        response = await client.post(
+            "/sessions",
+            json={
+                "provider": "anthropic",
+                "model": "claude-test-http",
+                "api_key": secret,
+            },
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload.keys() == {"session_id"}
+        assert secret not in response.text
+        session = session_manager.get_session(payload["session_id"])
+        assert session.api_key == secret
+        assert secret not in repr(session)
+
+        info_response = await client.get(f"/sessions/{payload['session_id']}")
+        assert info_response.status_code == 200
+        assert "api_key" not in info_response.json()
+        assert secret not in info_response.text
+
+    async def test_create_session_does_not_persist_api_key_in_session_record(
+        self, client
+    ):
+        secret = "sk-session-persist-secret"
+
+        response = await client.post(
+            "/sessions",
+            json={
+                "provider": "anthropic",
+                "model": "claude-test-http",
+                "api_key": secret,
+            },
+        )
+
+        assert response.status_code == 200
+        stored = session_manager._store.load(response.json()["session_id"])
+        assert stored is not None
+        stored_json = json.dumps(stored)
+        assert "api_key" not in stored
+        assert secret not in stored_json
+
+    async def test_codex_provider_ignores_request_api_key(self, client):
+        secret = "sk-must-not-reach-codex"
+
+        response = await client.post(
+            "/sessions",
+            json={
+                "provider": "codex",
+                "model": "gpt-5.5-codex",
+                "api_key": secret,
+            },
+        )
+
+        assert response.status_code == 200
+        session = session_manager.get_session(response.json()["session_id"])
+        assert session.provider_name == "codex"
+        assert session.api_key is None
+        assert secret not in response.text
+
+        update = await client.patch(
+            f"/sessions/{response.json()['session_id']}/runtime-config",
+            json={"api_key": "sk-still-must-not-reach-codex"},
+        )
+
+        assert update.status_code == 200
+        assert session.api_key is None
+        assert session.runtime_pipeline is None
+        assert "api_key" not in update.json()
+        assert "sk-still-must-not-reach-codex" not in update.text
+
     async def test_create_session_accepts_deepseek_runtime_provider(self, client):
         response = await client.post(
             "/sessions",
@@ -3644,6 +3740,43 @@ max_turns = 17
 
 class TestRuntimeConfigUpdate:
     """Tests for runtime config update endpoint."""
+
+    async def test_runtime_config_update_applies_api_key_to_next_turn_only(
+        self, client
+    ):
+        response = await client.post(
+            "/sessions",
+            json={
+                "provider": "anthropic",
+                "model": "claude-test-http",
+                "api_key": "sk-before-update",
+            },
+        )
+        session_id = response.json()["session_id"]
+        await session_manager.ensure_session_runtime(session_id)
+        session = session_manager.get_session(session_id)
+        old_pipeline = session.runtime_pipeline
+        old_plugin = old_pipeline._registry.get("llm_provider")
+        assert old_plugin._api_key == "sk-before-update"
+
+        update = await client.patch(
+            f"/sessions/{session_id}/runtime-config",
+            json={"api_key": "sk-after-update"},
+        )
+
+        assert update.status_code == 200
+        assert "sk-after-update" not in update.text
+        assert "api_key" not in update.json()
+        assert session.api_key == "sk-after-update"
+        assert session.runtime_pipeline is not old_pipeline
+        assert old_plugin._api_key == "sk-before-update"
+        new_plugin = session.runtime_pipeline._registry.get("llm_provider")
+        assert new_plugin._api_key == "sk-after-update"
+        persisted = session_manager._store.load(session_id)
+        assert persisted is not None
+        persisted_json = json.dumps(persisted)
+        assert "api_key" not in persisted
+        assert "sk-after-update" not in persisted_json
 
     async def test_approval_only_updates_live_plugin_without_runtime_replacement(
         self, client, monkeypatch
@@ -4374,7 +4507,13 @@ class TestPromptStreaming:
             json={"prompt": "test"},
         )
         assert response.status_code == 404
-        assert "not found" in response.json()["detail"].lower()
+        assert response.json() == {
+            "error": {
+                "code": "session_not_found",
+                "message": "Session not found",
+                "retryable": False,
+            }
+        }
 
     async def test_prompt_missing_session_returns_404_before_owner_check(self, client):
         class FailingOwnerStore:
@@ -4597,9 +4736,7 @@ class TestPromptStreaming:
         assert prompt_resp.json()["detail"] == REMOTE_LOOP_OWNERSHIP_RETIRED
         assert store.runs == {}
 
-    async def test_local_attached_prompt_creates_attached_executor_run(
-        self, client
-    ):
+    async def test_local_attached_prompt_creates_attached_executor_run(self, client):
         store = FakeExternalWorkerRuntimeStore()
         session_manager.configure_runtime_store(store)
         create_resp = await client.post(
@@ -9415,16 +9552,22 @@ class TestCancelSession:
         with pytest.raises(asyncio.CancelledError):
             await task
 
-    async def test_cancel_session_turn_is_idempotent_for_idle_session(self, client):
+    async def test_cancel_session_turn_rejects_idle_session_with_checked_error(
+        self, client
+    ):
         create_resp = await client.post("/sessions", json={})
         session_id = create_resp.json()["session_id"]
 
         response = await client.post(f"/sessions/{session_id}/cancel")
 
-        assert response.status_code == 200
-        data = response.json()
-        assert data["session_id"] == session_id
-        assert data["status"] == "idle"
+        assert response.status_code == 409
+        assert response.json() == {
+            "error": {
+                "code": "no_active_turn",
+                "message": "No active root turn exists",
+                "retryable": False,
+            }
+        }
 
     async def test_cancel_session_turn_rejects_non_owner(
         self, client: AsyncClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -10116,7 +10259,8 @@ class TestWaitForApproval:
 
 
 def test_http_server_import_falls_back_when_agent_toml_is_unreadable(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     original_module = sys.modules.get("coding_agent.server.http_server")
     server_module = sys.modules.get("coding_agent.server")
@@ -10125,21 +10269,39 @@ def test_http_server_import_falls_back_when_agent_toml_is_unreadable(
         if server_module is not None
         else None
     )
+    canonical_config_path = (
+        Path(http_server.__file__).resolve().parent.parent / "agent.toml"
+    )
+    monkeypatch.delenv("CODING_AGENT_SERVER_CONFIG", raising=False)
     monkeypatch.delitem(sys.modules, "coding_agent.server.http_server", raising=False)
     if server_module is not None:
         monkeypatch.delattr(server_module, "http_server", raising=False)
 
-    try:
-        with patch("agentkit.config.loader.load_config") as load_config:
-            load_config.side_effect = ConfigError(
-                "config file not found: /tmp/missing-agent.toml"
-            )
-            http_server = importlib.import_module("coding_agent.server.http_server")
+    def raise_unreadable_config(config_path: Path) -> None:
+        assert config_path == canonical_config_path
+        raise OSError("permission denied")
 
-        assert http_server._load_storage_config() == {}
+    try:
+        with (
+            patch(
+                "agentkit.config.loader.load_config",
+                side_effect=raise_unreadable_config,
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            imported_http_server = importlib.import_module(
+                "coding_agent.server.http_server"
+            )
+            assert imported_http_server._load_storage_config() == {}
+
         assert (
-            http_server.session_manager._storage_config == local_sqlite_storage_config()
+            imported_http_server.session_manager._storage_config
+            == local_sqlite_storage_config()
         )
+        assert (
+            f"Unable to load storage config from {canonical_config_path}" in caplog.text
+        )
+        assert "using defaults" in caplog.text
     finally:
         if original_module is None:
             monkeypatch.delitem(
@@ -11193,6 +11355,104 @@ async def test_prompt_stream_disconnect_does_not_leave_turn_in_progress(
     assert session.turn_in_progress is False
     assert session.task is None
     assert session.turn_status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_pm0023_owning_post_disconnect_finalizes_root_once(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    create_resp = await client.post("/sessions", json={})
+    session_id = create_resp.json()["session_id"]
+    run_started = asyncio.Event()
+    stream_attached = asyncio.Event()
+    settlement_started = asyncio.Event()
+    allow_settlement = asyncio.Event()
+    run_cancelled = asyncio.Event()
+    settlements: list[tuple[str, str, str]] = []
+    legacy_finalizations = 0
+
+    class FakeEventSourceResponse:
+        def __init__(self, body_iterator, **kwargs: object) -> None:
+            del kwargs
+            self.body_iterator = body_iterator
+
+    async def fake_run_agent(current_session_id: str, prompt: str) -> None:
+        del prompt
+        session = session_manager.get_session(current_session_id)
+        session.current_turn_id = "pm0023-root"
+        run_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            run_cancelled.set()
+            raise
+
+    async def fake_stream_wire_messages(
+        wire: object,
+        task: asyncio.Task[object] | None = None,
+    ) -> AsyncIterator[dict[str, str]]:
+        del wire, task
+        await run_started.wait()
+        stream_attached.set()
+        yield {"event": "StreamDelta", "data": "{}"}
+        await asyncio.Event().wait()
+
+    async def fake_settle_root_run(
+        current_session_id: str, *, run_id: str, outcome: str
+    ) -> None:
+        settlements.append((current_session_id, run_id, outcome))
+        settlement_started.set()
+        await allow_settlement.wait()
+
+    async def fake_persist_turn_settled(session: Session) -> None:
+        nonlocal legacy_finalizations
+        del session
+        legacy_finalizations += 1
+
+    monkeypatch.setattr(http_server, "EventSourceResponse", FakeEventSourceResponse)
+    monkeypatch.setattr(session_manager, "run_agent", fake_run_agent)
+    monkeypatch.setattr(http_server, "stream_wire_messages", fake_stream_wire_messages)
+    monkeypatch.setattr(
+        session_manager, "can_settle_root_run_authoritatively", lambda: True
+    )
+    monkeypatch.setattr(session_manager, "settle_root_run", fake_settle_root_run)
+    monkeypatch.setattr(
+        session_manager, "_persist_turn_settled", fake_persist_turn_settled
+    )
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": f"/sessions/{session_id}/prompt",
+            "headers": [],
+        }
+    )
+    response = await http_server.send_prompt(
+        request,
+        session_id,
+        body=http_server.PromptRequest(prompt="race cleanup"),
+        prompt=None,
+        event_format="wire",
+        api_key=None,
+    )
+    event_generator = cast(AsyncIterator[dict[str, str]], response.body_iterator)
+    assert await anext(event_generator) == {"event": "StreamDelta", "data": "{}"}
+    await stream_attached.wait()
+
+    owning_stream_close = asyncio.create_task(event_generator.aclose())
+    await settlement_started.wait()
+
+    session = session_manager.get_session(session_id)
+    assert session.task is not None
+    session.task.cancel()
+    await run_cancelled.wait()
+    allow_settlement.set()
+    await owning_stream_close
+
+    assert settlements == [(session_id, "pm0023-root", "interrupted")]
+    assert legacy_finalizations == 1
 
 
 @pytest.mark.asyncio

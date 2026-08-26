@@ -6,7 +6,8 @@ import asyncio
 import json
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
 from coding_agent.server.auth import (
@@ -18,6 +19,9 @@ from coding_agent.server.http import _bindings
 from coding_agent.server.http._bindings import LOGGER_NAME
 from coding_agent.server.http.deps import (
     _auth_context_can_access_session,
+    _chat_error,
+    _chat_session_not_found_error,
+    _connected_chat_auth,
     _get_visible_session,
     _key_error_detail,
     _normalize_direct_auth_context,
@@ -30,7 +34,10 @@ from coding_agent.server.http.events import (
     _owned_session_event_generator,
 )
 from coding_agent.server.rate_limit import RateLimits, limiter
-from coding_agent.server.schemas import CancelSessionResponse
+from coding_agent.server.schemas import (
+    ConnectedChatCancelResponse,
+    ConnectedChatErrorResponse,
+)
 from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictError
 
 logger = logging.getLogger(LOGGER_NAME)
@@ -111,22 +118,35 @@ async def get_session_display_events(
     )
 
 
-@router.post("/sessions/{session_id}/cancel", response_model=CancelSessionResponse)
+@router.post(
+    "/sessions/{session_id}/cancel",
+    response_model=ConnectedChatCancelResponse,
+    status_code=202,
+    responses={
+        401: {"model": ConnectedChatErrorResponse},
+        404: {"model": ConnectedChatErrorResponse},
+        409: {"model": ConnectedChatErrorResponse},
+        422: {"model": ConnectedChatErrorResponse},
+    },
+)
 @limiter.limit(RateLimits.CLOSE_SESSION)
 async def cancel_session_turn(
     request: Request,
-    response: Response,
     session_id: str,
-    auth_context: AuthContext | None = Depends(auth_context_from_headers),
-) -> CancelSessionResponse:
+    x_api_key: str | None = Header(None, alias="X-API-Key"),
+    authorization: str | None = Header(None, alias="Authorization"),
+) -> ConnectedChatCancelResponse | JSONResponse:
     del request
+    auth_context = await _connected_chat_auth(x_api_key, authorization)
+    if isinstance(auth_context, JSONResponse):
+        return auth_context
     try:
         session = await _bindings.module().session_manager.get_session_async(session_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="Session not found") from exc
+    except KeyError:
+        return _chat_session_not_found_error()
 
     if not _auth_context_can_access_session(auth_context, session):
-        raise HTTPException(status_code=404, detail="Session not found")
+        return _chat_session_not_found_error()
 
     try:
         result = await _bindings.module().session_manager.cancel_session_turn(
@@ -135,24 +155,27 @@ async def cancel_session_turn(
     except SessionOwnershipConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    if result.status == "cancelling":
-        response.status_code = 202
-        await _broadcast_event(
-            session,
-            {
-                "event": "TurnCancelling",
-                "data": json.dumps(
-                    {
-                        "session_id": session_id,
-                        "turn_id": result.turn_id,
-                    }
-                ),
-            },
-        )
+    if result.status != "cancelling":
+        return _chat_error(409, "no_active_turn", "No active root turn exists")
 
-    return CancelSessionResponse(
+    await _broadcast_event(
+        session,
+        {
+            "event": "TurnCancelling",
+            "data": json.dumps(
+                {
+                    "session_id": session_id,
+                    "turn_id": result.turn_id,
+                }
+            ),
+        },
+    )
+
+    if result.turn_id is None:
+        raise RuntimeError("cancelling result must include turn_id")
+    return ConnectedChatCancelResponse(
         session_id=result.session_id,
-        turn_id=result.turn_id,
+        run_id=result.turn_id,
         status=result.status,
     )
 

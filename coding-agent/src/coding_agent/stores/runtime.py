@@ -3,8 +3,14 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+if TYPE_CHECKING:
+    from coding_agent.events.connected_chat import (
+        ChatCommandAdmission,
+        ChatSnapshot,
+        ConnectedChatCursor,
+    )
 from coding_agent.server.stores.session_owner_store import OwnerAuthority
 from coding_agent.stores.runtime_store import (
     AgentInteractionRecord,
@@ -149,6 +155,16 @@ class RuntimeStore(
 class HarnessFactSourceStore(Protocol):
     """Authoritative harness fact source: fenced UoW, cursors, and key_expired."""
 
+    async def admit_chat_command(
+        self,
+        authority: OwnerAuthority,
+        *,
+        prompt: str,
+        command_id: str,
+        parent_run_id: str | None,
+        session_state: JSONObject,
+    ) -> ChatCommandAdmission: ...
+
     async def commit_authoritative_uow(
         self,
         authority: OwnerAuthority,
@@ -204,6 +220,13 @@ class HarnessFactSourceStore(Protocol):
         *,
         limit: int = 1000,
     ) -> list[EventRecord]: ...
+
+    async def snapshot_chat_events(
+        self,
+        session_id: str,
+        cursor: ConnectedChatCursor | None,
+        limit: int,
+    ) -> ChatSnapshot: ...
 
     async def raise_retention_floor(
         self,

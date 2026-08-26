@@ -266,9 +266,13 @@ async def test_runtime_resume_session_orchestration_requires_store_then_loads_se
             session: FakeSession,
             prompt: str | None = None,
             resume_reason: str = "user_resume",
+            previous_run_id: str | None = None,
+            run_id_override: str | None = None,
         ) -> AgentRunRecord:
             calls.append((f"resume:{session.id}", prompt))
             assert resume_reason == "operator_resume"
+            assert previous_run_id is None
+            assert run_id_override is None
             return _run("run-resumed")
 
     def require_runtime_store() -> object:
@@ -300,6 +304,79 @@ async def test_runtime_resume_session_orchestration_requires_store_then_loads_se
         ("load_session:session-1", None),
         ("resume:session-1", "continue"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_runtime_resume_orchestration_uses_admitted_run_and_explicit_parent() -> (
+    None
+):
+    session = FakeSession()
+    parent_run = _run("run-parent")
+    admitted_run = _run("run-admitted")
+    local_runs: list[tuple[str, str, str, object]] = []
+
+    async def latest_runtime_run(session_id: str) -> AgentRunRecord | None:
+        raise AssertionError(
+            f"latest run must not be used for admitted resume: {session_id}"
+        )
+
+    async def load_runtime_run(run_id: str) -> AgentRunRecord | None:
+        if run_id == "run-parent":
+            return parent_run
+        if run_id == "run-admitted":
+            return admitted_run
+        return None
+
+    async def run_local(
+        session_id: str,
+        prompt: str,
+        run_id: str,
+        resume_context: object,
+    ) -> AgentRunRecord | None:
+        local_runs.append((session_id, prompt, run_id, resume_context))
+        return None
+
+    async def request_attached(
+        session_id: str,
+        prompt: str,
+        run_id: str,
+        resume_context: object,
+    ) -> AgentRunRecord:
+        del session_id, prompt, run_id, resume_context
+        raise AssertionError("attached resume should not run")
+
+    service = RuntimeResumeOrchestrationService(
+        resume_service=RuntimeResumeService(),
+        latest_runtime_run=latest_runtime_run,
+        latest_runtime_event_id=lambda run: _return("event-parent"),
+        load_runtime_run=load_runtime_run,
+        persist_session=lambda persisted: _return(None),
+        list_checkpoints=_list_checkpoints,
+        load_tape_entries=_load_tape_entries,
+        save_tape_entries=lambda tape_id, entries: _return(None),
+        load_message_snapshot=lambda snapshot_id: _return(None),
+        run_local=run_local,
+        request_attached=request_attached,
+        session_is_attached=lambda current: False,
+        append_live_boundary_anchor=lambda current, anchor: None,
+        active_resume_blocking_statuses=frozenset({"requested", "running"}),
+    )
+
+    resumed = await service.resume(
+        session,
+        prompt="continue",
+        previous_run_id="run-parent",
+        run_id_override="run-admitted",
+    )
+
+    assert resumed is admitted_run
+    assert len(local_runs) == 1
+    assert local_runs[0][2] == "run-admitted"
+    assert local_runs[0][3].previous_run_id == "run-parent"
+
+
+async def _return(value: object) -> object:
+    return value
 
 
 async def _list_checkpoints(session_id: str) -> list[CheckpointMeta]:

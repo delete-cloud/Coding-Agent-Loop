@@ -145,6 +145,12 @@ class LocalDaemonSessionRuntimeProvider:
                 ApprovalPolicy.INTERACTIVE: "interactive",
                 ApprovalPolicy.AUTO: "auto",
             }
+            session_api_key = getattr(session, "api_key", None)
+            if session.provider_name == "codex" or (
+                session.provider_name is not None
+                and session.provider_name.startswith("codex:")
+            ):
+                session_api_key = None
             pipeline, ctx = self.create_agent_for_session(
                 workspace_root=workspace_root,
                 environment=environment,
@@ -155,7 +161,7 @@ class LocalDaemonSessionRuntimeProvider:
                 approval_mode_override=approval_mode_map[session.approval_policy],
                 session_id_override=session.id,
                 run_id_override=request.run_id,
-                api_key=None,
+                api_key=session_api_key,
                 mcp_servers_override=dict(getattr(session, "mcp_servers", {})),
                 additional_workspace_roots_override=list(
                     getattr(session, "additional_directories", [])

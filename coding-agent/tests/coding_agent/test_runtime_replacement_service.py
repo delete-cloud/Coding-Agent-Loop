@@ -28,6 +28,7 @@ class FakeSession:
         self.provider_name = "old-provider"
         self.model_name = "old-model"
         self.base_url = "https://old.example.com"
+        self.api_key = "sk-old"
         self.tape_id = "old-tape"
         self.pipeline = "old-pipeline"
         self.ctx = FakeContext(FakeTape("old-tape"))
@@ -55,6 +56,47 @@ class FakeSession:
         self.pipeline = snapshot.pipeline
         self.ctx = snapshot.ctx
         self.adapter = snapshot.adapter
+
+
+@pytest.mark.asyncio
+async def test_runtime_replacement_service_rolls_back_api_key_when_persist_fails() -> (
+    None
+):
+    session = FakeSession()
+    seen_api_keys: list[str | None] = []
+
+    async def build_runtime(
+        runtime_session: FakeSession,
+        *,
+        model_name: str,
+        provider_name: str | None = None,
+        base_url: object = UNSET,
+        api_key: str | None = None,
+    ) -> tuple[object, FakeContext, object]:
+        del runtime_session, model_name, provider_name, base_url
+        seen_api_keys.append(api_key)
+        return "new-pipeline", FakeContext(FakeTape("new-tape")), "new-adapter"
+
+    async def persist_session(runtime_session: FakeSession) -> None:
+        assert runtime_session.api_key == "sk-new"
+        raise RuntimeError("persist failed")
+
+    async def close_adapter(adapter: object | None) -> None:
+        del adapter
+
+    with pytest.raises(RuntimeError, match="persist failed"):
+        await RuntimeReplacementService(
+            close_runtime_adapter=close_adapter,
+        ).replace_runtime_config(
+            session,
+            model_name="new-model",
+            api_key="sk-new",
+            build_runtime=build_runtime,
+            persist_session=persist_session,
+        )
+
+    assert seen_api_keys == ["sk-new"]
+    assert session.api_key == "sk-old"
 
 
 @pytest.mark.asyncio

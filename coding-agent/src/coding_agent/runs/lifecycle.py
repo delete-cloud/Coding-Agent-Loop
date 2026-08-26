@@ -213,17 +213,41 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+_EMPTY_ASSISTANT_RESPONSE_ERROR = "Agent completed without an assistant response"
+
+
+def _is_empty_completed_response(outcome: TurnOutcome) -> bool:
+    return (
+        outcome.error is None
+        and outcome.stop_reason != StopReason.ERROR
+        and outcome.stop_reason != StopReason.INTERRUPTED
+        and outcome.steps_taken == 0
+        and (outcome.final_message is None or not outcome.final_message.strip())
+    )
+
+
+def _runtime_error_from_turn_outcome(outcome: TurnOutcome) -> str | None:
+    if _is_empty_completed_response(outcome):
+        return _EMPTY_ASSISTANT_RESPONSE_ERROR
+    return outcome.error
+
+
 def runtime_result_from_turn_outcome(outcome: TurnOutcome) -> JSONObject:
     return {
         "stop_reason": outcome.stop_reason.value,
         "steps_taken": outcome.steps_taken,
+        "text": outcome.final_message,
     }
 
 
 def runtime_status_from_turn_outcome(outcome: TurnOutcome) -> str:
     if outcome.stop_reason == StopReason.INTERRUPTED:
         return "interrupted"
-    if outcome.error is not None or outcome.stop_reason == StopReason.ERROR:
+    if (
+        outcome.error is not None
+        or outcome.stop_reason == StopReason.ERROR
+        or _is_empty_completed_response(outcome)
+    ):
         return "failed"
     return "completed"
 
@@ -242,7 +266,7 @@ def _set_failure_details_from_outcome(
 ) -> None:
     if turn_status == "failed":
         session.turn_status = "failed"
-        reason = outcome.error or outcome.stop_reason.value
+        reason = _runtime_error_from_turn_outcome(outcome) or outcome.stop_reason.value
         session.last_failure_details = f"Agent turn failed: {reason}"
         return
     session.last_failure_details = None
@@ -377,6 +401,7 @@ class RuntimeMaintenanceAdmissionService:
 class RuntimeRunLifecycle:
     store: RuntimeRunLifecycleStore | None
     metadata_for_session: RuntimeRunMetadataProvider
+    settle_root_run: Callable[..., Awaitable[object]] | None = None
     now: Callable[[], datetime] = _utc_now
 
     async def create(
@@ -477,6 +502,18 @@ class RuntimeRunLifecycle:
         resume_context: RuntimeRunResumeContext | None = None,
         extra_metadata: JSONObject | None = None,
     ) -> None:
+        if self.settle_root_run is not None:
+            result_text = result.get("text")
+            if result_text is not None and not isinstance(result_text, str):
+                raise TypeError("root run result text must be a string")
+            await self.settle_root_run(
+                session.id,
+                run_id=run_id,
+                outcome=status,
+                result=result_text,
+                error=error,
+            )
+            return
         await self.update(
             session,
             run_id=run_id,
@@ -867,13 +904,14 @@ class RuntimeTurnFinalizer:
         if self.has_runtime_store:
             turn_outcome = require_runtime_turn_outcome(outcome)
             turn_status = runtime_status_from_turn_outcome(turn_outcome)
+            turn_error = _runtime_error_from_turn_outcome(turn_outcome)
             await self.save_message_snapshot(session, ctx, run_id=run_id)
             await self.finish_run(
                 session,
                 run_id=run_id,
                 status=turn_status,
                 result=runtime_result_from_turn_outcome(turn_outcome),
-                error=turn_outcome.error,
+                error=turn_error,
                 resume_context=resume_context,
                 extra_metadata=_context_pack_run_metadata(ctx),
             )

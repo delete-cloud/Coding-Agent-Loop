@@ -13,9 +13,11 @@ from typing import (
     Any,
     cast,
 )
+from coding_agent.events.connected_chat import ChatCommandAdmission
 from coding_agent.stores.durable_local import SQLiteLocalDurableStore
 from coding_agent.stores.durable_pg import PGDurableStore
 from coding_agent.stores.runtime_store import (
+    AuthoritativeCommit,
     AuthoritativeUnitOfWork,
     EffectLedgerSlot,
     EventRecord,
@@ -73,6 +75,74 @@ class PersistOps:
 
     def _approval_effect_id(self, session_id: str, request_id: str) -> str:
         return f"{session_id}:approval:{request_id}"
+
+    async def admit_chat_command(
+        self,
+        session_id: str,
+        *,
+        prompt: str,
+        command_id: str,
+        parent_run_id: str | None = None,
+    ) -> ChatCommandAdmission:
+        session = await self.get_session_async(session_id)
+        store = self._authoritative_store()
+        if store is None:
+            raise RuntimeError("durable authoritative store is not configured")
+        authority = self._owner_authorities.get(session_id)
+        if authority is None:
+            raise SessionOwnershipConflictError(
+                "chat admission requires owner authority"
+            )
+        if session.tape_id is None:
+            await self.ensure_session_runtime(session_id)
+            session = await self.get_session_async(session_id)
+        admission = await store.admit_chat_command(
+            authority,
+            prompt=prompt,
+            command_id=command_id,
+            parent_run_id=parent_run_id,
+            session_state=cast(JSONObject, session.to_store_data()),
+        )
+        if not admission.idempotent:
+            session.current_turn_id = admission.run_id
+            session.turn_in_progress = True
+            self._session_cache[session_id] = session
+        return admission
+
+    def can_settle_root_run_authoritatively(self) -> bool:
+        return self._authoritative_store() is not None
+
+    async def settle_root_run(
+        self,
+        session_id: str,
+        *,
+        run_id: str,
+        outcome: str,
+        result: str | None = None,
+        error: str | None = None,
+    ) -> AuthoritativeCommit:
+        store = self._authoritative_store()
+        if store is None:
+            raise RuntimeError("durable authoritative store is not configured")
+        authority = self._owner_authorities.get(session_id)
+        if authority is None:
+            raise SessionOwnershipConflictError(
+                "root settlement requires owner authority"
+            )
+        settlement = await store.settle_root_run(
+            authority,
+            run_id=run_id,
+            outcome=outcome,
+            result=result,
+            error=error,
+        )
+        session = await self.get_session_async(session_id)
+        if session.current_turn_id == run_id:
+            session.turn_in_progress = False
+            session.turn_status = outcome
+            self._session_cache[session_id] = session
+        await self._publish_chat_commit(settlement)
+        return settlement
 
     async def _commit_session_uow(
         self,
