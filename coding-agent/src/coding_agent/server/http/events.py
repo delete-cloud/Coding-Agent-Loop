@@ -20,10 +20,10 @@ from coding_agent.server.schemas import (
     ConnectedChatEventSchema,
     ConnectedChatStreamControlSchema,
 )
-from coding_agent.server.session_manager import Session
 from coding_agent.server.stores.session_owner_store import (
     SessionOwnershipConflictError,
 )
+from coding_agent.server.session_manager import Session
 from coding_agent.wire import (
     ApprovalRequest,
     ApprovalResponse,
@@ -218,9 +218,17 @@ class ChatFollowBridge:
 
     async def follow(self, *, after_seq: str) -> AsyncIterator[Any]:
         subscriber = ChatSubscriber(self._queue_size)
-        await self._register(subscriber)
         last_safe = after_seq
         high_water = after_seq
+        try:
+            await self._register(subscriber)
+        except SessionOwnershipConflictError:
+            yield StreamControl(
+                "replay_required",
+                "ownership_lost",
+                self.cursor(last_safe, high_water),
+            )
+            return
         try:
             if not await self._verify_ownership():
                 yield StreamControl(

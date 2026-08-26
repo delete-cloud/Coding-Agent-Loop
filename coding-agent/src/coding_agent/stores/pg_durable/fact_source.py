@@ -274,6 +274,7 @@ class PgFactSourceMixin:
                 chunk_size,
             )
             if not rows:
+                scanned_after = high_water
                 break
             scanned_rows += len(rows)
             for row in rows:

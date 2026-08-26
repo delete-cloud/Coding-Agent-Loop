@@ -143,8 +143,9 @@ async def send_prompt(
     # Get prompt from body or query param (body takes precedence)
     prompt_text = body.prompt if body else prompt
     if not prompt_text:
+        if body is not None and getattr(body, "command_id", None) is not None:
+            return _chat_error(422, "prompt_required", "Prompt is required")
         raise HTTPException(status_code=422, detail="Prompt is required")
-
     session_manager = _bindings.module().session_manager
     try:
         visible_session = await session_manager.get_session_async(session_id)

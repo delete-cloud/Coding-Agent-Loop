@@ -226,12 +226,17 @@ class SessionManager(
                     high_water_seq=high_water,
                 )
                 snapshot = await store.snapshot_chat_events(session_id, bounded, 1000)
-                if not snapshot.events:
-                    break
-                events.extend(snapshot.events)
-                after = snapshot.events[-1].session_seq
+                if snapshot.events:
+                    events.extend(snapshot.events)
+                    after = snapshot.events[-1].session_seq
                 if snapshot.next_cursor is None:
                     break
+                decoded = decode_chat_cursor(
+                    snapshot.next_cursor,
+                    expected_session_id=session_id,
+                    fact_state=fact,
+                )
+                after = decoded.after_seq
             return tuple(events)
 
         async def verify_ownership() -> bool:
@@ -276,9 +281,8 @@ class SessionManager(
             task: asyncio.Task[Any] | None = None
             owns_task = False
             try:
-                if await self._should_launch_admitted_command(admission):
-                    task = self._launch_admitted_command(session_id, admission)
-                    owns_task = True
+                task = await self._claim_admitted_command(session_id, admission)
+                owns_task = task is not None
                 first = await anext(follow)
                 yield first
                 async for event in follow:
@@ -321,33 +325,62 @@ class SessionManager(
             raise KeyError(session_id)
         return fact
 
-    async def _should_launch_admitted_command(self, admission: Any) -> bool:
-        if admission.run_id in self._chat_run_tasks:
-            return False
-        if not admission.idempotent:
-            return True
-        run = await self._require_runtime_store().load_agent_run(admission.run_id)
-        return run is not None and run.status == "requested"
+    async def _claim_admitted_command(
+        self, session_id: str, admission: Any
+    ) -> asyncio.Task[Any] | None:
+        async with self._chat_launch_lock:
+            if admission.run_id in self._chat_run_tasks:
+                return None
+            if admission.idempotent:
+                run = await self._require_runtime_store().load_agent_run(
+                    admission.run_id
+                )
+                if run is None or run.status != "requested":
+                    return None
+            return self._launch_admitted_command(session_id, admission)
 
     def _launch_admitted_command(
         self, session_id: str, admission: Any
     ) -> asyncio.Task[Any]:
         async def run() -> None:
-            prompt = await self._command_prompt(session_id, admission.command_id)
-            if admission.parent_run_id is None:
-                await self.run_agent(
-                    session_id,
-                    prompt,
-                    run_id_override=admission.run_id,
+            try:
+                prompt = await self._command_prompt(session_id, admission.command_id)
+                if admission.parent_run_id is None:
+                    await self.run_agent(
+                        session_id,
+                        prompt,
+                        run_id_override=admission.run_id,
+                    )
+                else:
+                    await self.resume_session(
+                        session_id,
+                        prompt=prompt,
+                        resume_reason="user_resume",
+                        previous_run_id=admission.parent_run_id,
+                        run_id_override=admission.run_id,
+                    )
+                store = self._authoritative_store()
+                if store is None:
+                    return
+                run = await self._require_runtime_store().load_agent_run(
+                    admission.run_id
                 )
-                return
-            await self.resume_session(
-                session_id,
-                prompt=prompt,
-                resume_reason="user_resume",
-                previous_run_id=admission.parent_run_id,
-                run_id_override=admission.run_id,
-            )
+                if run is not None and run.status == "requested":
+                    await self.settle_root_run(
+                        session_id,
+                        run_id=admission.run_id,
+                        outcome="failed",
+                        error="chat command returned without a terminal outcome",
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await self.settle_root_run(
+                    session_id,
+                    run_id=admission.run_id,
+                    outcome="failed",
+                    error=str(exc),
+                )
 
         task = asyncio.create_task(run())
         self._chat_run_tasks[admission.run_id] = task
@@ -426,6 +459,7 @@ class SessionManager(
         self._session_workspace_export_counts: dict[str, int] = {}
         self._chat_subscribers: dict[str, set[Any]] = {}
         self._chat_run_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._chat_launch_lock = asyncio.Lock()
         self._tape_store = tape_store or self._create_tape_store(data_dir)
         if self._local_durable_store is not None and tape_store is None:
             self._tape_store = FencedSQLiteTapeStore(
