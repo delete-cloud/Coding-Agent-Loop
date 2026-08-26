@@ -116,6 +116,7 @@ class LocalDaemonRuntimePreparationService:
         model_name: str | None = None,
         provider_name: str | None = None,
         base_url: str | None | UnsetType = UNSET,
+        api_key: str | None | UnsetType = UNSET,
         max_steps: int | None = None,
         approval_policy: ApprovalPolicy | None = None,
     ) -> RuntimeBuildResult:
@@ -126,6 +127,7 @@ class LocalDaemonRuntimePreparationService:
                 model_name=model_name,
                 provider_name=provider_name,
                 base_url=base_url,
+                api_key=api_key,
                 max_steps=max_steps,
                 approval_policy=approval_policy,
             )
@@ -137,6 +139,7 @@ class LocalDaemonRuntimePreparationService:
                 model_name=model_name,
                 provider_name=provider_name,
                 base_url=base_url,
+                api_key=api_key,
                 max_steps=max_steps,
                 approval_policy=approval_policy,
             )
@@ -168,6 +171,7 @@ class LocalDaemonRuntimePreparationService:
         model_name: str | None = None,
         provider_name: str | None = None,
         base_url: str | None | UnsetType = UNSET,
+        api_key: str | None | UnsetType = UNSET,
         max_steps: int | None = None,
         approval_policy: ApprovalPolicy | None = None,
     ) -> RuntimeBuildResult:
@@ -183,6 +187,16 @@ class LocalDaemonRuntimePreparationService:
         resolved_base_url = (
             session.base_url if isinstance(base_url, UnsetType) else base_url
         )
+        resolved_api_key = (
+            getattr(session, "api_key", None)
+            if isinstance(api_key, UnsetType)
+            else api_key
+        )
+        if resolved_provider_name == "codex" or (
+            resolved_provider_name is not None
+            and resolved_provider_name.startswith("codex:")
+        ):
+            resolved_api_key = None
         resolved_max_steps = session.max_steps if max_steps is None else max_steps
         resolved_approval_policy = (
             session.approval_policy if approval_policy is None else approval_policy
@@ -203,7 +217,7 @@ class LocalDaemonRuntimePreparationService:
             max_steps_override=resolved_max_steps,
             approval_mode_override=self._approval_mode(resolved_approval_policy),
             session_id_override=session.id,
-            api_key=None,
+            api_key=resolved_api_key,
             mcp_servers_override=dict(getattr(session, "mcp_servers", {})),
             additional_workspace_roots_override=list(
                 getattr(session, "additional_directories", [])
@@ -221,6 +235,7 @@ class LocalDaemonRuntimePreparationService:
         provider_model_name = getattr(session.provider, "model_name", None)
         if (
             session.provider is not None
+            and isinstance(api_key, UnsetType)
             and session.provider_name == resolved_provider_name
             and provider_model_name == resolved_model_name
             and session.base_url == resolved_base_url

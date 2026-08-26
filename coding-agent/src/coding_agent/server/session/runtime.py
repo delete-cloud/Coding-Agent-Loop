@@ -52,6 +52,7 @@ class RuntimeOps:
         model_name: str | None = None,
         provider_name: str | None = None,
         base_url: str | None | UnsetType = UNSET,
+        api_key: str | None | UnsetType = UNSET,
         max_steps: int | None = None,
         approval_policy: ApprovalPolicy | None = None,
     ) -> tuple[Any, Any, PipelineAdapter]:
@@ -60,6 +61,7 @@ class RuntimeOps:
             model_name=model_name,
             provider_name=provider_name,
             base_url=base_url,
+            api_key=api_key,
             max_steps=max_steps,
             approval_policy=approval_policy,
         )
@@ -81,6 +83,7 @@ class RuntimeOps:
         model_name: str | None = None,
         provider_name: str | None = None,
         base_url: str | None | UnsetType = UNSET,
+        api_key: str | None | UnsetType = UNSET,
     ) -> Session:
         async def replace_admitted_runtime(session: object) -> Session:
             admitted_session = cast(Session, session)
@@ -96,6 +99,7 @@ class RuntimeOps:
                 model_name=resolved_model,
                 provider_name=provider_name,
                 base_url=base_url,
+                api_key=api_key,
                 build_runtime=self._build_session_runtime,
                 persist_session=self._persist_session_async,
             )

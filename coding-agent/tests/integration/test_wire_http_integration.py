@@ -419,6 +419,98 @@ class TestPromptStreamingFlow:
         assert response.status_code == 409
 
 
+class TestSessionCatalogLiveHTTP:
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="pass_fds + uvicorn fd unsupported on Windows",
+    )
+    async def test_session_catalog_matches_frozen_contract_over_live_http(self):
+        listen_sock = socket.socket()
+        listen_sock.bind(("127.0.0.1", 0))
+        listen_sock.listen(5)
+        port = listen_sock.getsockname()[1]
+
+        env = os.environ.copy()
+        env["LIVE_HTTP_TEST_FD"] = str(listen_sock.fileno())
+        server_script = textwrap.dedent(
+            """
+            import os
+            from datetime import datetime
+
+            import uvicorn
+
+            import coding_agent.server.http_server as http_server
+            from coding_agent.server.http_server import app
+            from coding_agent.server.session_manager import Session, SessionManager
+
+            manager = SessionManager(storage_config={"runtime_backend": "none"})
+            http_server.session_manager = manager
+            manager.register_session(
+                Session(
+                    id="catalog-session",
+                    created_at=datetime.now(),
+                    last_activity=datetime.now(),
+                )
+            )
+            uvicorn.run(
+                app,
+                host="127.0.0.1",
+                fd=int(os.environ["LIVE_HTTP_TEST_FD"]),
+                log_level="error",
+            )
+            """
+        )
+        server = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            server_script,
+            env=env,
+            pass_fds=(listen_sock.fileno(),),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        listen_sock.close()
+
+        base_url = f"http://127.0.0.1:{port}"
+        await _wait_for_live_server_or_raise(base_url, server)
+
+        try:
+            async with httpx.AsyncClient(base_url=base_url, timeout=30.0) as client:
+                response = await client.get("/sessions")
+                openapi_response = await client.get("/openapi.json")
+
+            assert response.status_code == 200
+            payload = response.json()
+            assert payload["contract_version"] == "1.0.0"
+            assert len(payload["sessions"]) == 1
+            summary = payload["sessions"][0]
+            assert summary["session_id"] == "catalog-session"
+            assert summary["id"] == "catalog-session"
+            assert summary["title"] is None
+            assert summary["status"] == "created"
+            assert "created_at" in summary
+            assert "default_run_target" in summary
+
+            assert openapi_response.status_code == 200
+            schemas = openapi_response.json()["components"]["schemas"]
+            assert (
+                schemas["SessionListResponse"]["properties"]["contract_version"][
+                    "const"
+                ]
+                == "1.0.0"
+            )
+            summary_schema = schemas["SessionSummaryResponse"]
+            assert "session_id" in summary_schema["required"]
+            assert "title" in summary_schema["required"]
+        finally:
+            server.terminate()
+            try:
+                await asyncio.wait_for(server.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                server.kill()
+                await server.communicate()
+
+
 class TestApprovalFlowIntegration:
     """Test approval flow integration between wire and HTTP."""
 

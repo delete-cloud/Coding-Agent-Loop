@@ -80,6 +80,7 @@ class FakeRuntimeSession:
         self.model_name = "model-1"
         self.provider_name = "provider-1"
         self.base_url = "https://example.test"
+        self.api_key: str | None = "sk-session-key"
         self.max_steps = 7
         self.approval_policy = ApprovalPolicy.AUTO
         self.provider = None
@@ -150,14 +151,25 @@ async def test_local_daemon_session_runtime_provider_reuses_cached_runtime(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider_name", "expected_api_key"),
+    [
+        ("provider-1", "sk-session-key"),
+        ("codex", None),
+        ("codex:work", None),
+    ],
+)
 async def test_local_daemon_session_runtime_provider_rebuilds_changed_workspace(
     tmp_path: Path,
+    provider_name: str,
+    expected_api_key: str | None,
 ) -> None:
     old_workspace = tmp_path / "old"
     old_workspace.mkdir()
     new_workspace = tmp_path / "new"
     new_workspace.mkdir()
     session = FakeRuntimeSession()
+    session.provider_name = provider_name
     old_adapter = FakeRuntimeAdapter()
     session.runtime_pipeline = object()
     session.runtime_ctx = types.SimpleNamespace(
@@ -212,13 +224,13 @@ async def test_local_daemon_session_runtime_provider_rebuilds_changed_workspace(
     assert persisted == ["tape-new"]
     assert create_kwargs["workspace_root"] == new_workspace.resolve()
     assert create_kwargs["model_override"] == "model-1"
-    assert create_kwargs["provider_override"] == "provider-1"
+    assert create_kwargs["provider_override"] == provider_name
     assert create_kwargs["base_url_override"] == "https://example.test"
     assert create_kwargs["max_steps_override"] == 7
     assert create_kwargs["approval_mode_override"] == "auto"
     assert create_kwargs["session_id_override"] == "session-1"
     assert create_kwargs["run_id_override"] == "run-1"
-    assert create_kwargs["api_key"] is None
+    assert create_kwargs["api_key"] == expected_api_key
     assert session.tape_id == "tape-new"
     assert fake_ctx.runtime_message_bus is session.runtime_message_bus
     assert fake_ctx.config == {"wire_consumer": None, "agent_id": ""}

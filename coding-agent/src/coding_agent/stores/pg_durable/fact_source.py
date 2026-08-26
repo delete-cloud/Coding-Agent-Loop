@@ -4,6 +4,14 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any, cast
+from coding_agent.events.connected_chat import (
+    CONNECTED_CHAT_PROJECTION,
+    ChatSnapshot,
+    ConnectedChatCursor,
+    decode_chat_cursor,
+    encode_chat_cursor,
+    project_chat_event,
+)
 from coding_agent.stores.runtime_store import (
     CursorEpochMismatchError,
     DEFAULT_HARNESS_PROJECTION,
@@ -16,6 +24,7 @@ from coding_agent.stores.runtime_store import (
     RetentionFloorReplay,
     SessionFactSourceState,
     TrustedHandoff,
+    _agent_run_from_row,
     _require_non_empty,
     _require_positive_int,
     assert_projection_binding,
@@ -195,6 +204,115 @@ class PgFactSourceMixin:
             limit,
         )
         return [_event_record_from_pg_row(dict(row)) for row in rows]
+
+    async def snapshot_chat_events(
+        self,
+        session_id: str,
+        cursor: ConnectedChatCursor | None,
+        limit: int,
+    ) -> ChatSnapshot:
+        _require_non_empty("session_id", session_id)
+        _require_positive_int("limit", limit)
+        await self._ensure_schema()
+        pool = await self._pool.get_pool()
+        fact_row = await pool.fetchrow(self._SELECT_FACT_SOURCE_SQL, session_id)
+        if fact_row is None:
+            fact_row = await pool.fetchrow(
+                self._INSERT_FACT_SOURCE_SQL,
+                session_id,
+                0,
+                0,
+                DEFAULT_HARNESS_PROJECTION,
+                0,
+            )
+            state = _fact_source_from_pg_row(
+                _required_row(fact_row, "session fact source insert")
+            ).state
+        else:
+            state = _fact_source_from_pg_row(dict(fact_row)).state
+        retention_floor = parse_u64(state.retention_floor, field_name="retention_floor")
+        if cursor is None:
+            after = max(0, retention_floor - 1)
+            high_water = parse_u64(state.session_seq, field_name="session_seq")
+        else:
+            cursor = decode_chat_cursor(
+                encode_chat_cursor(cursor),
+                expected_session_id=session_id,
+                fact_state=state,
+            )
+            after = parse_u64(cursor.after_seq, field_name="after_seq")
+            high_water = parse_u64(cursor.high_water_seq, field_name="high_water_seq")
+        events = []
+        scanned_after = after
+        chunk_size = max(16, min(256, limit * 2))
+        while scanned_after < high_water and len(events) < limit:
+            rows = await pool.fetch(
+                """
+                SELECT event.*, run.*
+                FROM session_event_records AS event
+                LEFT JOIN agent_runs AS run
+                  ON run.run_id = event.payload->>'run_id'
+                 AND run.session_id = event.session_id
+                WHERE event.session_id = $1
+                  AND event.session_seq > $2
+                  AND event.session_seq <= $3
+                ORDER BY event.session_seq
+                LIMIT $4
+                """,
+                session_id,
+                scanned_after,
+                high_water,
+                chunk_size,
+            )
+            if not rows:
+                break
+            for row in rows:
+                joined = dict(row)
+                record = _event_record_from_pg_row(joined)
+                if record.session_seq is None:
+                    raise ValueError("stored event must include session_seq")
+                scanned_after = parse_u64(record.session_seq, field_name="session_seq")
+                run = (
+                    None
+                    if joined.get("run_id") is None
+                    else _agent_run_from_row(joined)
+                )
+                projected = project_chat_event(record, run)
+                if projected is not None:
+                    events.append(projected)
+                if len(events) == limit:
+                    break
+
+        snapshot_cursor = ConnectedChatCursor(
+            v=1,
+            kind="chat",
+            session_id=session_id,
+            projection=CONNECTED_CHAT_PROJECTION,
+            epoch=state.projection_epoch,
+            after_seq=str(max(0, retention_floor - 1)),
+            high_water_seq=str(high_water),
+        )
+        next_cursor = None
+        if scanned_after < high_water:
+            next_cursor = encode_chat_cursor(
+                ConnectedChatCursor(
+                    v=1,
+                    kind="chat",
+                    session_id=session_id,
+                    projection=CONNECTED_CHAT_PROJECTION,
+                    epoch=state.projection_epoch,
+                    after_seq=str(scanned_after),
+                    high_water_seq=str(high_water),
+                )
+            )
+        return ChatSnapshot(
+            session_id=session_id,
+            projection=CONNECTED_CHAT_PROJECTION,
+            projection_epoch=state.projection_epoch,
+            snapshot_cursor=encode_chat_cursor(snapshot_cursor),
+            next_cursor=next_cursor,
+            events=tuple(events),
+        )
 
     async def raise_retention_floor(
         self,

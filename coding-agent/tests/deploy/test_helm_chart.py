@@ -1138,14 +1138,15 @@ def test_runtime_image_builds_and_copies_webui_dist() -> None:
     assert "FROM ${NODE_BASE_IMAGE} AS webui" in dockerfile
     assert "ARG PNPM_VERSION=" in dockerfile
     assert 'corepack prepare "pnpm@${PNPM_VERSION}" --activate' in dockerfile
+    assert "WORKDIR /webui/app-next" in dockerfile
     assert (
-        "COPY webui/app/package.json webui/app/pnpm-lock.yaml webui/app/pnpm-workspace.yaml"
-        in dockerfile
+        "COPY webui/app-next/package.json webui/app-next/pnpm-lock.yaml "
+        "webui/app-next/pnpm-workspace.yaml ./" in dockerfile
     )
     assert "pnpm install --frozen-lockfile" in dockerfile
     assert "pnpm build" in dockerfile
     assert (
-        "COPY --chown=coding-agent:coding-agent --from=webui /webui/app/dist /app/webui-dist"
+        "COPY --chown=coding-agent:coding-agent --from=webui /webui/app-next/out /app/webui-dist"
         in dockerfile
     )
     assert 'WEBUI_DIST_DIR="/app/webui-dist"' in dockerfile

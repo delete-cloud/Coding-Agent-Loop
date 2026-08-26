@@ -135,6 +135,8 @@ class RuntimeResumeOrchestrationService:
         *,
         prompt: str | None = None,
         resume_reason: str = "user_resume",
+        previous_run_id: str | None = None,
+        run_id_override: str | None = None,
     ) -> AgentRunRecord:
         if not resume_reason.strip():
             raise ValueError("resume_reason must be non-empty")
@@ -146,7 +148,11 @@ class RuntimeResumeOrchestrationService:
         if self.session_is_attached(session):
             raise RemoteLoopOwnershipRetired()
 
-        previous_run = await self.latest_runtime_run(session.id)
+        previous_run = (
+            await self.latest_runtime_run(session.id)
+            if previous_run_id is None
+            else await self.load_runtime_run(previous_run_id)
+        )
         if previous_run is None:
             raise RuntimeError("session has no previous run to resume")
         if previous_run.status in self.active_resume_blocking_statuses:
@@ -169,7 +175,7 @@ class RuntimeResumeOrchestrationService:
             resume_context,
             prompt=prompt,
         )
-        run_id = self.run_id_factory()
+        run_id = run_id_override or self.run_id_factory()
         record = await self.run_local(
             session.id,
             resume_prompt,
@@ -212,6 +218,8 @@ class RuntimeResumeSessionOrchestrationService:
         *,
         prompt: str | None = None,
         resume_reason: str = "user_resume",
+        previous_run_id: str | None = None,
+        run_id_override: str | None = None,
     ) -> AgentRunRecord:
         self.require_runtime_store()
         await self.assert_owner(session_id)
@@ -220,6 +228,8 @@ class RuntimeResumeSessionOrchestrationService:
             session=session,
             prompt=prompt,
             resume_reason=resume_reason,
+            previous_run_id=previous_run_id,
+            run_id_override=run_id_override,
         )
 
 
@@ -443,14 +453,16 @@ def _latest_plan_note_from_tape_tail(
     return None
 
 
+def resolve_resume_user_prompt(prompt: str | None) -> str:
+    return prompt if prompt is not None and prompt.strip() else DEFAULT_RESUME_PROMPT
+
+
 def _resume_prompt(
     resume_context: RuntimeResumeContext,
     *,
     prompt: str | None,
 ) -> str:
-    user_prompt = (
-        prompt if prompt is not None and prompt.strip() else DEFAULT_RESUME_PROMPT
-    )
+    user_prompt = resolve_resume_user_prompt(prompt)
     event_line = (
         f"Last known event id: {resume_context.resume_from_event_id}."
         if resume_context.resume_from_event_id is not None

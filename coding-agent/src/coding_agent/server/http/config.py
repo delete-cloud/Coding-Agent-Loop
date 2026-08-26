@@ -44,7 +44,7 @@ def _server_config_path() -> Path:
     configured_path = os.environ.get(_SERVER_CONFIG_ENV)
     if configured_path is not None and configured_path.strip():
         return Path(configured_path).expanduser().resolve()
-    return Path(__file__).resolve().parent.parent / "agent.toml"
+    return Path(__file__).resolve().parent.parent.parent / "agent.toml"
 
 
 def _has_explicit_server_config() -> bool:
