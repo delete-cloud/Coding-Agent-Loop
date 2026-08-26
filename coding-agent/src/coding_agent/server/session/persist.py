@@ -14,7 +14,10 @@ from typing import (
     Any,
     cast,
 )
-from coding_agent.events.connected_chat import ChatCommandAdmission
+from coding_agent.events.connected_chat import (
+    ChatCommandAdmission,
+    RootRunAlreadySettledError,
+)
 from coding_agent.stores.durable_local import SQLiteLocalDurableStore
 from coding_agent.stores.durable_pg import PGDurableStore
 from coding_agent.stores.runtime_store import (
@@ -266,36 +269,32 @@ class PersistOps:
         store = self._authoritative_store()
         if store is None:
             return
-        run = await self._require_runtime_store().load_agent_run(run_id)
-        if run is not None and run.status in {
-            "completed",
-            "failed",
-            "cancelled",
-            "interrupted",
-        }:
-            return
         authority = self._owner_authorities.get(session.id)
         if authority is None:
             raise SessionOwnershipConflictError(
                 "chat event persist requires owner authority"
             )
-        commit = await store.commit_authoritative_uow(
-            authority,
-            AuthoritativeUnitOfWork(
-                event=EventRecord(
-                    event_id=self._boundary_event_id(
-                        session,
-                        event_kind,
-                        uuid.uuid4().hex,
+        try:
+            commit = await store.commit_authoritative_uow(
+                authority,
+                AuthoritativeUnitOfWork(
+                    event=EventRecord(
+                        event_id=self._boundary_event_id(
+                            session,
+                            event_kind,
+                            uuid.uuid4().hex,
+                        ),
+                        session_id=session.id,
+                        event_kind=event_kind,
+                        payload=payload,
+                        created_at=datetime.now(UTC),
                     ),
-                    session_id=session.id,
-                    event_kind=event_kind,
-                    payload=payload,
-                    created_at=datetime.now(UTC),
+                    session_state=cast(JSONObject, session.to_store_data()),
+                    require_unsettled_root_run_id=run_id,
                 ),
-                session_state=cast(JSONObject, session.to_store_data()),
-            ),
-        )
+            )
+        except RootRunAlreadySettledError:
+            return
         await self._publish_chat_commit(commit)
 
     async def _commit_session_uow(

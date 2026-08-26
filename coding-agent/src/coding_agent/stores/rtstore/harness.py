@@ -278,9 +278,10 @@ class AuthoritativeUnitOfWork:
                 "require_unsettled_root_run_id",
                 self.require_unsettled_root_run_id,
             )
-            if self.run_state is None:
-                raise ValueError("root settlement requires run_state")
-            if self.run_state.run_id != self.require_unsettled_root_run_id:
+            if (
+                self.run_state is not None
+                and self.run_state.run_id != self.require_unsettled_root_run_id
+            ):
                 raise ValueError(
                     "root settlement run_state does not match required run"
                 )

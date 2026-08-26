@@ -127,6 +127,10 @@ class PgUnitOfWorkMixin:
                     "cancelled",
                     "interrupted",
                 }:
+                    if unit.event.event_kind != "root_terminal":
+                        raise RootRunAlreadySettledError(
+                            "chat event after root settlement"
+                        )
                     existing_row = await connection.fetchrow(
                         self._SELECT_SESSION_EVENT_BY_ID_SQL, unit.event.event_id
                     )

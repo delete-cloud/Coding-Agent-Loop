@@ -134,6 +134,10 @@ class LocalUnitOfWorkMixin:
                     "cancelled",
                     "interrupted",
                 }:
+                    if unit.event.event_kind != "root_terminal":
+                        raise RootRunAlreadySettledError(
+                            "chat event after root settlement"
+                        )
                     existing_terminal = connection.execute(
                         "SELECT * FROM session_event_records WHERE event_id = ?",
                         (unit.event.event_id,),

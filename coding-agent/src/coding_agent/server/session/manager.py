@@ -297,27 +297,37 @@ class SessionManager(
                     yield event
             finally:
                 await follow.aclose()
-                if (
-                    owns_task
-                    and task is not None
-                    and not task.done()
-                    and not saw_terminal
-                ):
-                    settlement = asyncio.create_task(
-                        self.settle_root_run(
-                            session_id,
-                            run_id=admission.run_id,
-                            outcome="interrupted",
+                try:
+                    if (
+                        owns_task
+                        and task is not None
+                        and not task.done()
+                        and not saw_terminal
+                    ):
+                        from coding_agent.events.connected_chat import (
+                            RootRunAlreadySettledError,
                         )
-                    )
-                    await asyncio.shield(settlement)
-                    task.cancel()
-                if owns_task and task is not None:
-                    try:
-                        await task
-                    except asyncio.CancelledError:
-                        pass
-                    self._chat_run_tasks.pop(admission.run_id, None)
+
+                        try:
+                            settlement = asyncio.create_task(
+                                self.settle_root_run(
+                                    session_id,
+                                    run_id=admission.run_id,
+                                    outcome="interrupted",
+                                )
+                            )
+                            await asyncio.shield(settlement)
+                        except RootRunAlreadySettledError:
+                            pass
+                        task.cancel()
+                    if owns_task and task is not None:
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+                finally:
+                    if owns_task and task is not None:
+                        self._chat_run_tasks.pop(admission.run_id, None)
 
         return stream()
 
@@ -460,6 +470,7 @@ class SessionManager(
         self._pg_durable_store: PGDurableStore | None = None
         self._store = store or self._create_http_session_store()
         self._session_cache: dict[str, Session] = {}
+        self._approval_stores: dict[str, ApprovalStore] = {}
         self._lock = asyncio.Lock()
         self._store_io_guard = threading.Lock()
         self._session_turn_locks: dict[str, asyncio.Lock] = {}
