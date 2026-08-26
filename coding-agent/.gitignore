@@ -25,3 +25,20 @@ data/eval/golden/*
 
 .alma-snapshots
 bee-pack-v4pro-round1/
+
+# design-only trees stay on the machine, not GitHub
+docs/superpowers/
+docs/action_safety/
+docs/bee_command_bridge/
+docs/bee_launch/
+docs/bee_runtime/
+docs/bee_template_pack/
+docs/bee_workspace/
+docs/context_system/
+docs/cross_topic_memory/
+docs/dogfood/
+docs/scheduled_runs/
+docs/topic_layer/
+docs/workspace_provider/
+.opencode/prompts/tasks/
+.opencode/task-packets/

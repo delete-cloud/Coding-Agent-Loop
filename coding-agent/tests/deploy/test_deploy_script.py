@@ -7,10 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = ROOT / "scripts" / "deploy-coding-agent-k8s.sh"
-DEPLOY_TOOLS_IMAGE = (
-    "git.mesh.kinaz.me/kina/coding-agent-deploy-tools:"
-    "kubectl-1.36.0-helm-3.17.3-python-3.12-slim"
-)
+DEPLOY_TOOLS_TAG = "kubectl-1.36.0-helm-3.17.3-python-3.12-slim"
 
 
 def _write_stub(directory: Path, name: str) -> None:
@@ -140,8 +137,21 @@ def test_woodpecker_builds_deploy_tools_image_used_by_manual_deploy() -> None:
         encoding="utf-8"
     )
 
-    assert f"image: {DEPLOY_TOOLS_IMAGE}" in deploy
-    assert f'--destination "{DEPLOY_TOOLS_IMAGE}"' in ci
+    assert "git.mesh.kinaz.me" not in ci
+    assert "git.mesh.kinaz.me" not in deploy
+    assert 'image: "${DEPLOY_TOOLS_IMAGE}"' in deploy
+    assert "from_secret: deploy_tools_image" not in deploy
+    assert "from_secret: registry_host" in ci
+    assert "from_secret: registry_namespace" in ci
+    assert "${REGISTRY_HOST}" not in ci
+    assert "${REGISTRY_NAMESPACE}" not in ci
+    assert "${DEPLOY_TOOLS_TAG}" not in ci
+    assert "$${NO_PROXY_EXTRA:+,$NO_PROXY_EXTRA}" in ci
+    assert (
+        "--destination \"$REGISTRY_HOST/$REGISTRY_NAMESPACE/"
+        "coding-agent-deploy-tools:$DEPLOY_TOOLS_TAG\""
+    ) in ci
+    assert f"DEPLOY_TOOLS_TAG: {DEPLOY_TOOLS_TAG}" in ci
     assert "ARG KUBECTL_VERSION=1.36.0" in dockerfile
     assert "ARG HELM_VERSION=3.17.3" in dockerfile
     assert "/usr/local/bin/kubectl" in dockerfile
