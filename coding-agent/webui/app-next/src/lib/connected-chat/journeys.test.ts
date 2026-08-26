@@ -137,7 +137,7 @@ describe("connected-chat fixture journeys J1-J8", () => {
     const queued = fixture.overlap_example.queued_source_event_ids.map(fixtureEvent);
 
     let state = reduceChatEvent(createTimelineState(), toolResult);
-    expect(state.pendingToolResults.get("call-01")?.source_event_id).toBe(
+    expect(state.pendingToolResults.get("run-01:call-01")?.source_event_id).toBe(
       "evt-tool-result-01",
     );
 

@@ -96,7 +96,11 @@ function MessageBody({ message, t }: { message: TimelineMessage; t: Translate })
 
 /** RFC3339 → "HH:MM" (UTC, deterministic — matches the static shell's meta style). */
 function formatTime(createdAt: string): string {
-  return createdAt.slice(11, 16);
+  const date = new Date(createdAt);
+  if (Number.isNaN(date.getTime())) return createdAt.slice(11, 16);
+  const hours = String(date.getUTCHours()).padStart(2, "0");
+  const minutes = String(date.getUTCMinutes()).padStart(2, "0");
+  return `${hours}:${minutes}`;
 }
 
 function MessageSection({ message, t }: { message: TimelineMessage; t: Translate }) {

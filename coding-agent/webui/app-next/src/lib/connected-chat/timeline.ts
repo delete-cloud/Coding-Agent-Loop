@@ -23,7 +23,7 @@ export interface TimelineState {
   order: string[];
   /** Nodes keyed by primary source_event_id. */
   byId: Map<string, TimelineNode>;
-  /** Results awaiting their call, keyed by call_id. */
+  /** Results awaiting their call, keyed by `${run_id}:${call_id}`. */
   pendingToolResults: Map<string, ChatEventEnvelope>;
 }
 
@@ -58,12 +58,23 @@ function insertOrder(order: string[], byId: Map<string, TimelineNode>, event: Ch
   return next;
 }
 
+function toolKey(runId: string | null, callId: string): string {
+  return `${runId ?? ""}:${callId}`;
+}
+
 function findCallNode(
   byId: Map<string, TimelineNode>,
+  runId: string | null,
   callId: string,
 ): TimelineNode | null {
   for (const node of byId.values()) {
-    if (node.event.kind === "tool_call" && node.event.payload.call_id === callId) return node;
+    if (
+      node.event.kind === "tool_call"
+      && node.event.run_id === runId
+      && node.event.payload.call_id === callId
+    ) {
+      return node;
+    }
   }
   return null;
 }
@@ -73,8 +84,8 @@ export function reduceChatEvent(state: TimelineState, event: ChatEventEnvelope):
   if (state.byId.has(event.source_event_id)) return state;
 
   if (event.kind === "tool_result") {
-    const callId = event.payload.call_id;
-    const call = findCallNode(state.byId, callId);
+    const key = toolKey(event.run_id, event.payload.call_id);
+    const call = findCallNode(state.byId, event.run_id, event.payload.call_id);
     if (call) {
       // First result wins; a repeat of the same or a conflicting result does
       // not create a node and does not replace the merged one.
@@ -83,9 +94,9 @@ export function reduceChatEvent(state: TimelineState, event: ChatEventEnvelope):
       byId.set(call.event.source_event_id, { event: call.event, result: event });
       return { order: state.order, byId, pendingToolResults: state.pendingToolResults };
     }
-    if (state.pendingToolResults.has(callId)) return state; // first pending wins
+    if (state.pendingToolResults.has(key)) return state; // first pending wins
     const pendingToolResults = new Map(state.pendingToolResults);
-    pendingToolResults.set(callId, event);
+    pendingToolResults.set(key, event);
     return { order: state.order, byId: state.byId, pendingToolResults };
   }
 
@@ -94,11 +105,12 @@ export function reduceChatEvent(state: TimelineState, event: ChatEventEnvelope):
   let result: ChatEventEnvelope | null = null;
   let pendingToolResults = state.pendingToolResults;
   if (event.kind === "tool_call") {
-    const pending = state.pendingToolResults.get(event.payload.call_id);
+    const key = toolKey(event.run_id, event.payload.call_id);
+    const pending = state.pendingToolResults.get(key);
     if (pending) {
       result = pending;
       pendingToolResults = new Map(state.pendingToolResults);
-      pendingToolResults.delete(event.payload.call_id);
+      pendingToolResults.delete(key);
     }
   }
 

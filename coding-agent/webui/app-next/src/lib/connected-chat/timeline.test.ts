@@ -94,7 +94,7 @@ describe("reduceChatEvent", () => {
 
     expect(state.byId.size).toBe(0);
     expect(state.order).toEqual([]);
-    expect(state.pendingToolResults.get("call-01")?.source_event_id).toBe("evt-tool-result-01");
+    expect(state.pendingToolResults.get("run-01:call-01")?.source_event_id).toBe("evt-tool-result-01");
 
     state = reduceChatEvent(state, byId("evt-tool-call-01"));
     expect(state.order).toEqual(["evt-tool-call-01"]);
@@ -128,7 +128,7 @@ describe("reduceChatEvent", () => {
     const state = reduceChatEvent(createTimelineState(), orphan);
 
     expect(state.order).toEqual([]);
-    expect(state.pendingToolResults.get("call-never")?.source_event_id).toBe(
+    expect(state.pendingToolResults.get("run-01:call-never")?.source_event_id).toBe(
       "evt-orphan-result",
     );
   });
