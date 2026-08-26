@@ -118,6 +118,9 @@ export class ConnectedChatController {
   private owningAbort: AbortController | null = null;
   private cancelAbort: AbortController | null = null;
   private passiveFollowRunning = false;
+  private pendingPassiveFollow:
+    | { sessionId: string; cursor: string; generation: number; abort: AbortController }
+    | null = null;
   private readonly reconnectDelayMs: (attempt: number) => number;
   private readonly sleep: (delayMs: number, signal: AbortSignal) => Promise<boolean>;
   private readonly finalizeTimeoutMs: number;
@@ -335,8 +338,12 @@ export class ConnectedChatController {
     generation: number,
     abort: AbortController,
   ): Promise<void> {
-    if (this.passiveFollowRunning) return;
+    if (this.passiveFollowRunning) {
+      this.pendingPassiveFollow = { sessionId, cursor, generation, abort };
+      return;
+    }
     this.passiveFollowRunning = true;
+    this.pendingPassiveFollow = null;
     try {
       const operation = this.operation;
       let nextCursor = cursor;
@@ -385,6 +392,16 @@ export class ConnectedChatController {
       }
     } finally {
       this.passiveFollowRunning = false;
+      const pending = this.pendingPassiveFollow;
+      this.pendingPassiveFollow = null;
+      if (pending !== null && pending.generation === this.generation && !this.disposed) {
+        void this.runPassiveFollow(
+          pending.sessionId,
+          pending.cursor,
+          pending.generation,
+          pending.abort,
+        );
+      }
     }
   }
 

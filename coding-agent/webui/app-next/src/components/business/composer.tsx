@@ -79,10 +79,10 @@ export function Composer(props: ComposerProps) {
     modelStatus,
   } = props;
 
-  const busy = status === "sending" || status === "cancelling" || status === "loading";
+  const busy = status === "sending" || status === "cancelling";
   const replayRequired = status === "replay_required";
-  const sendDisabled = draft.trim().length === 0 || busy || replayRequired;
-
+  const sendDisabled =
+    draft.trim().length === 0 || busy || replayRequired || status === "loading";
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
     event.preventDefault();

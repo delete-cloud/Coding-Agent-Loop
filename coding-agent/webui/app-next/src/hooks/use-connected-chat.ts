@@ -254,10 +254,7 @@ export function useConnectedChat(): ConnectedChatView | null {
       state,
       messages: timelineToMessages(state.timeline),
       canResume,
-      busy:
-        state.status === "sending" ||
-        state.status === "cancelling" ||
-        state.status === "loading",
+      busy: state.status === "sending" || state.status === "cancelling",
       setDraft: (draft: string) => controller.setDraft(draft),
       send: () => {
         const current = controller.getState();

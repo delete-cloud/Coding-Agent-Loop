@@ -497,31 +497,31 @@ function parseCodexFlowItem(value: unknown, path: string): CodexFlow {
     flow_id: raw.flow_id,
     state: raw.state,
   };
-  if (raw.verification_url !== undefined) {
+  if (raw.verification_url !== undefined && raw.verification_url !== null) {
     if (typeof raw.verification_url !== "string") {
       throw new ContractViolationError(`${path}.verification_url`, "expected a string");
     }
     flow.verification_url = raw.verification_url;
   }
-  if (raw.user_code !== undefined) {
+  if (raw.user_code !== undefined && raw.user_code !== null) {
     if (typeof raw.user_code !== "string") {
       throw new ContractViolationError(`${path}.user_code`, "expected a string");
     }
     flow.user_code = raw.user_code;
   }
-  if (raw.account_label !== undefined) {
+  if (raw.account_label !== undefined && raw.account_label !== null) {
     if (typeof raw.account_label !== "string") {
       throw new ContractViolationError(`${path}.account_label`, "expected a string");
     }
     flow.account_label = raw.account_label;
   }
-  if (raw.error !== undefined) {
+  if (raw.error !== undefined && raw.error !== null) {
     if (typeof raw.error !== "string") {
       throw new ContractViolationError(`${path}.error`, "expected a string");
     }
     flow.error = raw.error;
   }
-  if (raw.created_at !== undefined) {
+  if (raw.created_at !== undefined && raw.created_at !== null) {
     if (typeof raw.created_at !== "string") {
       throw new ContractViolationError(`${path}.created_at`, "expected a string");
     }
@@ -556,19 +556,19 @@ function parseOAuthAccounts(value: unknown): OAuthAccount[] {
       provider: raw.provider,
       label: typeof raw.label === "string" && raw.label ? raw.label : raw.provider,
     };
-    if (raw.email !== undefined) {
+    if (raw.email !== undefined && raw.email !== null) {
       if (typeof raw.email !== "string") {
         throw new ContractViolationError(`oauth_accounts[${index}].email`, "expected a string");
       }
       account.email = raw.email;
     }
-    if (raw.plan !== undefined) {
+    if (raw.plan !== undefined && raw.plan !== null) {
       if (typeof raw.plan !== "string") {
         throw new ContractViolationError(`oauth_accounts[${index}].plan`, "expected a string");
       }
       account.plan = raw.plan;
     }
-    if (raw.connected_at !== undefined) {
+    if (raw.connected_at !== undefined && raw.connected_at !== null) {
       if (typeof raw.connected_at !== "string") {
         throw new ContractViolationError(
           `oauth_accounts[${index}].connected_at`,
