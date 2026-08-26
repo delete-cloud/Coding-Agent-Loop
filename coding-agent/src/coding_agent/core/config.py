@@ -92,6 +92,11 @@ def load_config(cli_args: dict[str, object] | None = None) -> Config:
         if github_token:
             values["api_key"] = github_token
 
+    if values.get("provider") == "anthropic" and not values.get("api_key"):
+        anthropic_token = os.environ.get("ANTHROPIC_API_KEY")
+        if anthropic_token:
+            values["api_key"] = anthropic_token
+
     if values.get("provider") == "kimi" and "api_key" not in values:
         moonshot_token = os.environ.get("MOONSHOT_API_KEY")
         if moonshot_token:

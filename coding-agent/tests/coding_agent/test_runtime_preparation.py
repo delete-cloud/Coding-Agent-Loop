@@ -41,6 +41,7 @@ class FakeRuntimeSession:
         self.id = "session-1"
         self.model_name = "model-1"
         self.provider_name = "provider-1"
+        self.api_key: str | None = None
         self.base_url = "https://example.test"
         self.max_steps = 9
         self.approval_policy = ApprovalPolicy.INTERACTIVE
@@ -209,6 +210,32 @@ async def test_runtime_preparation_service_builds_local_daemon_runtime(
     assert session.tape_id == "tape-new"
     assert binding.adapter is adapter
     assert session.runtime_adapter is adapter
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_name", ["codex", "codex:work"])
+async def test_codex_provider_ignores_request_api_key(
+    tmp_path: Path,
+    provider_name: str,
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    session = FakeRuntimeSession()
+    session.default_run_target = _request(workspace).target
+    session.provider_name = provider_name
+    session.api_key = "sk-must-not-reach-codex"
+    created: dict[str, object] = {}
+
+    await _service(
+        created=created,
+        persisted=[],
+        restored=[],
+        consumer=object(),
+        adapter=FakeRuntimeAdapter(),
+    ).build_runtime(session)
+
+    assert created["provider_override"] == provider_name
+    assert created["api_key"] is None
 
 
 @pytest.mark.asyncio

@@ -3,6 +3,17 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
+
+from coding_agent.events.connected_chat import (
+    ChatCommandAdmission,
+    ChatCommandConflictError,
+    ResumeSourceUnsettledError,
+    RootRunAlreadySettledError,
+    TurnInProgressError,
+    build_chat_admission,
+    build_root_settlement,
+)
 from coding_agent.stores.runtime_store import (
     AuthoritativeCommit,
     AuthoritativeUnitOfWork,
@@ -10,6 +21,7 @@ from coding_agent.stores.runtime_store import (
     RawCursor,
     _agent_run_sqlite_values,
     _datetime_to_json,
+    _json_object_from_sql,
     _json_to_sql,
     effect_status_may_replace,
     format_u64,
@@ -27,6 +39,55 @@ from coding_agent.stores.local_durable.helpers import _require_json_object
 
 
 class LocalUnitOfWorkMixin:
+    async def settle_root_run(
+        self,
+        authority: OwnerAuthority,
+        *,
+        run_id: str,
+        outcome: str,
+        result: str | None,
+        error: str | None,
+    ) -> AuthoritativeCommit:
+        from coding_agent.stores.runtime_store import SQLiteRuntimeStore
+
+        run = await SQLiteRuntimeStore(self._path).load_agent_run(run_id)
+        if run is None or run.session_id != authority.session_id:
+            raise KeyError(f"root run not found: {run_id}")
+        session = self.load_session(authority.session_id)
+        if session is None:
+            raise KeyError(f"session not found: {authority.session_id}")
+        unit = build_root_settlement(
+            run=run,
+            session_state=session,
+            outcome=outcome,
+            result=result,
+            error=error,
+        )
+        return await self.commit_authoritative_uow(authority, unit)
+
+    async def admit_chat_command(
+        self,
+        authority: OwnerAuthority,
+        *,
+        prompt: str,
+        command_id: str,
+        parent_run_id: str | None,
+        session_state: dict[str, object],
+    ) -> ChatCommandAdmission:
+        unit, admission = build_chat_admission(
+            session_id=authority.session_id,
+            prompt=prompt,
+            command_id=command_id,
+            parent_run_id=parent_run_id,
+            session_state=session_state,
+        )
+        commit = await self.commit_authoritative_uow(authority, unit)
+        return replace(
+            admission,
+            session_seq=commit.event.session_seq,
+            idempotent=commit.idempotent,
+        )
+
     async def commit_authoritative_uow(
         self,
         authority: OwnerAuthority,
@@ -58,16 +119,173 @@ class LocalUnitOfWorkMixin:
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._assert_authority(connection, authority)
+            if unit.require_unsettled_root_run_id is not None:
+                current_run = connection.execute(
+                    "SELECT status FROM agent_runs WHERE run_id = ? AND session_id = ?",
+                    (unit.require_unsettled_root_run_id, authority.session_id),
+                ).fetchone()
+                if current_run is None:
+                    raise KeyError(
+                        f"root run not found: {unit.require_unsettled_root_run_id}"
+                    )
+                if current_run["status"] in {
+                    "completed",
+                    "failed",
+                    "cancelled",
+                    "interrupted",
+                }:
+                    existing_terminal = connection.execute(
+                        "SELECT * FROM session_event_records WHERE event_id = ?",
+                        (unit.event.event_id,),
+                    ).fetchone()
+                    if existing_terminal is None:
+                        raise ValueError("settled root run is missing root_terminal")
+                    event = _event_record_from_sqlite_row(existing_terminal)
+                    if event.payload != unit.event.payload:
+                        raise RootRunAlreadySettledError(
+                            "root run settled with a different outcome"
+                        )
+                    fact = self._ensure_fact_source(connection, authority.session_id)
+                    if event.session_seq is None or event.projection_epoch is None:
+                        raise ValueError("stored root_terminal is incomplete")
+                    return AuthoritativeCommit(
+                        event=event,
+                        projection=fact.projection,
+                        projection_epoch=event.projection_epoch,
+                        raw_cursor=RawCursor(
+                            session_id=authority.session_id,
+                            session_seq=event.session_seq,
+                        ),
+                        idempotent=True,
+                    )
+            chat_receipt = (
+                unit.receipt is not None
+                and unit.receipt.receipt_id.startswith("chat-command:")
+            )
+            if chat_receipt:
+                existing_receipt_row = connection.execute(
+                    """
+                    SELECT generation, payload, compensation_effect_id
+                    FROM session_receipt_slots
+                    WHERE session_id = ? AND receipt_id = ?
+                    """,
+                    (authority.session_id, unit.receipt.receipt_id),
+                ).fetchone()
+                if existing_receipt_row is not None:
+                    if (
+                        existing_receipt_row["generation"] != unit.receipt.generation
+                        or _json_object_from_sql(
+                            existing_receipt_row["payload"], context="receipt slot"
+                        )
+                        != unit.receipt.payload
+                        or existing_receipt_row["compensation_effect_id"]
+                        != unit.receipt.compensation_effect_id
+                    ):
+                        raise ChatCommandConflictError(
+                            "command ID was reused with different input"
+                        )
+                    existing_event_row = connection.execute(
+                        "SELECT * FROM session_event_records WHERE event_id = ?",
+                        (unit.event.event_id,),
+                    ).fetchone()
+                    if existing_event_row is None:
+                        raise ValueError(
+                            "chat receipt references a missing admission event"
+                        )
+                    event = _event_record_from_sqlite_row(existing_event_row)
+                    if event.session_id != authority.session_id:
+                        raise SessionOwnershipConflictError(
+                            "chat receipt event belongs to another session"
+                        )
+                    if event.session_seq is None or event.projection_epoch is None:
+                        raise ValueError("stored admission event is incomplete")
+                    fact = self._ensure_fact_source(connection, authority.session_id)
+                    return AuthoritativeCommit(
+                        event=event,
+                        projection=fact.projection,
+                        projection_epoch=event.projection_epoch,
+                        raw_cursor=RawCursor(
+                            session_id=authority.session_id,
+                            session_seq=event.session_seq,
+                        ),
+                        idempotent=True,
+                    )
+
+                session_row = connection.execute(
+                    "SELECT payload FROM agent_http_sessions WHERE session_id = ?",
+                    (authority.session_id,),
+                ).fetchone()
+                if session_row is not None:
+                    durable_session = _json_object_from_sql(
+                        session_row["payload"], context="session payload"
+                    )
+                    active_run_id = durable_session.get("turn_id")
+                    if active_run_id is not None:
+                        if not isinstance(active_run_id, str):
+                            raise ValueError("durable turn_id must be a string")
+                        active_run = connection.execute(
+                            "SELECT status FROM agent_runs WHERE run_id = ? AND session_id = ?",
+                            (active_run_id, authority.session_id),
+                        ).fetchone()
+                        if active_run is None or active_run["status"] in {
+                            "queued",
+                            "requested",
+                            "claimed",
+                            "running",
+                            "cancelling",
+                        }:
+                            raise TurnInProgressError("a root turn is already active")
+
+            run_state = unit.run_state
+            if unit.require_settled_parent_run_id is not None:
+                parent = connection.execute(
+                    """
+                    SELECT * FROM agent_runs
+                    WHERE session_id = ? AND superseded_by_checkpoint_id IS NULL
+                    ORDER BY started_at DESC, run_id DESC
+                    LIMIT 1
+                    """,
+                    (authority.session_id,),
+                ).fetchone()
+                if (
+                    parent is None
+                    or parent["run_id"] != unit.require_settled_parent_run_id
+                    or parent["status"]
+                    not in {"completed", "failed", "cancelled", "interrupted"}
+                ):
+                    raise ResumeSourceUnsettledError(
+                        "resume source is not the latest active settled run"
+                    )
+                if run_state is None:
+                    raise ValueError("resume admission requires a run")
+                metadata = dict(run_state.metadata)
+                metadata.update(
+                    {
+                        "previous_run_id": parent["run_id"],
+                        "resume_from_run_id": parent["run_id"],
+                        "resume_reason": "user_resume",
+                        "resume_context_injected": True,
+                    }
+                )
+                parent_metadata = _json_object_from_sql(
+                    parent["metadata"], context="run metadata"
+                )
+                previous_event_id = parent_metadata.get("last_event_id")
+                if previous_event_id is not None:
+                    if not isinstance(previous_event_id, str) or not previous_event_id:
+                        raise ValueError("last_event_id must be a non-empty string")
+                    metadata["resume_from_event_id"] = previous_event_id
+                run_state = replace(run_state, metadata=metadata)
             if tape_id:
                 self._bind_tape(connection, authority.session_id, tape_id)
-            if unit.run_state is not None:
-                if unit.run_state.tape_id is None:
+            if run_state is not None:
+                if run_state.tape_id is None:
                     raise SessionOwnershipConflictError(
                         "run target is not bound to a tape"
                     )
                 self._assert_tape_belongs_to_session(
                     connection,
-                    tape_id=unit.run_state.tape_id,
+                    tape_id=run_state.tape_id,
                     session_id=authority.session_id,
                 )
             fact = self._ensure_fact_source(connection, authority.session_id)
@@ -164,10 +382,10 @@ class LocalUnitOfWorkMixin:
                 """,
                 (authority.session_id, json.dumps(unit.session_state, sort_keys=True)),
             )
-            if unit.run_state is not None:
+            if run_state is not None:
                 existing = connection.execute(
                     "SELECT session_id FROM agent_runs WHERE run_id = ?",
-                    (unit.run_state.run_id,),
+                    (run_state.run_id,),
                 ).fetchone()
                 if (
                     existing is not None
@@ -196,7 +414,7 @@ class LocalUnitOfWorkMixin:
                         result = excluded.result,
                         error = excluded.error
                     """,
-                    _agent_run_sqlite_values(unit.run_state),
+                    _agent_run_sqlite_values(run_state),
                 )
             if unit.mailbox is not None:
                 connection.execute(

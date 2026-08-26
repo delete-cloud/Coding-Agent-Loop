@@ -16,13 +16,16 @@ import coding_agent.server.http_server as http_server
 async def test_webui_static_mount_serves_index_after_api_routes(tmp_path: Path) -> None:
     dist = tmp_path / "dist"
     dist.mkdir()
-    (dist / "index.html").write_text("<!doctype html><title>webui</title>", "utf-8")
+    (dist / "index.html").write_text(
+        '<!doctype html><meta name="application-name" content="CAL Night Console">',
+        "utf-8",
+    )
 
     app = FastAPI()
 
-    @app.get("/healthz")
-    async def healthz() -> dict[str, str]:
-        return {"status": "healthy"}
+    @app.get("/sessions")
+    async def sessions() -> dict[str, list[object]]:
+        return {"sessions": []}
 
     http_server.mount_webui_static_files(app, str(dist))
 
@@ -31,13 +34,13 @@ async def test_webui_static_mount_serves_index_after_api_routes(tmp_path: Path) 
         base_url="http://test",
     ) as client:
         root = await client.get("/")
-        health = await client.get("/healthz")
+        sessions = await client.get("/sessions")
 
     assert root.status_code == 200
     assert root.headers["content-type"].startswith("text/html")
-    assert "<title>webui</title>" in root.text
-    assert health.status_code == 200
-    assert health.json() == {"status": "healthy"}
+    assert 'content="CAL Night Console"' in root.text
+    assert sessions.status_code == 200
+    assert sessions.json() == {"sessions": []}
 
 
 @pytest.mark.asyncio

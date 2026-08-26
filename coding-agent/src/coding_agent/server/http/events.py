@@ -5,11 +5,21 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator, Callable
-from typing import Any
+from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import Any, Literal
 
 
 from coding_agent.events import DisplayEventStreamProjector
+from coding_agent.events.connected_chat import (
+    CONNECTED_CHAT_CONTRACT_VERSION,
+    ChatEvent,
+)
+from coding_agent.server.schemas import (
+    ConnectedChatEventSchema,
+    ConnectedChatStreamControlSchema,
+)
 from coding_agent.server.session_manager import Session
 from coding_agent.server.stores.session_owner_store import (
     SessionOwnershipConflictError,
@@ -38,6 +48,245 @@ from coding_agent.server.http import _bindings
 from coding_agent.server.http._bindings import LOGGER_NAME
 
 logger = logging.getLogger(LOGGER_NAME)
+
+
+@dataclass(frozen=True)
+class StreamControl:
+    kind: Literal["replay_required"]
+    reason: Literal["subscriber_queue_overflow", "ownership_lost", "sequence_loss"]
+    cursor: str
+
+
+def _chat_stream_openapi_response(description: str) -> dict[str, object]:
+    return {
+        "model": ConnectedChatEventSchema | ConnectedChatStreamControlSchema,
+        "description": description,
+        "content": {
+            "text/event-stream": {
+                "schema": {
+                    "oneOf": [
+                        {"$ref": "#/components/schemas/ConnectedChatEventSchema"},
+                        {
+                            "$ref": "#/components/schemas/ConnectedChatStreamControlSchema"
+                        },
+                    ]
+                },
+                "examples": {
+                    "chat_event": {
+                        "summary": "Canonical connected-chat event frame data",
+                        "value": {
+                            "contract_version": "1.0.0",
+                            "source_event_id": "evt-user-01",
+                            "session_seq": "12",
+                            "session_id": "session-01",
+                            "run_id": "run-01",
+                            "kind": "user_prompt",
+                            "created_at": "2026-08-24T00:00:00Z",
+                            "payload": {"text": "Run tests"},
+                        },
+                    },
+                    "stream_control": {
+                        "summary": "Replay-required stream control frame data",
+                        "value": {
+                            "contract_version": "1.0.0",
+                            "kind": "replay_required",
+                            "reason": "subscriber_queue_overflow",
+                            "cursor": "eyJhZnRlcl9zZXEiOiIxMiIsImVwb2NoIjoiNyIsImhpZ2hfd2F0ZXJfc2VxIjoiMjAiLCJraW5kIjoiY2hhdCIsInByb2plY3Rpb24iOiJjb25uZWN0ZWQtY2hhdCIsInNlc3Npb25faWQiOiJzZXNzaW9uLTAxIiwidiI6MX0",
+                        },
+                    },
+                },
+            }
+        },
+    }
+
+
+def _canonical_chat_timestamp(value: datetime) -> str:
+    text = value.isoformat()
+    if value.utcoffset() == timedelta(0):
+        return text.replace("+00:00", "Z")
+    return text
+
+
+def _chat_event_sse_frame(event: ChatEvent) -> dict[str, str]:
+    """Encode one canonical ChatEvent as an SSE chat_event frame."""
+    if not isinstance(event, ChatEvent):
+        raise TypeError("chat_event frame requires a ChatEvent")
+    envelope = {
+        "contract_version": event.contract_version,
+        "source_event_id": event.source_event_id,
+        "session_seq": event.session_seq,
+        "session_id": event.session_id,
+        "run_id": event.run_id,
+        "kind": event.kind,
+        "created_at": _canonical_chat_timestamp(event.created_at),
+        "payload": event.payload,
+    }
+    return {
+        "event": "chat_event",
+        "id": event.session_seq,
+        "data": json.dumps(envelope, ensure_ascii=False),
+    }
+
+
+def _stream_control_sse_frame(control: StreamControl) -> dict[str, str]:
+    """Encode one StreamControl as an SSE stream_control frame."""
+    if not isinstance(control, StreamControl):
+        raise TypeError("stream_control frame requires a StreamControl")
+    return {
+        "event": "stream_control",
+        "data": json.dumps(
+            {
+                "contract_version": CONNECTED_CHAT_CONTRACT_VERSION,
+                "kind": control.kind,
+                "reason": control.reason,
+                "cursor": control.cursor,
+            }
+        ),
+    }
+
+
+async def _chat_stream_sse_frames(
+    stream: AsyncIterator[Any],
+) -> AsyncIterator[dict[str, str]]:
+    """Passively encode a manager chat stream; never settles any run."""
+    try:
+        async for item in stream:
+            if isinstance(item, ChatEvent):
+                yield _chat_event_sse_frame(item)
+            elif isinstance(item, StreamControl):
+                yield _stream_control_sse_frame(item)
+            else:
+                raise TypeError(f"unsupported chat stream item: {type(item).__name__}")
+    finally:
+        close = getattr(stream, "aclose", None)
+        if callable(close):
+            await close()
+
+
+class ChatSubscriber:
+    def __init__(self, queue_size: int) -> None:
+        self.queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=queue_size)
+        self.overflowed = asyncio.Event()
+
+    def publish(self, event: Any) -> None:
+        try:
+            self.queue.put_nowait(event)
+        except asyncio.QueueFull:
+            self.overflowed.set()
+
+
+class ChatFollowBridge:
+    def __init__(
+        self,
+        *,
+        session_id: str,
+        projection_epoch: str,
+        register: Callable[[ChatSubscriber], Awaitable[None]],
+        capture_high_water: Callable[[], Awaitable[str]],
+        replay: Callable[[str, str], Awaitable[tuple[Any, ...]]],
+        verify_ownership: Callable[[], Awaitable[bool]],
+        unregister: Callable[[ChatSubscriber], Awaitable[None]],
+        queue_size: int = 100,
+    ) -> None:
+        self.session_id = session_id
+        self.projection_epoch = projection_epoch
+        self._register = register
+        self._capture_high_water = capture_high_water
+        self._replay = replay
+        self._verify_ownership = verify_ownership
+        self._unregister = unregister
+        self._queue_size = queue_size
+
+    def cursor(self, after_seq: str, high_water_seq: str) -> str:
+        from coding_agent.events.connected_chat import (
+            CONNECTED_CHAT_PROJECTION,
+            ConnectedChatCursor,
+            encode_chat_cursor,
+        )
+
+        return encode_chat_cursor(
+            ConnectedChatCursor(
+                v=1,
+                kind="chat",
+                session_id=self.session_id,
+                projection=CONNECTED_CHAT_PROJECTION,
+                epoch=self.projection_epoch,
+                after_seq=after_seq,
+                high_water_seq=high_water_seq,
+            )
+        )
+
+    async def follow(self, *, after_seq: str) -> AsyncIterator[Any]:
+        subscriber = ChatSubscriber(self._queue_size)
+        await self._register(subscriber)
+        last_safe = after_seq
+        high_water = after_seq
+        try:
+            if not await self._verify_ownership():
+                yield StreamControl(
+                    "replay_required",
+                    "ownership_lost",
+                    self.cursor(last_safe, high_water),
+                )
+                return
+            high_water = await self._capture_high_water()
+            replayed = await self._replay(after_seq, high_water)
+            for event in replayed:
+                yield event
+                last_safe = event.session_seq
+            while True:
+                if subscriber.overflowed.is_set():
+                    yield StreamControl(
+                        "replay_required",
+                        "subscriber_queue_overflow",
+                        self.cursor(last_safe, high_water),
+                    )
+                    return
+                event_task = asyncio.create_task(subscriber.queue.get())
+                overflow_task = asyncio.create_task(subscriber.overflowed.wait())
+                done, pending = await asyncio.wait(
+                    {event_task, overflow_task}, return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in pending:
+                    task.cancel()
+                if overflow_task in done and subscriber.overflowed.is_set():
+                    yield StreamControl(
+                        "replay_required",
+                        "subscriber_queue_overflow",
+                        self.cursor(last_safe, high_water),
+                    )
+                    return
+                event = event_task.result()
+                if int(event.session_seq) <= int(high_water):
+                    continue
+                if not await self._verify_ownership():
+                    yield StreamControl(
+                        "replay_required",
+                        "ownership_lost",
+                        self.cursor(last_safe, high_water),
+                    )
+                    return
+                if int(event.session_seq) != int(last_safe) + 1:
+                    recovered = await self._replay(last_safe, event.session_seq)
+                    if not recovered or recovered[-1].session_seq != event.session_seq:
+                        yield StreamControl(
+                            "replay_required",
+                            "sequence_loss",
+                            self.cursor(last_safe, high_water),
+                        )
+                        return
+                    for recovered_event in recovered:
+                        if int(recovered_event.session_seq) <= int(last_safe):
+                            continue
+                        yield recovered_event
+                        last_safe = recovered_event.session_seq
+                        high_water = last_safe
+                    continue
+                yield event
+                last_safe = event.session_seq
+                high_water = last_safe
+        finally:
+            await asyncio.shield(self._unregister(subscriber))
 
 
 def _http_safe_tool_result_payload(msg: ToolResultDelta) -> dict[str, Any]:
@@ -391,11 +640,15 @@ async def stream_wire_messages(
 
 __all__ = [
     "_broadcast_event",
+    "_chat_event_sse_frame",
+    "_chat_stream_openapi_response",
+    "_chat_stream_sse_frames",
     "_cleanup_event_queue_on_disconnect",
     "_display_event_stream_transform",
     "_http_safe_tool_result_payload",
     "_legacy_event_stream_transform",
     "_owned_session_event_generator",
+    "_stream_control_sse_frame",
     "_wire_message_to_event",
     "stream_wire_messages",
 ]

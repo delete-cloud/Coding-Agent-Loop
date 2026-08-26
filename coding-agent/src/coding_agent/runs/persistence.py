@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import UTC, datetime
 from enum import Enum
@@ -73,6 +73,7 @@ class RuntimeRunPersistenceService:
     run_store: RuntimeRunLifecycleStore | None
     checkpoint_store: RuntimeCheckpointStore | None
     metadata_for_session: RuntimeRunMetadataProvider
+    settle_root_run: Callable[..., Awaitable[object]] | None = None
     now: Callable[[], datetime] = _utc_now
 
     @property
@@ -83,6 +84,7 @@ class RuntimeRunPersistenceService:
         return RuntimeRunLifecycle(
             store=self.run_store,
             metadata_for_session=self.metadata_for_session,
+            settle_root_run=self.settle_root_run,
             now=self.now,
         )
 

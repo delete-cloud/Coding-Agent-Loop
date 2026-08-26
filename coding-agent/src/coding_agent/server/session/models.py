@@ -246,6 +246,7 @@ class Session:
     provider_name: str | None = None
     model_name: str | None = None
     base_url: str | None = None
+    api_key: str | None = field(default=None, repr=False)
     thinking_config: dict[str, Any] = field(
         default_factory=lambda: {"enabled": True, "effort": "medium"}
     )

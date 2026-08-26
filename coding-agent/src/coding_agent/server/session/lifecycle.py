@@ -119,6 +119,7 @@ class LifecycleOps:
         provider_name: str | None = None,
         model_name: str | None = None,
         base_url: str | None = None,
+        api_key: str | None = None,
         max_steps: int = 30,
         enable_parallel: bool = True,
         max_parallel: int = 5,
@@ -135,6 +136,7 @@ class LifecycleOps:
             provider_name: Restart-safe provider identifier for later rehydration
             model_name: Restart-safe model identifier for later rehydration
             base_url: Restart-safe provider base URL for later rehydration
+            api_key: Process-local provider API key; never persisted
             max_steps: Maximum steps per turn
             enable_parallel: Enable parallel tool execution
             max_parallel: Maximum number of parallel tool executions
@@ -167,6 +169,12 @@ class LifecycleOps:
         resolved_additional_directories = _session_additional_directories_from_store(
             additional_directories or []
         )
+        resolved_api_key = (
+            None
+            if provider_name == "codex"
+            or (provider_name is not None and provider_name.startswith("codex:"))
+            else api_key or None
+        )
 
         session = Session(
             id=session_id,
@@ -181,6 +189,7 @@ class LifecycleOps:
             provider_name=provider_name,
             model_name=model_name,
             base_url=base_url,
+            api_key=resolved_api_key,
             max_steps=max_steps,
             mcp_servers=resolved_mcp_servers,
             additional_directories=resolved_additional_directories,

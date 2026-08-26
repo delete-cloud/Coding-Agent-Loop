@@ -148,7 +148,13 @@ class TestApiKeyAuth:
         """Test that 401 is returned when auth is required but no key provided."""
         response = await api_key_client.post("/sessions")
         assert response.status_code == 401
-        assert "api key" in response.json()["detail"].lower()
+        assert response.json() == {
+            "error": {
+                "code": "credentials_required",
+                "message": "Authentication credentials are required",
+                "retryable": False,
+            }
+        }
 
     async def test_valid_api_key_accepted(self, api_key_client):
         """Test that valid API key is accepted."""

@@ -486,6 +486,8 @@ def create_child_pipeline(
     cfg.system_prompt += _child_system_prompt_suffix(tool_filter)
 
     resolved_key = api_key or os.environ.get("AGENT_API_KEY")
+    if not resolved_key and cfg.provider == "anthropic":
+        resolved_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not resolved_key and cfg.provider == "copilot":
         resolved_key = os.environ.get("GITHUB_TOKEN", "")
     if not resolved_key and cfg.provider == "kimi":
