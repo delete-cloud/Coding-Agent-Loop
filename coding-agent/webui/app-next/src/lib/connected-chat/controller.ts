@@ -65,6 +65,8 @@ export interface ConnectedChatControllerOptions {
   reconnectDelayMs?: (attempt: number) => number;
   /** Sleep seam for reconnect backoff; resolves false when the signal aborts mid-sleep. */
   sleep?: (delayMs: number, signal: AbortSignal) => Promise<boolean>;
+  /** Bound for canonical snapshot after an owning stream EOF. */
+  finalizeTimeoutMs?: number;
 }
 
 export function defaultReconnectDelayMs(attempt: number): number {
@@ -117,6 +119,7 @@ export class ConnectedChatController {
   private cancelAbort: AbortController | null = null;
   private readonly reconnectDelayMs: (attempt: number) => number;
   private readonly sleep: (delayMs: number, signal: AbortSignal) => Promise<boolean>;
+  private readonly finalizeTimeoutMs: number;
 
   constructor(
     private readonly client: ConnectedChatControllerClient,
@@ -124,6 +127,7 @@ export class ConnectedChatController {
   ) {
     this.reconnectDelayMs = options.reconnectDelayMs ?? defaultReconnectDelayMs;
     this.sleep = options.sleep ?? defaultSleep;
+    this.finalizeTimeoutMs = options.finalizeTimeoutMs ?? 10_000;
   }
 
   getState(): ConnectedChatState {
@@ -293,6 +297,13 @@ export class ConnectedChatController {
         followCursor = page.next_cursor;
         page = await this.client.snapshot(sessionId, { cursor: page.next_cursor }, abort.signal);
       }
+      const live = this.state.timeline;
+      for (const id of live.order) {
+        const node = live.byId.get(id);
+        if (node !== undefined && !timeline.byId.has(id)) {
+          timeline = reduceChatEvent(timeline, node.event);
+        }
+      }
       if (!this.isGeneration(generation) || abort.signal.aborted) return;
       this.state = {
         ...this.state,
@@ -353,12 +364,14 @@ export class ConnectedChatController {
           return;
         }
         failed = true;
-        this.patch({ status: "reconnecting", error });
+        if (!this.isOwningStatus(this.state.status)) {
+          this.patch({ status: "reconnecting", error });
+        }
       }
       if (!this.isGeneration(generation) || abort.signal.aborted || this.state.status === "replay_required") return;
-      // Keep a recorded transport error visible while reconnecting; only the
-      // clean-EOF path needs to announce the reconnect here.
-      if (!failed) this.patch({ status: "reconnecting" });
+      if (!failed && !this.isOwningStatus(this.state.status)) {
+        this.patch({ status: "reconnecting" });
+      }
       const completed = await this.sleep(this.reconnectDelayMs(attempt), abort.signal);
       if (!completed || !this.isGeneration(generation) || abort.signal.aborted) return;
       nextCursor = this.requireSafeCursor();
@@ -402,7 +415,22 @@ export class ConnectedChatController {
     if (!this.isCurrent(generation, operation)) return;
     const abort = new AbortController();
     this.owningAbort = abort;
-    await this.loadCanonical(sessionId, generation, abort, false);
+    const timer = setTimeout(() => abort.abort(), this.finalizeTimeoutMs);
+    try {
+      await this.loadCanonical(sessionId, generation, abort, false);
+      if (abort.signal.aborted && this.isCurrent(generation, operation) && this.state.status === "sending") {
+        this.patch({
+          status: "error",
+          error: new Error("canonical finalization timed out"),
+        });
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private isOwningStatus(status: ConnectedChatStatus): boolean {
+    return status === "sending" || status === "cancelling";
   }
 
   private findLatestTerminal(timeline: TimelineState): DurableTerminal | null {

@@ -74,7 +74,14 @@ class FakeClient implements ConnectedChatControllerClient {
   followCalls: Array<{ sessionId: string; cursor: string }> = [];
   promptCalls: Array<{ sessionId: string; request: PromptRequest }> = [];
   resumeCalls: Array<{ sessionId: string; request: ResumeRequest }> = [];
-  snapshot(sessionId: string) { const value = deferred<ChatSnapshot>(); this.snapshots.push(value); return value.promise; }
+  snapshot(_sessionId: string, _options?: { cursor?: string; limit?: number }, signal?: AbortSignal) {
+    const value = deferred<ChatSnapshot>();
+    this.snapshots.push(value);
+    signal?.addEventListener("abort", () => {
+      value.reject(new DOMException("Aborted", "AbortError"));
+    }, { once: true });
+    return value.promise;
+  }
   follow(sessionId: string, value: string) { this.followCalls.push({ sessionId, cursor: value }); const stream = new ControlledStream(); this.follows.push(stream); return stream; }
   prompt(sessionId: string, request: PromptRequest) { this.promptCalls.push({ sessionId, request }); const stream = new ControlledStream(); this.prompts.push(stream); return stream; }
   resume(sessionId: string, request: ResumeRequest) { this.resumeCalls.push({ sessionId, request }); const stream = new ControlledStream(); this.resumes.push(stream); return stream; }
@@ -536,4 +543,52 @@ describe("ConnectedChatController", () => {
     expect(controller.getState().error).toBeNull();
     expect(client.followCalls).toHaveLength(2);
   });
+
+  it("does not replace sending with reconnecting when passive follow fails", async () => {
+    const client = new FakeClient();
+    const controller = new ConnectedChatController(client, {
+      sleep: () => new Promise(() => undefined),
+    });
+    await selectReady(controller, client);
+    const sending = controller.send("hello", "cmd-own");
+    await waitUntil(() => client.promptCalls.length === 1);
+    client.follows[0].fail(new Error("follow dropped"));
+    await flush();
+    expect(controller.getState().status).toBe("sending");
+    client.prompts[0].end();
+    await waitUntil(() => client.snapshots.length === 2);
+    client.snapshots[1].resolve(snapshot("session-01", [events[0]]));
+    await sending;
+    expect(controller.getState().status).toBe("following");
+  });
+
+  it("keeps follow events that arrive while canonical snapshot is in flight", async () => {
+    const client = new FakeClient();
+    const controller = new ConnectedChatController(client);
+    await selectReady(controller, client);
+    const sending = controller.send("hello", "cmd-merge");
+    await waitUntil(() => client.promptCalls.length === 1);
+    client.prompts[0].push(item(events[0]));
+    client.follows[0].push(item(events[5]));
+    await flush();
+    client.prompts[0].end();
+    await waitUntil(() => client.snapshots.length === 2);
+    client.snapshots.at(-1)!.resolve(snapshot("session-01", [events[0]]));
+    await sending;
+    const ids = controller.getState().timeline.order;
+    expect(ids).toContain(events[0].source_event_id);
+    expect(ids).toContain(events[5].source_event_id);
+  });
+
+  it("errors instead of staying sending when finalization snapshot never returns", async () => {
+    const client = new FakeClient();
+    const controller = new ConnectedChatController(client, { finalizeTimeoutMs: 0 });
+    await selectReady(controller, client);
+    const sending = controller.send("hello", "cmd-timeout");
+    await waitUntil(() => client.promptCalls.length === 1);
+    client.prompts[0].end();
+    await sending;
+    expect(controller.getState().status).toBe("error");
+  });
+
 });

@@ -268,6 +268,17 @@ describe("ConnectedChatClient.listProviderModels", () => {
       models: ["claude-sonnet-4", "claude-opus-4"],
     });
   });
+
+  it("fails when a successful body is not JSON", async () => {
+    const fetchImpl = vi.fn(async () => new Response("<html>nope</html>", {
+      status: 200,
+      headers: { "content-type": "text/html" },
+    }));
+    const client = clientWith(fetchImpl as unknown as typeof fetch);
+    await expect(client.listProviderModels("anthropic")).rejects.toBeInstanceOf(
+      ContractViolationError,
+    );
+  });
 });
 
 describe("ConnectedChatClient Codex OAuth", () => {

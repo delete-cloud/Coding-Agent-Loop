@@ -231,7 +231,25 @@ export function useConnectedChat(): ConnectedChatView | null {
   return useMemo(() => {
     if (!controller || state === null) return null;
     const terminal = state.durableTerminal;
-    const canResume = terminal !== null && terminal.outcome !== "completed";
+    const sending = state.status === "sending";
+    let newerRun = false;
+    if (terminal !== null) {
+      let sawTerminal = false;
+      for (const id of state.timeline.order) {
+        const event = state.timeline.byId.get(id)?.event;
+        if (event === undefined) continue;
+        if (event.kind === "root_terminal" && event.run_id === terminal.runId) {
+          sawTerminal = true;
+          continue;
+        }
+        if (sawTerminal && event.run_id !== null && event.run_id !== terminal.runId) {
+          newerRun = true;
+          break;
+        }
+      }
+    }
+    const canResume =
+      terminal !== null && terminal.outcome !== "completed" && !sending && !newerRun;
     return {
       state,
       messages: timelineToMessages(state.timeline),

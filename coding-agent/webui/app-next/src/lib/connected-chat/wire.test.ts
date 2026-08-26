@@ -230,6 +230,17 @@ describe("parseChatSnapshot", () => {
       expect(() => parseChatSnapshot(broken), field).toThrow(ContractViolationError);
     }
   });
+
+  it("rejects events that belong to another session", () => {
+    const foreign = { ...EVENTS[0].data, session_id: "session-other" };
+    expect(() =>
+      parseChatSnapshot({
+        ...fixture.http.snapshot.response,
+        events: [foreign],
+      }),
+    ).toThrow(ContractViolationError);
+  });
+
 });
 
 describe("parseApiError", () => {

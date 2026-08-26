@@ -160,6 +160,14 @@ export class ConnectedChatClient {
     }
   }
 
+  private async readJson(response: Response): Promise<unknown> {
+    try {
+      return await response.json();
+    } catch {
+      throw new ContractViolationError("response.body", "expected JSON");
+    }
+  }
+
   private async getJson<T>(url: string, parse: (body: unknown) => T, signal?: AbortSignal): Promise<T> {
     const response = await this.fetchImpl(url, {
       method: "GET",
@@ -167,7 +175,7 @@ export class ConnectedChatClient {
       signal: signal ?? null,
     });
     if (!response.ok) await this.parseErrorResponse(response);
-    return parse(await response.json());
+    return parse(await this.readJson(response));
   }
 
   private async *stream(
@@ -249,8 +257,7 @@ export class ConnectedChatClient {
       },
     );
     if (!response.ok) await this.throwLooseHttpError(response);
-    const data: unknown = await response.json().catch(() => null);
-    return parseProviderModels(data, provider);
+    return parseProviderModels(await this.readJson(response), provider);
   }
 
   async startCodexOAuth(label?: string, signal?: AbortSignal): Promise<CodexFlowStart> {
@@ -263,7 +270,7 @@ export class ConnectedChatClient {
       signal: signal ?? null,
     });
     if (!response.ok) await this.throwLooseHttpError(response);
-    return parseCodexFlowStart(await response.json().catch(() => null));
+    return parseCodexFlowStart(await this.readJson(response));
   }
 
   async listCodexFlows(signal?: AbortSignal): Promise<CodexFlow[]> {
@@ -273,7 +280,7 @@ export class ConnectedChatClient {
       signal: signal ?? null,
     });
     if (!response.ok) await this.throwLooseHttpError(response);
-    return parseCodexFlowList(await response.json().catch(() => null));
+    return parseCodexFlowList(await this.readJson(response));
   }
 
   async getCodexFlow(flowId: string, signal?: AbortSignal): Promise<CodexFlow> {
@@ -286,7 +293,7 @@ export class ConnectedChatClient {
       },
     );
     if (!response.ok) await this.throwLooseHttpError(response);
-    const parsed = parseCodexFlowList([await response.json().catch(() => null)]);
+    const parsed = parseCodexFlowList([await this.readJson(response)]);
     if (parsed.length === 0) {
       throw new ContractViolationError("codex_flow.flow_id", "codex oauth flow response missing flow_id");
     }
@@ -312,7 +319,7 @@ export class ConnectedChatClient {
       signal: signal ?? null,
     });
     if (!response.ok) await this.throwLooseHttpError(response);
-    return parseOAuthAccounts(await response.json().catch(() => null));
+    return parseOAuthAccounts(await this.readJson(response));
   }
 
   async deleteOAuthAccount(providerKey: string, signal?: AbortSignal): Promise<void> {

@@ -283,14 +283,25 @@ export function parseChatSnapshot(value: unknown): ChatSnapshot {
   if (!Array.isArray(record.events)) {
     throw new ContractViolationError("snapshot.events", "expected an array");
   }
+  const session_id = reqString(record.session_id, "snapshot.session_id");
+  const events = record.events.map((event, index) => {
+    const parsed = parseChatEvent(event);
+    if (parsed.session_id !== session_id) {
+      throw new ContractViolationError(
+        `snapshot.events[${index}].session_id`,
+        `expected ${session_id}`,
+      );
+    }
+    return parsed;
+  });
   return {
     contract_version: reqContractVersion(record.contract_version, "snapshot.contract_version"),
-    session_id: reqString(record.session_id, "snapshot.session_id"),
+    session_id,
     projection: reqString(record.projection, "snapshot.projection"),
     projection_epoch: reqDecimalString(record.projection_epoch, "snapshot.projection_epoch"),
     snapshot_cursor: reqString(record.snapshot_cursor, "snapshot.snapshot_cursor"),
     next_cursor: reqNullableString(record.next_cursor, "snapshot.next_cursor"),
-    events: record.events.map((event) => parseChatEvent(event)),
+    events,
   };
 }
 
