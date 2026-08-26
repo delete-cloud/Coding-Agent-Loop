@@ -144,7 +144,7 @@ export class ConnectedChatController {
     if (this.disposed) throw new Error("cannot select a session on a disposed controller");
     if (sessionId.length === 0) throw new Error("sessionId must be non-empty");
     const generation = ++this.generation;
-    this.operation += 1;
+    const operation = ++this.operation;
     this.abortOwnedOperations();
     const abort = new AbortController();
     this.selectionAbort = abort;
@@ -153,7 +153,7 @@ export class ConnectedChatController {
       sessionId,
       status: "loading",
     });
-    await this.loadCanonical(sessionId, generation, abort, true);
+    await this.loadCanonical(sessionId, generation, operation, abort, true);
   }
 
   async send(prompt: string, commandId: string): Promise<void> {
@@ -282,6 +282,7 @@ export class ConnectedChatController {
   private async loadCanonical(
     sessionId: string,
     generation: number,
+    operation: number,
     abort: AbortController,
     startFollow: boolean,
   ): Promise<void> {
@@ -298,26 +299,31 @@ export class ConnectedChatController {
         page = await this.client.snapshot(sessionId, { cursor: page.next_cursor }, abort.signal);
       }
       const live = this.state.timeline;
-      for (const id of live.order) {
-        const node = live.byId.get(id);
-        if (node !== undefined && !timeline.byId.has(id)) {
-          timeline = reduceChatEvent(timeline, node.event);
-        }
+      for (const node of live.byId.values()) {
+        timeline = reduceChatEvent(timeline, node.event);
+        if (node.result !== null) timeline = reduceChatEvent(timeline, node.result);
+      }
+      for (const pending of live.pendingToolResults.values()) {
+        timeline = reduceChatEvent(timeline, pending);
       }
       if (!this.isGeneration(generation) || abort.signal.aborted) return;
+      const owning = this.isOwningStatus(this.state.status) && this.operation !== operation;
       this.state = {
         ...this.state,
         timeline,
         lastSafeCursor: followCursor,
         durableTerminal: this.findLatestTerminal(timeline),
-        status: "following",
-        replayReason: null,
-        error: null,
+        status: owning ? this.state.status : "following",
+        replayReason: owning ? this.state.replayReason : null,
+        error: owning ? this.state.error : null,
       };
       this.emit();
-      if (startFollow) void this.runPassiveFollow(sessionId, followCursor, generation, abort);
+      if (startFollow && !owning) {
+        void this.runPassiveFollow(sessionId, followCursor, generation, abort);
+      }
     } catch (error) {
       if (!this.isGeneration(generation) || (abort.signal.aborted && isAbort(error))) return;
+      if (this.isOwningStatus(this.state.status) && this.operation !== operation) return;
       this.patch({ status: "error", error });
     }
   }
@@ -351,20 +357,20 @@ export class ConnectedChatController {
         );
       } catch (error) {
         if (!this.isGeneration(generation) || abort.signal.aborted) return;
-        if (error instanceof ChatApiError && error.error.replay_required === true) {
+        if (this.isOwningStatus(this.state.status)) {
+          failed = true;
+        } else if (error instanceof ChatApiError && error.error.replay_required === true) {
           this.patch({
             status: "replay_required",
             replayReason: error.error.code,
             error,
           });
           return;
-        }
-        if (error instanceof ChatApiError && error.error.retryable === false) {
+        } else if (error instanceof ChatApiError && error.error.retryable === false) {
           this.patch({ status: "error", error });
           return;
-        }
-        failed = true;
-        if (!this.isOwningStatus(this.state.status)) {
+        } else {
+          failed = true;
           this.patch({ status: "reconnecting", error });
         }
       }
@@ -390,6 +396,9 @@ export class ConnectedChatController {
       const current = kind === "passive" ? this.isGeneration(generation) : this.isCurrent(generation, operation);
       if (!current) return { observedEvent, replayControl: false };
       if (item.type === "stream_control") {
+        if (kind === "passive" && this.isOwningStatus(this.state.status)) {
+          return { observedEvent, replayControl: true };
+        }
         this.patch({
           status: "replay_required",
           replayReason: item.control.reason,
@@ -417,7 +426,7 @@ export class ConnectedChatController {
     this.owningAbort = abort;
     const timer = setTimeout(() => abort.abort(), this.finalizeTimeoutMs);
     try {
-      await this.loadCanonical(sessionId, generation, abort, false);
+      await this.loadCanonical(sessionId, generation, operation, abort, true);
       if (abort.signal.aborted && this.isCurrent(generation, operation) && this.state.status === "sending") {
         this.patch({
           status: "error",
@@ -470,6 +479,9 @@ export class ConnectedChatController {
   private assertSendable(action: "send" | "resume"): void {
     if (this.state.status === "replay_required") {
       throw new Error(`cannot ${action} while replay is required`);
+    }
+    if (this.state.status === "loading") {
+      throw new Error(`cannot ${action} while the session is loading`);
     }
   }
 
