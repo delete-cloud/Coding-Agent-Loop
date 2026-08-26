@@ -118,6 +118,7 @@ export class ConnectedChatController {
   private owningAbort: AbortController | null = null;
   private cancelAbort: AbortController | null = null;
   private passiveFollowRunning = false;
+  private owningAdmitted = false;
   private pendingPassiveFollow:
     | { sessionId: string; cursor: string; generation: number; abort: AbortController }
     | null = null;
@@ -170,6 +171,7 @@ export class ConnectedChatController {
     const abort = new AbortController();
     this.owningAbort = abort;
     this.patch({ status: "sending", draft: prompt, error: null });
+    this.owningAdmitted = false;
     let admitted = false;
     let replayControl = false;
     try {
@@ -180,6 +182,7 @@ export class ConnectedChatController {
         "owning",
         () => {
           admitted = true;
+          this.owningAdmitted = true;
           this.patch({ draft: "" });
         },
       );
@@ -201,6 +204,7 @@ export class ConnectedChatController {
   }
 
   async cancel(): Promise<void> {
+    if (this.state.status === "sending" && !this.owningAdmitted) return;
     const sessionId = this.requireSession();
     const generation = this.generation;
     const operation = ++this.operation;
@@ -236,6 +240,7 @@ export class ConnectedChatController {
     const abort = new AbortController();
     this.owningAbort = abort;
     this.patch({ status: "sending", error: null });
+    this.owningAdmitted = false;
     let admitted = false;
     let replayControl = false;
     try {
@@ -250,6 +255,7 @@ export class ConnectedChatController {
         "owning",
         () => {
           admitted = true;
+          this.owningAdmitted = true;
         },
       );
       replayControl = outcome.replayControl;
@@ -331,6 +337,14 @@ export class ConnectedChatController {
     } catch (error) {
       if (!this.isGeneration(generation) || (abort.signal.aborted && isAbort(error))) return;
       if (this.isOwningStatus(this.state.status) && this.operation !== operation) return;
+      if (error instanceof ChatApiError && error.error.replay_required === true) {
+        this.patch({
+          status: "replay_required",
+          replayReason: error.error.code,
+          error,
+        });
+        return;
+      }
       this.patch({ status: "error", error });
     }
   }
@@ -368,15 +382,16 @@ export class ConnectedChatController {
           );
         } catch (error) {
           if (!this.isGeneration(generation) || abort.signal.aborted) return;
-          if (this.isOwningStatus(this.state.status)) {
-            failed = true;
-          } else if (error instanceof ChatApiError && error.error.replay_required === true) {
+          if (error instanceof ChatApiError && error.error.replay_required === true) {
             this.patch({
               status: "replay_required",
               replayReason: error.error.code,
               error,
             });
             return;
+          }
+          if (this.isOwningStatus(this.state.status)) {
+            failed = true;
           } else if (error instanceof ChatApiError && error.error.retryable === false) {
             this.patch({ status: "error", error });
             return;
@@ -397,7 +412,12 @@ export class ConnectedChatController {
       this.passiveFollowRunning = false;
       const pending = this.pendingPassiveFollow;
       this.pendingPassiveFollow = null;
-      if (pending !== null && pending.generation === this.generation && !this.disposed) {
+      if (
+        pending !== null
+        && pending.generation === this.generation
+        && !this.disposed
+        && this.state.status !== "replay_required"
+      ) {
         void this.runPassiveFollow(
           pending.sessionId,
           pending.cursor,

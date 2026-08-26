@@ -351,7 +351,8 @@ describe("ConnectedChatController", () => {
     const sent = controller.send("stale draft", "cmd-a"); const cancelled = controller.cancel(); const reselected = controller.selectSession("session-01");
     client.snapshots[1].resolve(snapshot("session-01", [events[1]])); await reselected;
     client.prompts[0].push(item(events[0])); client.prompts[0].end();
-    client.cancels[0].resolve(parseCancelAck(fixture.http.cancel.response)); await Promise.all([sent, cancelled]); await flush();
+    await Promise.all([sent, cancelled]); await flush();
+    expect(client.cancels).toHaveLength(0);
     expect(client.snapshots).toHaveLength(2);
     expect(controller.getState().sessionId).toBe("session-01");
     expect(controller.getState().timeline.order).toEqual(["evt-thinking-01"]);

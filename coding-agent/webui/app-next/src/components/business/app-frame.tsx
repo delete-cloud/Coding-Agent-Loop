@@ -317,6 +317,8 @@ export function AppFrameView() {
           provider: updated.provider_name ?? nextDefaults.provider,
           model: updated.model_name ?? nextDefaults.model,
         });
+        setApiKey(patch.api_key ?? "");
+        return;
       }
       persistSessionDefaults(nextDefaults);
       setDefaults(nextDefaults);
