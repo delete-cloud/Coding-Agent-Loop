@@ -321,8 +321,10 @@ export function AppFrameView() {
     const sessionBaseUrl =
       runtimeOverlay && selectedId === runtimeOverlay.sessionId
         ? runtimeOverlay.baseUrl
-        : summary && typeof summary.base_url === "string"
-          ? summary.base_url
+        : summary
+          ? typeof summary.base_url === "string"
+            ? summary.base_url
+            : ""
           : defaults.base_url;
     const nextDefaults = {
       provider: resolveProviderAccount(
@@ -342,7 +344,7 @@ export function AppFrameView() {
         const persisted = {
           provider: updated.provider_name ?? nextDefaults.provider,
           model: updated.model_name ?? nextDefaults.model,
-          base_url: updated.base_url ?? nextDefaults.base_url,
+          base_url: updated.base_url ?? "",
         };
         setRuntimeOverlay({
           sessionId: updated.session_id,
@@ -387,8 +389,10 @@ export function AppFrameView() {
   const liveBaseUrl =
     runtimeOverlay && selectedId === runtimeOverlay.sessionId
       ? runtimeOverlay.baseUrl
-      : selectedSummary && typeof selectedSummary.base_url === "string"
-        ? selectedSummary.base_url
+      : selectedSummary
+        ? typeof selectedSummary.base_url === "string"
+          ? selectedSummary.base_url
+          : ""
         : defaults.base_url;
 
   useEffect(() => {

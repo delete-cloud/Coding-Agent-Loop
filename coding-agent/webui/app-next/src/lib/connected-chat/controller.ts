@@ -108,6 +108,10 @@ function isAbort(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError";
 }
 
+function isOwningTransportFailure(error: unknown): boolean {
+  return error instanceof TypeError;
+}
+
 export class ConnectedChatController {
   private state = initialState();
   private readonly listeners = new Set<Listener>();
@@ -183,17 +187,21 @@ export class ConnectedChatController {
         () => {
           admitted = true;
           this.owningAdmitted = true;
-          this.patch({ draft: "" });
+          if (this.state.draft === prompt) this.patch({ draft: "" });
         },
       );
       replayControl = outcome.replayControl;
     } catch (error) {
       if (!this.isCurrent(generation, operation)) return;
-      if (admitted) {
+      if (admitted || isOwningTransportFailure(error)) {
         await this.reconcileOwningEof(sessionId, generation, operation);
         return;
       }
-      this.patch({ status: "error", draft: prompt, error });
+      this.patch({
+        status: "error",
+        draft: this.state.draft === prompt ? prompt : this.state.draft,
+        error,
+      });
       return;
     }
     if (!this.isCurrent(generation, operation) || abort.signal.aborted) return;
@@ -261,7 +269,7 @@ export class ConnectedChatController {
       replayControl = outcome.replayControl;
     } catch (error) {
       if (!this.isCurrent(generation, operation)) return;
-      if (admitted) {
+      if (admitted || isOwningTransportFailure(error)) {
         await this.reconcileOwningEof(sessionId, generation, operation);
         return;
       }
