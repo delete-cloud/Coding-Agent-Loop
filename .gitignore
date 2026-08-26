@@ -26,9 +26,21 @@ simplebank
 agent-coding-loop/
 bub/
 
-# design docs stay on the machine, not GitHub
-/docs/
-/coding-agent/docs/
+# design-only trees stay on the machine, not GitHub
+/docs/superpowers/
+/coding-agent/docs/superpowers/
+/coding-agent/docs/action_safety/
+/coding-agent/docs/bee_command_bridge/
+/coding-agent/docs/bee_launch/
+/coding-agent/docs/bee_runtime/
+/coding-agent/docs/bee_template_pack/
+/coding-agent/docs/bee_workspace/
+/coding-agent/docs/context_system/
+/coding-agent/docs/cross_topic_memory/
+/coding-agent/docs/dogfood/
+/coding-agent/docs/scheduled_runs/
+/coding-agent/docs/topic_layer/
+/coding-agent/docs/workspace_provider/
 /coding-agent/.opencode/prompts/
 /coding-agent/.opencode/task-packets/
 /.opencode/prompts/
