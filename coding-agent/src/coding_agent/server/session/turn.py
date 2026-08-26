@@ -39,6 +39,9 @@ class TurnOps:
         session: Session,
         message: WireMessage,
     ) -> None:
+        persist = getattr(self, "persist_chat_wire_message", None)
+        if callable(persist):
+            await persist(session, message)
         await self._append_runtime_wire_event(session, message)
         await session.wire.send(message)
 

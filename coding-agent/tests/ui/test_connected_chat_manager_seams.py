@@ -712,3 +712,75 @@ async def test_admit_publishes_prompt_to_existing_follower(
     assert event.kind == "user_prompt"
     assert event.run_id == admission.run_id
     assert event.source_event_id == "session-r3:chat-command:command-live"
+
+
+@pytest.mark.asyncio
+async def test_send_session_wire_message_persists_chat_event_records(
+    durable_manager: SessionManager,
+) -> None:
+    from coding_agent.wire.protocol import (
+        StreamDelta,
+        ThinkingDelta,
+        ToolCallDelta,
+        ToolResultDelta,
+    )
+
+    manager = durable_manager
+    session = await _registered_session(manager)
+    admission = await manager.admit_chat_command(
+        session.id, prompt="hello", command_id="command-wire"
+    )
+    session = await manager.get_session_async(session.id)
+    await manager._send_session_wire_message(
+        session,
+        ThinkingDelta(session_id=session.id, text="planning"),
+    )
+    await manager._send_session_wire_message(
+        session,
+        StreamDelta(session_id=session.id, content="Hello "),
+    )
+    await manager._send_session_wire_message(
+        session,
+        StreamDelta(session_id=session.id, content="world"),
+    )
+    await manager._send_session_wire_message(
+        session,
+        ToolCallDelta(
+            session_id=session.id,
+            tool_name="bash_run",
+            arguments={"command": "pwd"},
+            call_id="call-1",
+        ),
+    )
+    await manager._send_session_wire_message(
+        session,
+        ToolResultDelta(
+            session_id=session.id,
+            call_id="call-1",
+            tool_name="bash_run",
+            result="/tmp",
+            display_result="/tmp",
+            is_error=False,
+        ),
+    )
+    await manager.settle_root_run(
+        session.id, run_id=admission.run_id, outcome="completed", result="done"
+    )
+
+    store = manager._authoritative_store()
+    assert store is not None
+    snapshot = await store.snapshot_chat_events(session.id, None, 20)
+    kinds = [event.kind for event in snapshot.events]
+    assert kinds == [
+        "user_prompt",
+        "thinking",
+        "assistant_message",
+        "tool_call",
+        "tool_result",
+        "root_terminal",
+    ]
+    assert snapshot.events[2].payload["text"] == "Hello world"
+    assert snapshot.events[3].payload["call_id"] == "call-1"
+    assert snapshot.events[4].payload["output"] == "/tmp"
+    assert snapshot.events[4].payload["is_error"] is False
+

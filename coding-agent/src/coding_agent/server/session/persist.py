@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 import asyncio
 from collections.abc import Callable
 from datetime import (
@@ -164,6 +165,7 @@ class PersistOps:
             raise SessionOwnershipConflictError(
                 "root settlement requires owner authority"
             )
+        await self.flush_chat_assistant_buffer(session_id)
         settlement = await store.settle_root_run(
             authority,
             run_id=run_id,
@@ -178,6 +180,107 @@ class PersistOps:
             self._session_cache[session_id] = session
         await self._publish_chat_commit(settlement)
         return settlement
+
+
+    async def persist_chat_wire_message(self, session: Session, message: object) -> None:
+        from coding_agent.wire.protocol import (
+            StreamDelta,
+            ThinkingDelta,
+            ToolCallDelta,
+            ToolResultDelta,
+        )
+
+        store = self._authoritative_store()
+        if store is None:
+            return
+        run_id = session.current_turn_id
+        if run_id is None:
+            return
+        if isinstance(message, StreamDelta):
+            buffers = self._chat_assistant_buffers
+            buffers[session.id] = buffers.get(session.id, "") + message.content
+            return
+        await self.flush_chat_assistant_buffer(session.id)
+        if isinstance(message, ThinkingDelta):
+            await self._commit_and_publish_chat_event(
+                session,
+                "thinking",
+                {"run_id": run_id, "text": message.text},
+            )
+            return
+        if isinstance(message, ToolCallDelta):
+            await self._commit_and_publish_chat_event(
+                session,
+                "tool_call",
+                {
+                    "run_id": run_id,
+                    "call_id": message.call_id,
+                    "tool_name": message.tool_name,
+                    "arguments": message.arguments,
+                },
+            )
+            return
+        if isinstance(message, ToolResultDelta):
+            output = message.display_result
+            if not output and isinstance(message.result, str):
+                output = message.result
+            await self._commit_and_publish_chat_event(
+                session,
+                "tool_result",
+                {
+                    "run_id": run_id,
+                    "call_id": message.call_id,
+                    "output": output,
+                    "is_error": message.is_error,
+                },
+            )
+
+    async def flush_chat_assistant_buffer(self, session_id: str) -> None:
+        text = self._chat_assistant_buffers.pop(session_id, "")
+        if not text:
+            return
+        session = await self.get_session_async(session_id)
+        run_id = session.current_turn_id
+        if run_id is None:
+            return
+        await self._commit_and_publish_chat_event(
+            session,
+            "assistant_message",
+            {"run_id": run_id, "text": text},
+        )
+
+    async def _commit_and_publish_chat_event(
+        self,
+        session: Session,
+        event_kind: str,
+        payload: JSONObject,
+    ) -> None:
+        store = self._authoritative_store()
+        if store is None:
+            return
+        authority = self._owner_authorities.get(session.id)
+        if authority is None:
+            raise SessionOwnershipConflictError(
+                "chat event persist requires owner authority"
+            )
+        commit = await store.commit_authoritative_uow(
+            authority,
+            AuthoritativeUnitOfWork(
+                event=EventRecord(
+                    event_id=self._boundary_event_id(
+                        session,
+                        event_kind,
+                        uuid.uuid4().hex,
+                    ),
+                    session_id=session.id,
+                    event_kind=event_kind,
+                    payload=payload,
+                    created_at=datetime.now(UTC),
+                ),
+                session_state=cast(JSONObject, session.to_store_data()),
+            ),
+        )
+        await self._publish_chat_commit(commit)
 
     async def _commit_session_uow(
         self,

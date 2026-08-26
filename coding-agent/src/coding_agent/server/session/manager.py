@@ -460,6 +460,7 @@ class SessionManager(
         self._chat_subscribers: dict[str, set[Any]] = {}
         self._chat_run_tasks: dict[str, asyncio.Task[Any]] = {}
         self._chat_launch_lock = asyncio.Lock()
+        self._chat_assistant_buffers: dict[str, str] = {}
         self._tape_store = tape_store or self._create_tape_store(data_dir)
         if self._local_durable_store is not None and tape_store is None:
             self._tape_store = FencedSQLiteTapeStore(
