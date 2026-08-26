@@ -42,7 +42,7 @@ bub/
 /coding-agent/docs/scheduled_runs/
 /coding-agent/docs/topic_layer/
 /coding-agent/docs/workspace_provider/
-/coding-agent/.opencode/prompts/
+/coding-agent/.opencode/prompts/tasks/
 /coding-agent/.opencode/task-packets/
 /.opencode/prompts/
 /.opencode/task-packets/

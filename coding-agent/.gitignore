@@ -40,5 +40,5 @@ docs/dogfood/
 docs/scheduled_runs/
 docs/topic_layer/
 docs/workspace_provider/
-.opencode/prompts/
+.opencode/prompts/tasks/
 .opencode/task-packets/
