@@ -208,14 +208,17 @@ export class ConnectedChatController {
     const abort = new AbortController();
     this.cancelAbort = abort;
     try {
-      await this.client.cancel(sessionId, abort.signal);
+      const ack = await this.client.cancel(sessionId, abort.signal);
+      if (!this.isCurrent(generation, operation) || abort.signal.aborted) return;
+      const terminal = this.state.durableTerminal;
+      if (ack.run_id !== null && terminal !== null && terminal.runId === ack.run_id) {
+        this.patch({ status: "following", error: null });
+        return;
+      }
+      this.patch({ status: "cancelling", error: null });
     } catch (error) {
       if (!this.isCurrent(generation, operation) || (abort.signal.aborted && isAbort(error))) return;
       this.patch({ status: "error", error });
-      return;
-    }
-    if (this.isCurrent(generation, operation) && !abort.signal.aborted) {
-      this.patch({ status: "cancelling", error: null });
     }
   }
 
@@ -434,9 +437,15 @@ export class ConnectedChatController {
       const timeline = reduceChatEvent(this.state.timeline, item.event);
       const durableTerminal =
         item.event.kind === "root_terminal"
-          ? this.terminalFromEvent(item.event.run_id, item.event.payload)
+          ? this.findLatestTerminal(timeline)
           : this.state.durableTerminal;
-      this.patch({ timeline, durableTerminal });
+      this.patch({
+        timeline,
+        durableTerminal,
+        ...(item.event.kind === "root_terminal" && this.state.status === "cancelling"
+          ? { status: "following" as const }
+          : {}),
+      });
     }
     return { observedEvent, replayControl: false };
   }
