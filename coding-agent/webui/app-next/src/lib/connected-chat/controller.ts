@@ -185,12 +185,12 @@ export class ConnectedChatController {
       );
       replayControl = outcome.replayControl;
     } catch (error) {
-      if (!this.isCurrent(generation, operation) || (abort.signal.aborted && isAbort(error))) return;
-      if (admitted && isAbort(error)) {
+      if (!this.isCurrent(generation, operation)) return;
+      if (admitted) {
         await this.reconcileOwningEof(sessionId, generation, operation);
         return;
       }
-      this.patch({ status: "error", draft: admitted ? "" : prompt, error });
+      this.patch({ status: "error", draft: prompt, error });
       return;
     }
     if (!this.isCurrent(generation, operation) || abort.signal.aborted) return;
@@ -254,8 +254,8 @@ export class ConnectedChatController {
       );
       replayControl = outcome.replayControl;
     } catch (error) {
-      if (!this.isCurrent(generation, operation) || (abort.signal.aborted && isAbort(error))) return;
-      if (admitted && isAbort(error)) {
+      if (!this.isCurrent(generation, operation)) return;
+      if (admitted) {
         await this.reconcileOwningEof(sessionId, generation, operation);
         return;
       }
@@ -420,7 +420,7 @@ export class ConnectedChatController {
       const current = kind === "passive" ? this.isGeneration(generation) : this.isCurrent(generation, operation);
       if (!current) return { observedEvent, replayControl: false };
       if (item.type === "stream_control") {
-        if (kind === "passive" && this.isOwningStatus(this.state.status)) {
+        if (kind === "passive" && this.state.status === "sending") {
           return { observedEvent, replayControl: true };
         }
         this.patch({

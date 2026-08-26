@@ -16,7 +16,6 @@ import {
   isCodexProvider,
   isTapeReboundError,
   listableProviders,
-  persistSessionDefaults,
   resolveProviderAccount,
 } from "@/lib/session-settings";
 
@@ -129,21 +128,14 @@ export function SettingsPanel({
     };
     if (baseUrl.trim()) patch.base_url = baseUrl.trim();
     if (!hideApiKey && apiKey.trim()) patch.api_key = apiKey.trim();
-    const nextDefaults = {
-      provider: resolved,
-      model: patch.model ?? "",
-      base_url: patch.base_url ?? "",
-    };
     setApplying(true);
     setFeedback(null);
     setErrorText("");
     try {
       await onApply(patch);
-      persistSessionDefaults(nextDefaults);
       setFeedback("saved");
     } catch (error) {
       if (isTapeReboundError(error)) {
-        persistSessionDefaults(nextDefaults);
         setFeedback("tapeRebound");
       } else {
         setErrorText(errorMessageOf(error));

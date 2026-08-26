@@ -305,7 +305,10 @@ export function AppFrameView() {
       model: patch.model ?? defaults.model,
       base_url: patch.base_url ?? defaults.base_url,
     };
-    const resolvedPatch: RuntimeConfigPatch = { ...patch, provider: nextDefaults.provider };
+    const resolvedPatch: RuntimeConfigPatch = { ...patch };
+    if (patch.provider !== undefined) {
+      resolvedPatch.provider = resolveProviderAccount(patch.provider, oauthProviders);
+    }
     try {
       if (selectedId !== null && services !== null && isSettingsClient(services.catalog)) {
         const updated = await services.catalog.updateRuntimeConfig(selectedId, resolvedPatch);
