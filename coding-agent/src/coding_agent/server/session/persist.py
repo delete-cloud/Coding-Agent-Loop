@@ -107,7 +107,42 @@ class PersistOps:
             session.current_turn_id = admission.run_id
             session.turn_in_progress = True
             self._session_cache[session_id] = session
+            await self._publish_admitted_chat_command(session_id, admission)
         return admission
+
+    async def _publish_admitted_chat_command(
+        self, session_id: str, admission: ChatCommandAdmission
+    ) -> None:
+        from coding_agent.events.connected_chat import (
+            CONNECTED_CHAT_PROJECTION,
+            ConnectedChatCursor,
+        )
+
+        store = self._authoritative_store()
+        if store is None or admission.session_seq is None:
+            return
+        after_seq = str(int(admission.session_seq) - 1)
+        fact = await store.load_session_fact_source(session_id)
+        if fact is None:
+            return
+        snapshot = await store.snapshot_chat_events(
+            session_id,
+            ConnectedChatCursor(
+                v=1,
+                kind="chat",
+                session_id=session_id,
+                projection=CONNECTED_CHAT_PROJECTION,
+                epoch=fact.projection_epoch,
+                after_seq=after_seq,
+                high_water_seq=admission.session_seq,
+            ),
+            1,
+        )
+        if not snapshot.events:
+            return
+        event = snapshot.events[0]
+        for subscriber in tuple(self._chat_subscribers.get(event.session_id, ())):
+            subscriber.publish(event)
 
     def can_settle_root_run_authoritatively(self) -> bool:
         return self._authoritative_store() is not None

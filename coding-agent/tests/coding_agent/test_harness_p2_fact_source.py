@@ -408,7 +408,10 @@ class HarnessFakePGConnection:
                 limit = int(args[3]) if len(args) > 3 else 1000
             elif "session_seq <= $3" in query:
                 high_water = args[2]
-                limit = int(args[3]) if len(args) > 3 else 1000
+                if "event_kind = ANY($4" in query:
+                    limit = int(args[4]) if len(args) > 4 else 1000
+                else:
+                    limit = int(args[3]) if len(args) > 3 else 1000
             else:
                 limit = int(args[2]) if len(args) > 2 else 1000
             inclusive = "session_seq >= $2" in query

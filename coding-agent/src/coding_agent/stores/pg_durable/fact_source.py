@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any, cast
 from coding_agent.events.connected_chat import (
+    CHAT_EVENT_KINDS,
     CONNECTED_CHAT_PROJECTION,
     ChatSnapshot,
     ConnectedChatCursor,
@@ -244,8 +245,14 @@ class PgFactSourceMixin:
             high_water = parse_u64(cursor.high_water_seq, field_name="high_water_seq")
         events = []
         scanned_after = after
+        scanned_rows = 0
+        max_scan = max(1024, limit * 64)
         chunk_size = max(16, min(256, limit * 2))
-        while scanned_after < high_water and len(events) < limit:
+        while (
+            scanned_after < high_water
+            and len(events) < limit
+            and scanned_rows < max_scan
+        ):
             rows = await pool.fetch(
                 """
                 SELECT event.*, run.*
@@ -256,16 +263,19 @@ class PgFactSourceMixin:
                 WHERE event.session_id = $1
                   AND event.session_seq > $2
                   AND event.session_seq <= $3
+                  AND event.event_kind = ANY($4::text[])
                 ORDER BY event.session_seq
-                LIMIT $4
+                LIMIT $5
                 """,
                 session_id,
                 scanned_after,
                 high_water,
+                list(CHAT_EVENT_KINDS),
                 chunk_size,
             )
             if not rows:
                 break
+            scanned_rows += len(rows)
             for row in rows:
                 joined = dict(row)
                 record = _event_record_from_pg_row(joined)

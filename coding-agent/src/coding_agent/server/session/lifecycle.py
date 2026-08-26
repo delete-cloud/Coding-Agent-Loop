@@ -201,6 +201,9 @@ class LifecycleOps:
                 await self._acquire_owner_for_session(session_id)
                 await self._persist_session_async(session)
                 await self._persist_workspace_record_for_session(session)
+                store = self._authoritative_store()
+                if store is not None:
+                    await store.snapshot_chat_events(session_id, None, 1)
             except BaseException:
                 await self._rollback_partially_created_session(session_id)
                 raise

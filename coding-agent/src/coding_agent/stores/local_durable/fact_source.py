@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import UTC, datetime
 from coding_agent.events.connected_chat import (
+    CHAT_EVENT_KINDS,
     CONNECTED_CHAT_PROJECTION,
     ChatSnapshot,
     ConnectedChatCursor,
@@ -278,10 +279,17 @@ class LocalFactSourceMixin:
                 )
             events = []
             scanned_after = after
+            scanned_rows = 0
+            max_scan = max(1024, limit * 64)
             chunk_size = max(16, min(256, limit * 2))
-            while scanned_after < high_water and len(events) < limit:
+            kind_placeholders = ",".join("?" * len(CHAT_EVENT_KINDS))
+            while (
+                scanned_after < high_water
+                and len(events) < limit
+                and scanned_rows < max_scan
+            ):
                 rows = connection.execute(
-                    """
+                    f"""
                     SELECT event.*, run.*
                     FROM session_event_records AS event
                     LEFT JOIN agent_runs AS run
@@ -290,13 +298,21 @@ class LocalFactSourceMixin:
                     WHERE event.session_id = ?
                       AND event.session_seq > ?
                       AND event.session_seq <= ?
+                      AND event.event_kind IN ({kind_placeholders})
                     ORDER BY event.session_seq
                     LIMIT ?
                     """,
-                    (session_id, scanned_after, high_water, chunk_size),
+                    (
+                        session_id,
+                        scanned_after,
+                        high_water,
+                        *CHAT_EVENT_KINDS,
+                        chunk_size,
+                    ),
                 ).fetchall()
                 if not rows:
                     break
+                scanned_rows += len(rows)
                 for row in rows:
                     record = _event_record_from_sqlite_row(row)
                     if record.session_seq is None:
@@ -314,7 +330,6 @@ class LocalFactSourceMixin:
                         events.append(projected)
                     if len(events) == limit:
                         break
-
         snapshot_cursor = ConnectedChatCursor(
             v=1,
             kind="chat",

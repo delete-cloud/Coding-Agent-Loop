@@ -139,11 +139,11 @@ class SessionManager(
             raise RuntimeError("durable authoritative store is not configured")
         decoded = None
         if cursor is not None:
-            fact = await store.load_session_fact_source(session_id)
+            fact = await self._require_session_fact_source(session_id)
             decoded = decode_chat_cursor(
                 cursor,
                 expected_session_id=session_id,
-                fact_state=None if fact is None else fact,
+                fact_state=fact,
             )
         return await store.snapshot_chat_events(session_id, decoded, limit)
 
@@ -192,9 +192,7 @@ class SessionManager(
         store = self._authoritative_store()
         if store is None:
             raise RuntimeError("durable authoritative store is not configured")
-        fact = await store.load_session_fact_source(session_id)
-        if fact is None:
-            raise KeyError(session_id)
+        fact = await self._require_session_fact_source(session_id)
         if after_seq_override is not None:
             after_seq = after_seq_override
         elif cursor is None:
@@ -211,23 +209,30 @@ class SessionManager(
             self._chat_subscribers.setdefault(session_id, set()).add(subscriber)
 
         async def capture_high_water() -> str:
-            current = await store.load_session_fact_source(session_id)
-            if current is None:
-                raise KeyError(session_id)
+            current = await self._require_session_fact_source(session_id)
             return current.session_seq
 
         async def replay(start: str, high_water: str) -> tuple[Any, ...]:
-            bounded = ConnectedChatCursor(
-                v=1,
-                kind="chat",
-                session_id=session_id,
-                projection=CONNECTED_CHAT_PROJECTION,
-                epoch=fact.projection_epoch,
-                after_seq=start,
-                high_water_seq=high_water,
-            )
-            snapshot = await store.snapshot_chat_events(session_id, bounded, 1000)
-            return snapshot.events
+            events: list[Any] = []
+            after = start
+            while int(after) < int(high_water):
+                bounded = ConnectedChatCursor(
+                    v=1,
+                    kind="chat",
+                    session_id=session_id,
+                    projection=CONNECTED_CHAT_PROJECTION,
+                    epoch=fact.projection_epoch,
+                    after_seq=after,
+                    high_water_seq=high_water,
+                )
+                snapshot = await store.snapshot_chat_events(session_id, bounded, 1000)
+                if not snapshot.events:
+                    break
+                events.extend(snapshot.events)
+                after = snapshot.events[-1].session_seq
+                if snapshot.next_cursor is None:
+                    break
+            return tuple(events)
 
         async def verify_ownership() -> bool:
             try:
@@ -254,6 +259,7 @@ class SessionManager(
             unregister=unregister,
         ).follow(after_seq=after_seq)
 
+
     def stream_chat_command(
         self, session_id: str, *, admission: Any
     ) -> AsyncIterator[Any]:
@@ -268,27 +274,12 @@ class SessionManager(
                 after_seq_override=str(int(admission.session_seq) - 1),
             )
             task: asyncio.Task[Any] | None = None
+            owns_task = False
             try:
+                if await self._should_launch_admitted_command(admission):
+                    task = self._launch_admitted_command(session_id, admission)
+                    owns_task = True
                 first = await anext(follow)
-                if not admission.idempotent:
-                    prompt = await self._command_prompt(
-                        session_id, admission.command_id
-                    )
-                    if admission.parent_run_id is None:
-                        command = self.run_agent(
-                            session_id,
-                            prompt,
-                            run_id_override=admission.run_id,
-                        )
-                    else:
-                        command = self.resume_session(
-                            session_id,
-                            prompt=prompt,
-                            resume_reason="user_resume",
-                            previous_run_id=admission.parent_run_id,
-                            run_id_override=admission.run_id,
-                        )
-                    task = asyncio.create_task(command)
                 yield first
                 async for event in follow:
                     yield event
@@ -299,7 +290,7 @@ class SessionManager(
                         return
             finally:
                 await follow.aclose()
-                if task is not None and not task.done():
+                if owns_task and task is not None and not task.done():
                     settlement = asyncio.create_task(
                         self.settle_root_run(
                             session_id,
@@ -309,13 +300,59 @@ class SessionManager(
                     )
                     await asyncio.shield(settlement)
                     task.cancel()
-                if task is not None:
+                if owns_task and task is not None:
                     try:
                         await task
                     except asyncio.CancelledError:
                         pass
+                    self._chat_run_tasks.pop(admission.run_id, None)
 
         return stream()
+
+    async def _require_session_fact_source(self, session_id: str) -> Any:
+        store = self._authoritative_store()
+        if store is None:
+            raise RuntimeError("durable authoritative store is not configured")
+        fact = await store.load_session_fact_source(session_id)
+        if fact is None:
+            await store.snapshot_chat_events(session_id, None, 1)
+            fact = await store.load_session_fact_source(session_id)
+        if fact is None:
+            raise KeyError(session_id)
+        return fact
+
+    async def _should_launch_admitted_command(self, admission: Any) -> bool:
+        if admission.run_id in self._chat_run_tasks:
+            return False
+        if not admission.idempotent:
+            return True
+        run = await self._require_runtime_store().load_agent_run(admission.run_id)
+        return run is not None and run.status == "requested"
+
+    def _launch_admitted_command(
+        self, session_id: str, admission: Any
+    ) -> asyncio.Task[Any]:
+        async def run() -> None:
+            prompt = await self._command_prompt(session_id, admission.command_id)
+            if admission.parent_run_id is None:
+                await self.run_agent(
+                    session_id,
+                    prompt,
+                    run_id_override=admission.run_id,
+                )
+                return
+            await self.resume_session(
+                session_id,
+                prompt=prompt,
+                resume_reason="user_resume",
+                previous_run_id=admission.parent_run_id,
+                run_id_override=admission.run_id,
+            )
+
+        task = asyncio.create_task(run())
+        self._chat_run_tasks[admission.run_id] = task
+        return task
+
 
     async def _command_prompt(self, session_id: str, command_id: str) -> str:
         store = self._authoritative_store()
@@ -388,6 +425,7 @@ class SessionManager(
         self._session_turn_locks: dict[str, asyncio.Lock] = {}
         self._session_workspace_export_counts: dict[str, int] = {}
         self._chat_subscribers: dict[str, set[Any]] = {}
+        self._chat_run_tasks: dict[str, asyncio.Task[Any]] = {}
         self._tape_store = tape_store or self._create_tape_store(data_dir)
         if self._local_durable_store is not None and tape_store is None:
             self._tape_store = FencedSQLiteTapeStore(

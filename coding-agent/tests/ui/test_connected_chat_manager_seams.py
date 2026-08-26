@@ -582,3 +582,133 @@ async def test_settled_duplicate_replays_without_executor_or_progress_mutation(
     assert (
         len([event for event in snapshot.events if event.kind == "root_terminal"]) == 1
     )
+
+
+@pytest.mark.asyncio
+async def test_idempotent_retry_starts_unowned_requested_run(
+    durable_manager: SessionManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = durable_manager
+    session = await _registered_session(manager)
+    first = await manager.admit_chat_command(
+        session.id, prompt="hello", command_id="command-recover"
+    )
+    retry = await manager.admit_chat_command(
+        session.id, prompt="hello", command_id="command-recover"
+    )
+    assert retry.idempotent is True
+    launches = 0
+
+    async def completing_run_agent(
+        session_id: str,
+        prompt: str,
+        *,
+        run_id_override: str | None = None,
+        resume_context: object | None = None,
+    ) -> None:
+        nonlocal launches
+        del prompt, resume_context
+        launches += 1
+        assert run_id_override == first.run_id
+        await manager.settle_root_run(
+            session_id, run_id=first.run_id, outcome="completed"
+        )
+
+    monkeypatch.setattr(manager, "run_agent", completing_run_agent)
+    stream = manager.stream_chat_command(session.id, admission=retry)
+    prompt = await asyncio.wait_for(anext(stream), timeout=1)
+    terminal = await asyncio.wait_for(anext(stream), timeout=1)
+    await stream.aclose()
+
+    assert prompt.kind == "user_prompt"
+    assert terminal.kind == "root_terminal"
+    assert launches == 1
+
+
+@pytest.mark.asyncio
+async def test_follow_empty_session_before_admission(
+    durable_manager: SessionManager,
+) -> None:
+    manager = durable_manager
+    session = await _registered_session(manager)
+    stream = await manager.follow_chat_events(session.id, cursor=None)
+    waiter = asyncio.create_task(anext(stream))
+    done, _pending = await asyncio.wait({waiter}, timeout=0.05)
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    await stream.aclose()
+    assert done == set()
+
+
+@pytest.mark.asyncio
+async def test_follow_pages_idle_history_above_page_size(
+    durable_manager: SessionManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = durable_manager
+    session = await _registered_session(manager)
+    admission = await manager.admit_chat_command(
+        session.id, prompt="hello", command_id="command-page"
+    )
+    for index in range(3):
+        await _append_assistant_event(
+            manager,
+            session,
+            event_id=f"event-page-{index}",
+            run_id=admission.run_id,
+            text=f"chunk-{index}",
+        )
+
+    original = manager._authoritative_store()
+    assert original is not None
+    real_snapshot = original.snapshot_chat_events
+    calls = 0
+
+    async def paged_snapshot(session_id: str, cursor: object, limit: int) -> object:
+        nonlocal calls
+        del limit
+        calls += 1
+        return await real_snapshot(session_id, cursor, 1)
+
+    monkeypatch.setattr(original, "snapshot_chat_events", paged_snapshot)
+    stream = await manager.follow_chat_events(session.id, cursor=None)
+    events = [
+        await asyncio.wait_for(anext(stream), timeout=1) for _ in range(4)
+    ]
+    waiter = asyncio.create_task(anext(stream))
+    done, _pending = await asyncio.wait({waiter}, timeout=0.05)
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    await stream.aclose()
+
+    assert [event.source_event_id for event in events] == [
+        "session-r3:chat-command:command-page",
+        "event-page-0",
+        "event-page-1",
+        "event-page-2",
+    ]
+    assert calls >= 4
+    assert done == set()
+
+
+@pytest.mark.asyncio
+async def test_admit_publishes_prompt_to_existing_follower(
+    durable_manager: SessionManager,
+) -> None:
+    manager = durable_manager
+    session = await _registered_session(manager)
+    stream = await manager.follow_chat_events(session.id, cursor=None)
+    waiter = asyncio.create_task(anext(stream))
+    await asyncio.sleep(0)
+    admission = await manager.admit_chat_command(
+        session.id, prompt="hello", command_id="command-live"
+    )
+    event = await asyncio.wait_for(waiter, timeout=1)
+    await stream.aclose()
+
+    assert event.kind == "user_prompt"
+    assert event.run_id == admission.run_id
+    assert event.source_event_id == "session-r3:chat-command:command-live"
