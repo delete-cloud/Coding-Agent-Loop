@@ -4,9 +4,11 @@ when:
 
 steps:
   deploy:
-    # Built by this repository's CI and pushed to the build registry.
-    image: git.mesh.kinaz.me/kina/coding-agent-deploy-tools:kubectl-1.36.0-helm-3.17.3-python-3.12-slim
+    # Image name comes from the Woodpecker secret deploy_tools_image.
+    image: "${DEPLOY_TOOLS_IMAGE}"
     environment:
+      DEPLOY_TOOLS_IMAGE:
+        from_secret: deploy_tools_image
       KUBECONFIG_CONTENT:
         from_secret: kubeconfig
       IMAGE_REPOSITORY:
