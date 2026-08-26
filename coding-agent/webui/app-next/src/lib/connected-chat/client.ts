@@ -421,8 +421,10 @@ function fastapiDetail(body: unknown): string | null {
   return null;
 }
 
-function asRecord(value: unknown): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
+function asRecord(value: unknown, path: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new ContractViolationError(path, "expected an object");
+  }
   const record: Record<string, unknown> = {};
   for (const [key, entry] of Object.entries(value)) {
     record[key] = entry;
@@ -431,87 +433,150 @@ function asRecord(value: unknown): Record<string, unknown> {
 }
 
 function parseProviderModels(value: unknown, fallbackProvider: string): ProviderModels {
-  const raw = asRecord(value);
-  const models: string[] = [];
-  if (Array.isArray(raw.models)) {
-    for (const entry of raw.models) {
-      if (typeof entry === "string" && entry.trim()) {
-        models.push(entry.trim());
-        continue;
-      }
-      const item = asRecord(entry);
-      if (typeof item.id === "string" && item.id.trim()) models.push(item.id.trim());
-    }
+  const raw = asRecord(value, "provider_models");
+  if (!Array.isArray(raw.models)) {
+    throw new ContractViolationError("provider_models.models", "expected an array");
   }
-  return {
-    provider: typeof raw.provider === "string" && raw.provider.trim() ? raw.provider : fallbackProvider,
-    models,
-    source: raw.source === "live" ? "live" : "unavailable",
-  };
+  const models: string[] = [];
+  for (const [index, entry] of raw.models.entries()) {
+    if (typeof entry === "string" && entry.trim()) {
+      models.push(entry.trim());
+      continue;
+    }
+    const item = asRecord(entry, `provider_models.models[${index}]`);
+    if (typeof item.id !== "string" || !item.id.trim()) {
+      throw new ContractViolationError(
+        `provider_models.models[${index}].id`,
+        "expected a model id",
+      );
+    }
+    models.push(item.id.trim());
+  }
+  const source = raw.source;
+  if (source !== "live" && source !== "unavailable") {
+    throw new ContractViolationError("provider_models.source", "expected live or unavailable");
+  }
+  const provider =
+    typeof raw.provider === "string" && raw.provider.trim()
+      ? raw.provider
+      : fallbackProvider;
+  return { provider, models, source };
 }
 
 function parseCodexFlowStart(value: unknown): CodexFlowStart {
-  const raw = asRecord(value);
+  const raw = asRecord(value, "codex_start");
   if (typeof raw.flow_id !== "string" || !raw.flow_id) {
     throw new ContractViolationError("codex_start.flow_id", "codex oauth start response missing flow_id");
   }
+  if (typeof raw.verification_url !== "string" || !raw.verification_url) {
+    throw new ContractViolationError("codex_start.verification_url", "expected a URL");
+  }
+  if (typeof raw.user_code !== "string" || !raw.user_code) {
+    throw new ContractViolationError("codex_start.user_code", "expected a user code");
+  }
+  if (typeof raw.expires_in !== "number") {
+    throw new ContractViolationError("codex_start.expires_in", "expected a number");
+  }
   return {
     flow_id: raw.flow_id,
-    verification_url: typeof raw.verification_url === "string" ? raw.verification_url : "",
-    user_code: typeof raw.user_code === "string" ? raw.user_code : "",
-    expires_in: typeof raw.expires_in === "number" ? raw.expires_in : 0,
+    verification_url: raw.verification_url,
+    user_code: raw.user_code,
+    expires_in: raw.expires_in,
   };
 }
 
-function parseCodexFlowItem(value: unknown): CodexFlow | null {
-  const raw = asRecord(value);
-  if (typeof raw.flow_id !== "string" || !raw.flow_id) return null;
+function parseCodexFlowItem(value: unknown, path: string): CodexFlow {
+  const raw = asRecord(value, path);
+  if (typeof raw.flow_id !== "string" || !raw.flow_id) {
+    throw new ContractViolationError(`${path}.flow_id`, "expected flow_id");
+  }
+  if (typeof raw.state !== "string" || !raw.state) {
+    throw new ContractViolationError(`${path}.state`, "expected state");
+  }
   const flow: CodexFlow = {
     flow_id: raw.flow_id,
-    state: typeof raw.state === "string" && raw.state ? raw.state : "pending",
+    state: raw.state,
   };
-  if (typeof raw.verification_url === "string") flow.verification_url = raw.verification_url;
-  if (typeof raw.user_code === "string") flow.user_code = raw.user_code;
-  if (typeof raw.account_label === "string") flow.account_label = raw.account_label;
-  if (typeof raw.error === "string") flow.error = raw.error;
-  if (typeof raw.created_at === "string") flow.created_at = raw.created_at;
+  if (raw.verification_url !== undefined) {
+    if (typeof raw.verification_url !== "string") {
+      throw new ContractViolationError(`${path}.verification_url`, "expected a string");
+    }
+    flow.verification_url = raw.verification_url;
+  }
+  if (raw.user_code !== undefined) {
+    if (typeof raw.user_code !== "string") {
+      throw new ContractViolationError(`${path}.user_code`, "expected a string");
+    }
+    flow.user_code = raw.user_code;
+  }
+  if (raw.account_label !== undefined) {
+    if (typeof raw.account_label !== "string") {
+      throw new ContractViolationError(`${path}.account_label`, "expected a string");
+    }
+    flow.account_label = raw.account_label;
+  }
+  if (raw.error !== undefined) {
+    if (typeof raw.error !== "string") {
+      throw new ContractViolationError(`${path}.error`, "expected a string");
+    }
+    flow.error = raw.error;
+  }
+  if (raw.created_at !== undefined) {
+    if (typeof raw.created_at !== "string") {
+      throw new ContractViolationError(`${path}.created_at`, "expected a string");
+    }
+    flow.created_at = raw.created_at;
+  }
   return flow;
 }
 
 function parseCodexFlowList(value: unknown): CodexFlow[] {
   const items = Array.isArray(value)
     ? value
-    : Array.isArray(asRecord(value).flows)
-      ? asRecord(value).flows
-      : [];
-  if (!Array.isArray(items)) return [];
-  const flows: CodexFlow[] = [];
-  for (const item of items) {
-    const parsed = parseCodexFlowItem(item);
-    if (parsed) flows.push(parsed);
+    : asRecord(value, "codex_flows").flows;
+  if (!Array.isArray(items)) {
+    throw new ContractViolationError("codex_flows", "expected an array or {flows:[]}");
   }
-  return flows;
+  return items.map((item, index) => parseCodexFlowItem(item, `codex_flows[${index}]`));
 }
 
 function parseOAuthAccounts(value: unknown): OAuthAccount[] {
   const items = Array.isArray(value)
     ? value
-    : Array.isArray(asRecord(value).accounts)
-      ? asRecord(value).accounts
-      : [];
-  if (!Array.isArray(items)) return [];
-  const accounts: OAuthAccount[] = [];
-  for (const item of items) {
-    const raw = asRecord(item);
-    if (typeof raw.provider !== "string" || !raw.provider) continue;
+    : asRecord(value, "oauth_accounts").accounts;
+  if (!Array.isArray(items)) {
+    throw new ContractViolationError("oauth_accounts", "expected an array or {accounts:[]}");
+  }
+  return items.map((item, index) => {
+    const raw = asRecord(item, `oauth_accounts[${index}]`);
+    if (typeof raw.provider !== "string" || !raw.provider) {
+      throw new ContractViolationError(`oauth_accounts[${index}].provider`, "expected provider");
+    }
     const account: OAuthAccount = {
       provider: raw.provider,
-      label: typeof raw.label === "string" ? raw.label : raw.provider,
+      label: typeof raw.label === "string" && raw.label ? raw.label : raw.provider,
     };
-    if (typeof raw.email === "string") account.email = raw.email;
-    if (typeof raw.plan === "string") account.plan = raw.plan;
-    if (typeof raw.connected_at === "string") account.connected_at = raw.connected_at;
-    accounts.push(account);
-  }
-  return accounts;
+    if (raw.email !== undefined) {
+      if (typeof raw.email !== "string") {
+        throw new ContractViolationError(`oauth_accounts[${index}].email`, "expected a string");
+      }
+      account.email = raw.email;
+    }
+    if (raw.plan !== undefined) {
+      if (typeof raw.plan !== "string") {
+        throw new ContractViolationError(`oauth_accounts[${index}].plan`, "expected a string");
+      }
+      account.plan = raw.plan;
+    }
+    if (raw.connected_at !== undefined) {
+      if (typeof raw.connected_at !== "string") {
+        throw new ContractViolationError(
+          `oauth_accounts[${index}].connected_at`,
+          "expected a string",
+        );
+      }
+      account.connected_at = raw.connected_at;
+    }
+    return account;
+  });
 }

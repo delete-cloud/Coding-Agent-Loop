@@ -279,6 +279,14 @@ describe("ConnectedChatClient.listProviderModels", () => {
       ContractViolationError,
     );
   });
+
+  it("rejects an empty JSON object as a contract violation", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({}, 200));
+    const client = clientWith(fetchImpl as unknown as typeof fetch);
+    await expect(client.listProviderModels("anthropic")).rejects.toBeInstanceOf(
+      ContractViolationError,
+    );
+  });
 });
 
 describe("ConnectedChatClient Codex OAuth", () => {
