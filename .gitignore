@@ -25,3 +25,11 @@ bub_build_architecture_analysis.md
 simplebank
 agent-coding-loop/
 bub/
+
+# design docs stay on the machine, not GitHub
+/docs/
+/coding-agent/docs/
+/coding-agent/.opencode/prompts/
+/coding-agent/.opencode/task-packets/
+/.opencode/prompts/
+/.opencode/task-packets/

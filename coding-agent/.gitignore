@@ -25,3 +25,8 @@ data/eval/golden/*
 
 .alma-snapshots
 bee-pack-v4pro-round1/
+
+# design docs stay on the machine, not GitHub
+docs/
+.opencode/prompts/
+.opencode/task-packets/
