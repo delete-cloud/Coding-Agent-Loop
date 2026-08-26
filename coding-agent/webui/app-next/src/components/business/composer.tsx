@@ -79,8 +79,7 @@ export function Composer(props: ComposerProps) {
     modelStatus,
   } = props;
 
-  // Same derivation as ConnectedChatView.busy.
-  const busy = status === "sending" || status === "cancelling";
+  const busy = status === "sending" || status === "cancelling" || status === "loading";
   const replayRequired = status === "replay_required";
   const sendDisabled = draft.trim().length === 0 || busy || replayRequired;
 

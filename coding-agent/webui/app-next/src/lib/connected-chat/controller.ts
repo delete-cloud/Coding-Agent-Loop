@@ -117,6 +117,7 @@ export class ConnectedChatController {
   private selectionAbort: AbortController | null = null;
   private owningAbort: AbortController | null = null;
   private cancelAbort: AbortController | null = null;
+  private passiveFollowRunning = false;
   private readonly reconnectDelayMs: (attempt: number) => number;
   private readonly sleep: (delayMs: number, signal: AbortSignal) => Promise<boolean>;
   private readonly finalizeTimeoutMs: number;
@@ -334,53 +335,56 @@ export class ConnectedChatController {
     generation: number,
     abort: AbortController,
   ): Promise<void> {
-    const operation = this.operation;
-    let nextCursor = cursor;
-    for (let attempt = 0; ; attempt += 1) {
-      let failed = false;
-      try {
-        await this.consumeStream(
-          this.client.follow(sessionId, nextCursor, abort.signal),
-          generation,
-          operation,
-          "passive",
-          // A reconnect attempt proves liveness with its first event: restore
-          // "following" and clear the recorded transport error. Guarded so an
-          // owning send/cancel that took over mid-reconnect is not clobbered.
-          attempt > 0
-            ? () => {
-                if (this.state.status === "reconnecting") {
-                  this.patch({ status: "following", error: null });
+    if (this.passiveFollowRunning) return;
+    this.passiveFollowRunning = true;
+    try {
+      const operation = this.operation;
+      let nextCursor = cursor;
+      for (let attempt = 0; ; attempt += 1) {
+        let failed = false;
+        try {
+          await this.consumeStream(
+            this.client.follow(sessionId, nextCursor, abort.signal),
+            generation,
+            operation,
+            "passive",
+            attempt > 0
+              ? () => {
+                  if (this.state.status === "reconnecting") {
+                    this.patch({ status: "following", error: null });
+                  }
                 }
-              }
-            : undefined,
-        );
-      } catch (error) {
-        if (!this.isGeneration(generation) || abort.signal.aborted) return;
-        if (this.isOwningStatus(this.state.status)) {
-          failed = true;
-        } else if (error instanceof ChatApiError && error.error.replay_required === true) {
-          this.patch({
-            status: "replay_required",
-            replayReason: error.error.code,
-            error,
-          });
-          return;
-        } else if (error instanceof ChatApiError && error.error.retryable === false) {
-          this.patch({ status: "error", error });
-          return;
-        } else {
-          failed = true;
-          this.patch({ status: "reconnecting", error });
+              : undefined,
+          );
+        } catch (error) {
+          if (!this.isGeneration(generation) || abort.signal.aborted) return;
+          if (this.isOwningStatus(this.state.status)) {
+            failed = true;
+          } else if (error instanceof ChatApiError && error.error.replay_required === true) {
+            this.patch({
+              status: "replay_required",
+              replayReason: error.error.code,
+              error,
+            });
+            return;
+          } else if (error instanceof ChatApiError && error.error.retryable === false) {
+            this.patch({ status: "error", error });
+            return;
+          } else {
+            failed = true;
+            this.patch({ status: "reconnecting", error });
+          }
         }
+        if (!this.isGeneration(generation) || abort.signal.aborted || this.state.status === "replay_required") return;
+        if (!failed && !this.isOwningStatus(this.state.status)) {
+          this.patch({ status: "reconnecting" });
+        }
+        const completed = await this.sleep(this.reconnectDelayMs(attempt), abort.signal);
+        if (!completed || !this.isGeneration(generation) || abort.signal.aborted) return;
+        nextCursor = this.requireSafeCursor();
       }
-      if (!this.isGeneration(generation) || abort.signal.aborted || this.state.status === "replay_required") return;
-      if (!failed && !this.isOwningStatus(this.state.status)) {
-        this.patch({ status: "reconnecting" });
-      }
-      const completed = await this.sleep(this.reconnectDelayMs(attempt), abort.signal);
-      if (!completed || !this.isGeneration(generation) || abort.signal.aborted) return;
-      nextCursor = this.requireSafeCursor();
+    } finally {
+      this.passiveFollowRunning = false;
     }
   }
 
