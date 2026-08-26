@@ -18,6 +18,7 @@ from coding_agent.stores.runtime_store import (
     AuthoritativeCommit,
     AuthoritativeUnitOfWork,
     EventRecord,
+    JSONObject,
     RawCursor,
     _agent_run_sqlite_values,
     _datetime_to_json,
@@ -47,6 +48,8 @@ class LocalUnitOfWorkMixin:
         outcome: str,
         result: str | None,
         error: str | None,
+        result_payload: JSONObject | None = None,
+        extra_metadata: JSONObject | None = None,
     ) -> AuthoritativeCommit:
         from coding_agent.stores.runtime_store import SQLiteRuntimeStore
 
@@ -62,6 +65,8 @@ class LocalUnitOfWorkMixin:
             outcome=outcome,
             result=result,
             error=error,
+            result_payload=result_payload,
+            extra_metadata=extra_metadata,
         )
         return await self.commit_authoritative_uow(authority, unit)
 

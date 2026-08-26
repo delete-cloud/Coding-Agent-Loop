@@ -14,6 +14,7 @@ from typing import Any, Literal
 from coding_agent.events import DisplayEventStreamProjector
 from coding_agent.events.connected_chat import (
     CONNECTED_CHAT_CONTRACT_VERSION,
+    ChatCursorError,
     ChatEvent,
 )
 from coding_agent.server.schemas import (
@@ -238,7 +239,15 @@ class ChatFollowBridge:
                 )
                 return
             high_water = await self._capture_high_water()
-            replayed = await self._replay(after_seq, high_water)
+            try:
+                replayed = await self._replay(after_seq, high_water)
+            except ChatCursorError:
+                yield StreamControl(
+                    "replay_required",
+                    "cursor_wrong_epoch",
+                    self.cursor(last_safe, high_water),
+                )
+                return
             for event in replayed:
                 yield event
                 last_safe = event.session_seq
@@ -252,20 +261,66 @@ class ChatFollowBridge:
                     return
                 event_task = asyncio.create_task(subscriber.queue.get())
                 overflow_task = asyncio.create_task(subscriber.overflowed.wait())
-                done, pending = await asyncio.wait(
-                    {event_task, overflow_task}, return_when=asyncio.FIRST_COMPLETED
-                )
-                for task in pending:
-                    task.cancel()
-                if overflow_task in done and subscriber.overflowed.is_set():
+                owner_task = asyncio.create_task(asyncio.sleep(30.0))
+                try:
+                    await asyncio.wait(
+                        {event_task, overflow_task, owner_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    for waited in (event_task, overflow_task, owner_task):
+                        waited.cancel()
+                    await asyncio.gather(
+                        event_task,
+                        overflow_task,
+                        owner_task,
+                        return_exceptions=True,
+                    )
+                if overflow_task.done() and not overflow_task.cancelled() and subscriber.overflowed.is_set():
                     yield StreamControl(
                         "replay_required",
                         "subscriber_queue_overflow",
                         self.cursor(last_safe, high_water),
                     )
                     return
-                event = event_task.result()
-                if int(event.session_seq) <= int(high_water):
+                if event_task.done() and not event_task.cancelled():
+                    event = event_task.result()
+                    if int(event.session_seq) <= int(high_water):
+                        continue
+                    if not await self._verify_ownership():
+                        yield StreamControl(
+                            "replay_required",
+                            "ownership_lost",
+                            self.cursor(last_safe, high_water),
+                        )
+                        return
+                    if int(event.session_seq) != int(last_safe) + 1:
+                        try:
+                            recovered = await self._replay(last_safe, event.session_seq)
+                        except ChatCursorError:
+                            yield StreamControl(
+                                "replay_required",
+                                "cursor_wrong_epoch",
+                                self.cursor(last_safe, high_water),
+                            )
+                            return
+                        if not recovered or recovered[-1].session_seq != event.session_seq:
+                            yield StreamControl(
+                                "replay_required",
+                                "sequence_loss",
+                                self.cursor(last_safe, high_water),
+                            )
+                            return
+                        for recovered_event in recovered:
+                            if int(recovered_event.session_seq) <= int(last_safe):
+                                continue
+                            yield recovered_event
+                            last_safe = recovered_event.session_seq
+                            high_water = last_safe
+                        continue
+                    yield event
+                    last_safe = event.session_seq
+                    high_water = last_safe
                     continue
                 if not await self._verify_ownership():
                     yield StreamControl(
@@ -274,25 +329,6 @@ class ChatFollowBridge:
                         self.cursor(last_safe, high_water),
                     )
                     return
-                if int(event.session_seq) != int(last_safe) + 1:
-                    recovered = await self._replay(last_safe, event.session_seq)
-                    if not recovered or recovered[-1].session_seq != event.session_seq:
-                        yield StreamControl(
-                            "replay_required",
-                            "sequence_loss",
-                            self.cursor(last_safe, high_water),
-                        )
-                        return
-                    for recovered_event in recovered:
-                        if int(recovered_event.session_seq) <= int(last_safe):
-                            continue
-                        yield recovered_event
-                        last_safe = recovered_event.session_seq
-                        high_water = last_safe
-                    continue
-                yield event
-                last_safe = event.session_seq
-                high_water = last_safe
         finally:
             await asyncio.shield(self._unregister(subscriber))
 

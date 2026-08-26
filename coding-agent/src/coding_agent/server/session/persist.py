@@ -159,6 +159,8 @@ class PersistOps:
         outcome: str,
         result: str | None = None,
         error: str | None = None,
+        result_payload: JSONObject | None = None,
+        extra_metadata: JSONObject | None = None,
     ) -> AuthoritativeCommit:
         store = self._authoritative_store()
         if store is None:
@@ -175,6 +177,8 @@ class PersistOps:
             outcome=outcome,
             result=result,
             error=error,
+            result_payload=result_payload,
+            extra_metadata=extra_metadata,
         )
         session = await self.get_session_async(session_id)
         if session.current_turn_id == run_id:

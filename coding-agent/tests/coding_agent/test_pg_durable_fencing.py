@@ -59,6 +59,7 @@ class FakePGConnection:
         self.topic_anchors: list[dict[str, object]] = []
         self.topic_recall_links: list[dict[str, object]] = []
         self.topic_costs: dict[str, dict[str, object]] = {}
+        self.fact_source_rows: dict[str, dict[str, object]] = {}
         self.owned_sql_returns_none = False
         self.session_tape_race_binding: tuple[str, str] | None = None
 
@@ -182,6 +183,27 @@ class FakePGConnection:
 
     async def fetchrow(self, query: str, *args: object) -> dict[str, object] | None:
         self.calls.append(("fetchrow", _sql_label(query), args))
+        if "session_fact_source" in query:
+            session_id = cast(str, args[0])
+            if "INSERT INTO session_fact_source" in query:
+                if session_id in self.fact_source_rows:
+                    return None
+                row = {
+                    "session_id": session_id,
+                    "session_seq": args[1],
+                    "retention_floor": args[2],
+                    "projection": args[3],
+                    "projection_epoch": args[4],
+                }
+                self.fact_source_rows[session_id] = row
+                return row
+            if "projection_epoch = projection_epoch + 1" in query:
+                existing = self.fact_source_rows.get(session_id)
+                if existing is None:
+                    return None
+                existing["projection_epoch"] = int(existing["projection_epoch"]) + 1
+                return existing
+            return self.fact_source_rows.get(session_id)
         if "FROM session_owners" in query:
             return self.owner_row
         if "FROM session_tapes" in query and "WHERE session_id" in query:

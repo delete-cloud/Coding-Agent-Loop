@@ -213,6 +213,15 @@ class SessionManager(
             return current.session_seq
 
         async def replay(start: str, high_water: str) -> tuple[Any, ...]:
+            current = await self._require_session_fact_source(session_id)
+            if current.projection_epoch != fact.projection_epoch:
+                from coding_agent.events.connected_chat import ChatCursorError
+
+                raise ChatCursorError(
+                    "cursor_wrong_epoch",
+                    status=409,
+                    replay_required=True,
+                )
             events: list[Any] = []
             after = start
             while int(after) < int(high_water):
@@ -234,7 +243,7 @@ class SessionManager(
                 decoded = decode_chat_cursor(
                     snapshot.next_cursor,
                     expected_session_id=session_id,
-                    fact_state=fact,
+                    fact_state=current,
                 )
                 after = decoded.after_seq
             return tuple(events)
@@ -297,37 +306,43 @@ class SessionManager(
                     yield event
             finally:
                 await follow.aclose()
-                try:
-                    if (
-                        owns_task
-                        and task is not None
-                        and not task.done()
-                        and not saw_terminal
-                    ):
-                        from coding_agent.events.connected_chat import (
-                            RootRunAlreadySettledError,
-                        )
-
-                        try:
-                            settlement = asyncio.create_task(
-                                self.settle_root_run(
-                                    session_id,
-                                    run_id=admission.run_id,
-                                    outcome="interrupted",
-                                )
+                if owns_task and task is not None:
+                    try:
+                        if not task.done() and not saw_terminal:
+                            from coding_agent.events.connected_chat import (
+                                RootRunAlreadySettledError,
                             )
-                            await asyncio.shield(settlement)
-                        except RootRunAlreadySettledError:
-                            pass
-                        task.cancel()
-                    if owns_task and task is not None:
+                            from coding_agent.server.stores.session_owner_store import (
+                                SessionOwnershipConflictError,
+                            )
+
+                            try:
+                                settlement = asyncio.create_task(
+                                    self.settle_root_run(
+                                        session_id,
+                                        run_id=admission.run_id,
+                                        outcome="interrupted",
+                                    )
+                                )
+                                await asyncio.shield(settlement)
+                            except (
+                                RootRunAlreadySettledError,
+                                SessionOwnershipConflictError,
+                            ):
+                                pass
+                        if not task.done():
+                            task.cancel()
                         try:
                             await task
                         except asyncio.CancelledError:
                             pass
-                finally:
-                    if owns_task and task is not None:
+                    finally:
                         self._chat_run_tasks.pop(admission.run_id, None)
+                        runs = self._chat_runs_by_session.get(session_id)
+                        if runs is not None:
+                            runs.discard(admission.run_id)
+                            if not runs:
+                                self._chat_runs_by_session.pop(session_id, None)
 
         return stream()
 
@@ -402,6 +417,12 @@ class SessionManager(
 
         task = asyncio.create_task(run())
         self._chat_run_tasks[admission.run_id] = task
+        self._chat_runs_by_session.setdefault(session_id, set()).add(admission.run_id)
+        session = self._session_cache.get(session_id)
+        if session is not None:
+            session.task = task
+            session.turn_in_progress = True
+            session.current_turn_id = admission.run_id
         return task
 
 
@@ -477,6 +498,7 @@ class SessionManager(
         self._session_workspace_export_counts: dict[str, int] = {}
         self._chat_subscribers: dict[str, set[Any]] = {}
         self._chat_run_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._chat_runs_by_session: dict[str, set[str]] = {}
         self._chat_launch_lock = asyncio.Lock()
         self._chat_assistant_buffers: dict[str, tuple[str, str]] = {}
         self._tape_store = tape_store or self._create_tape_store(data_dir)

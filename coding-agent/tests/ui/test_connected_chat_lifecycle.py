@@ -160,6 +160,7 @@ async def test_runtime_finalization_has_no_non_atomic_escape_hatch(
         outcome: str,
         result: str | None,
         error: str | None,
+        **_kwargs: object,
     ) -> None:
         settlements.append((session_id, run_id, outcome, result, error))
 

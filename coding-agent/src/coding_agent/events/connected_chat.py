@@ -268,6 +268,8 @@ def build_root_settlement(
     outcome: Literal["completed", "failed", "cancelled", "interrupted"],
     result: str | None,
     error: str | None,
+    result_payload: JSONObject | None = None,
+    extra_metadata: JSONObject | None = None,
 ) -> object:
     from dataclasses import replace
 
@@ -280,12 +282,25 @@ def build_root_settlement(
     settled_session["turn_id"] = run.run_id
     settled_session["turn_in_progress"] = False
     settled_session["turn_status"] = outcome
+    merged_result = {
+        key: value for key, value in run.result.items() if key != "text"
+    }
+    if result_payload is not None:
+        merged_result.update(
+            {key: value for key, value in result_payload.items() if key != "text"}
+        )
+    if result is not None:
+        merged_result["text"] = result
+    metadata = dict(run.metadata)
+    if extra_metadata:
+        metadata.update(extra_metadata)
     settled_run = replace(
         run,
         status=outcome,
         ended_at=now,
-        result={} if result is None else {"text": result},
+        result=merged_result,
         error=error,
+        metadata=metadata,
     )
     return AuthoritativeUnitOfWork(
         event=EventRecord(

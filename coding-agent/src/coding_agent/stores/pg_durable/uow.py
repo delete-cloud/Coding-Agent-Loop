@@ -16,6 +16,7 @@ from coding_agent.events.connected_chat import (
 from coding_agent.stores.runtime_store import (
     AuthoritativeCommit,
     AuthoritativeUnitOfWork,
+    JSONObject,
     RawCursor,
     effect_status_may_replace,
     format_u64,
@@ -44,6 +45,8 @@ class PgUnitOfWorkMixin:
         outcome: str,
         result: str | None,
         error: str | None,
+        result_payload: JSONObject | None = None,
+        extra_metadata: JSONObject | None = None,
     ) -> AuthoritativeCommit:
         from coding_agent.stores.runtime_store import PGRuntimeStore
 
@@ -65,6 +68,8 @@ class PgUnitOfWorkMixin:
             outcome=outcome,
             result=result,
             error=error,
+            result_payload=result_payload,
+            extra_metadata=extra_metadata,
         )
         return await self.commit_authoritative_uow(authority, unit)
 

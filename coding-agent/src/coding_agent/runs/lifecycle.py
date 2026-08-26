@@ -512,6 +512,8 @@ class RuntimeRunLifecycle:
                 outcome=status,
                 result=result_text,
                 error=error,
+                result_payload=result,
+                extra_metadata=extra_metadata,
             )
             return
         await self.update(

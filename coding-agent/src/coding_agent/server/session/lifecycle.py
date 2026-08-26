@@ -300,6 +300,7 @@ class LifecycleOps:
             await self._assert_owner(session_id)
             session = await self.get_session_async(session_id)
 
+            await self._stop_connected_chat_tasks(session_id)
             await self._runtime_control_services.task_stopper().stop(
                 session_id=session_id,
                 task=session.task,
@@ -324,48 +325,47 @@ class LifecycleOps:
                 if interrupt_active_turn
                 and session.current_turn_id is not None
                 and session.turn_in_progress
-                and session.task is not None
-                and not session.task.done()
                 else None
             )
 
+            if interrupted_run_id is not None:
+                from coding_agent.events.connected_chat import (
+                    RootRunAlreadySettledError,
+                )
+
+                try:
+                    await self.settle_root_run(
+                        session_id,
+                        run_id=interrupted_run_id,
+                        outcome="interrupted",
+                        error=GRACEFUL_SHUTDOWN_INTERRUPTED_RUN_ERROR,
+                    )
+                except RootRunAlreadySettledError:
+                    pass
+
+            await self._stop_connected_chat_tasks(session_id)
             await self._runtime_control_services.task_stopper().stop(
                 session_id=session_id,
                 task=session.task,
             )
-            if interrupted_run_id is not None:
-                await self._mark_graceful_shutdown_interrupted_run(interrupted_run_id)
 
             await self._runtime_closer.close(session)
             session.task = None
             session.turn_in_progress = False
             await self._persist_session_async(session)
 
-    async def _mark_graceful_shutdown_interrupted_run(self, run_id: str) -> None:
-        store = self._runtime_store
-        if store is None:
-            return
-        run = await store.load_agent_run(run_id)
-        if run is None:
-            return
-        if run.status not in GRACEFUL_SHUTDOWN_INTERRUPTABLE_RUN_STATUSES:
-            return
-
-        interrupted_at = datetime.now(UTC)
-        metadata = dict(run.metadata)
-        metadata["reclaimable"] = True
-        metadata["recovered_at"] = interrupted_at.isoformat()
-        metadata["recovery_reason"] = GRACEFUL_SHUTDOWN_RECOVERY_REASON
-        if self._owner_id is not None:
-            metadata["recovered_by_owner_id"] = self._owner_id
-        await store.update_agent_run(
-            run_id,
-            status="interrupted",
-            ended_at=interrupted_at,
-            metadata=cast(JSONObject, metadata),
-            result=run.result,
-            error=GRACEFUL_SHUTDOWN_INTERRUPTED_RUN_ERROR,
-        )
+    async def _stop_connected_chat_tasks(self, session_id: str) -> None:
+        run_ids = list(self._chat_runs_by_session.get(session_id, ()))
+        for run_id in run_ids:
+            task = self._chat_run_tasks.pop(run_id, None)
+            if task is None or task.done():
+                continue
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self._chat_runs_by_session.pop(session_id, None)
 
     async def close(self) -> None:
         await self._close_resource_async(self._store)
