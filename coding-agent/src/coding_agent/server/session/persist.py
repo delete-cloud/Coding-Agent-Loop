@@ -190,23 +190,18 @@ class PersistOps:
             ToolResultDelta,
         )
 
-        store = self._authoritative_store()
-        if store is None:
+        if self._authoritative_store() is None:
             return
         run_id = session.current_turn_id
         if run_id is None:
             return
-        run = await self._require_runtime_store().load_agent_run(run_id)
-        if run is not None and run.status in {
-            "completed",
-            "failed",
-            "cancelled",
-            "interrupted",
-        }:
-            return
         if isinstance(message, StreamDelta):
-            buffers = self._chat_assistant_buffers
-            buffers[session.id] = buffers.get(session.id, "") + message.content
+            previous = self._chat_assistant_buffers.get(session.id)
+            if previous is not None and previous[0] != run_id:
+                await self.flush_chat_assistant_buffer(session.id)
+            current = self._chat_assistant_buffers.get(session.id)
+            prefix = current[1] if current is not None and current[0] == run_id else ""
+            self._chat_assistant_buffers[session.id] = (run_id, prefix + message.content)
             return
         await self.flush_chat_assistant_buffer(session.id)
         if isinstance(message, ThinkingDelta):
@@ -214,6 +209,7 @@ class PersistOps:
                 session,
                 "thinking",
                 {"run_id": run_id, "text": message.text},
+                run_id,
             )
             return
         if isinstance(message, ToolCallDelta):
@@ -226,6 +222,7 @@ class PersistOps:
                     "tool_name": message.tool_name,
                     "arguments": message.arguments,
                 },
+                run_id,
             )
             return
         if isinstance(message, ToolResultDelta):
@@ -241,20 +238,22 @@ class PersistOps:
                     "output": output,
                     "is_error": message.is_error,
                 },
+                run_id,
             )
 
     async def flush_chat_assistant_buffer(self, session_id: str) -> None:
-        text = self._chat_assistant_buffers.pop(session_id, "")
+        buffered = self._chat_assistant_buffers.pop(session_id, None)
+        if buffered is None:
+            return
+        run_id, text = buffered
         if not text:
             return
         session = await self.get_session_async(session_id)
-        run_id = session.current_turn_id
-        if run_id is None:
-            return
         await self._commit_and_publish_chat_event(
             session,
             "assistant_message",
             {"run_id": run_id, "text": text},
+            run_id,
         )
 
     async def _commit_and_publish_chat_event(
@@ -262,9 +261,18 @@ class PersistOps:
         session: Session,
         event_kind: str,
         payload: JSONObject,
+        run_id: str,
     ) -> None:
         store = self._authoritative_store()
         if store is None:
+            return
+        run = await self._require_runtime_store().load_agent_run(run_id)
+        if run is not None and run.status in {
+            "completed",
+            "failed",
+            "cancelled",
+            "interrupted",
+        }:
             return
         authority = self._owner_authorities.get(session.id)
         if authority is None:

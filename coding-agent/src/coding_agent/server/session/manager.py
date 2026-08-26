@@ -287,13 +287,14 @@ class SessionManager(
                 first = await anext(follow)
                 yield first
                 async for event in follow:
-                    yield event
                     if (
                         event.kind == "root_terminal"
                         and event.run_id == admission.run_id
                     ):
                         saw_terminal = True
+                        yield event
                         return
+                    yield event
             finally:
                 await follow.aclose()
                 if (
@@ -459,7 +460,6 @@ class SessionManager(
         self._pg_durable_store: PGDurableStore | None = None
         self._store = store or self._create_http_session_store()
         self._session_cache: dict[str, Session] = {}
-        self._approval_stores: dict[str, ApprovalStore] = {}
         self._lock = asyncio.Lock()
         self._store_io_guard = threading.Lock()
         self._session_turn_locks: dict[str, asyncio.Lock] = {}
@@ -467,7 +467,7 @@ class SessionManager(
         self._chat_subscribers: dict[str, set[Any]] = {}
         self._chat_run_tasks: dict[str, asyncio.Task[Any]] = {}
         self._chat_launch_lock = asyncio.Lock()
-        self._chat_assistant_buffers: dict[str, str] = {}
+        self._chat_assistant_buffers: dict[str, tuple[str, str]] = {}
         self._tape_store = tape_store or self._create_tape_store(data_dir)
         if self._local_durable_store is not None and tape_store is None:
             self._tape_store = FencedSQLiteTapeStore(
