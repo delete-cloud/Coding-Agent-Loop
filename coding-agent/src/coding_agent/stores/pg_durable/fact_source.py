@@ -398,17 +398,10 @@ class PgFactSourceMixin:
         )
         if existing is not None:
             return _fact_source_from_pg_row(dict(existing))
-        inserted = await connection.fetchrow(
-            self._INSERT_FACT_SOURCE_SQL,
-            session_id,
-            0,
-            0,
-            DEFAULT_HARNESS_PROJECTION,
-            0,
+        inserted = await self._insert_or_load_fact_source(
+            connection, session_id, projection_epoch=0
         )
-        return _fact_source_from_pg_row(
-            _required_row(inserted, "session fact source insert")
-        )
+        return _fact_source_from_pg_row(dict(inserted))
 
     async def _open_projection_epoch(
         self,
@@ -420,13 +413,32 @@ class PgFactSourceMixin:
             session_id,
         )
         if existing is None:
-            _ = await connection.fetchrow(
-                self._INSERT_FACT_SOURCE_SQL,
-                session_id,
-                0,
-                0,
-                DEFAULT_HARNESS_PROJECTION,
-                1,
+            inserted = await self._insert_or_load_fact_source(
+                connection, session_id, projection_epoch=1
             )
-            return
+            if inserted is not None and int(inserted["projection_epoch"]) >= 1:
+                return
         _ = await connection.fetchrow(self._BUMP_PROJECTION_EPOCH_SQL, session_id)
+
+    async def _insert_or_load_fact_source(
+        self,
+        connection: Any,
+        session_id: str,
+        *,
+        projection_epoch: int,
+    ) -> Any:
+        inserted = await connection.fetchrow(
+            self._INSERT_FACT_SOURCE_SQL,
+            session_id,
+            0,
+            0,
+            DEFAULT_HARNESS_PROJECTION,
+            projection_epoch,
+        )
+        if inserted is not None:
+            return inserted
+        selected = await connection.fetchrow(
+            self._SELECT_FACT_SOURCE_FOR_UPDATE_SQL,
+            session_id,
+        )
+        return _required_row(selected, "session fact source insert")
