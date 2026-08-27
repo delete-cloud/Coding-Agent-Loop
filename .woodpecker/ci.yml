@@ -9,9 +9,11 @@ steps:
     image: python:3.12-slim
     environment:
       PIP_DEFAULT_TIMEOUT: "120"
-      PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple
+      PIP_INDEX_URL:
+        from_secret: pip_index_url
       PIP_CACHE_DIR: /cache/pip/coding-agent-loop
-      UV_DEFAULT_INDEX: https://mirrors.aliyun.com/pypi/simple
+      UV_DEFAULT_INDEX:
+        from_secret: uv_default_index
       UV_CACHE_DIR: /cache/uv/coding-agent-loop
       UV_LINK_MODE: copy
     volumes:
@@ -27,10 +29,18 @@ steps:
   build-image:
     image: gcr.io/kaniko-project/executor:v1.24.0-debug
     environment:
+      REGISTRY_HOST:
+        from_secret: registry_host
+      REGISTRY_NAMESPACE:
+        from_secret: registry_namespace
       REGISTRY_USERNAME:
         from_secret: registry_username
       REGISTRY_PASSWORD:
         from_secret: registry_password
+      NODE_BASE_IMAGE:
+        from_secret: node_base_image
+      PYTHON_BASE_IMAGE:
+        from_secret: python_base_image
       http_proxy:
         from_secret: proxy_url
       https_proxy:
@@ -40,18 +50,27 @@ steps:
       HTTPS_PROXY:
         from_secret: proxy_url
       PIP_DEFAULT_TIMEOUT: "120"
-      PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple
-      UV_DEFAULT_INDEX: https://mirrors.aliyun.com/pypi/simple
-      NODE_BASE_IMAGE: git.mesh.kinaz.me/kina/node:20-alpine
-      APT_DEBIAN_MIRROR: https://mirrors.aliyun.com/debian
-      APT_DEBIAN_SECURITY_MIRROR: https://mirrors.aliyun.com/debian-security
-      no_proxy: git.mesh.kinaz.me,localhost,127.0.0.1,.svc,.cluster.local,10.0.0.0/8,192.168.0.0/16
-      NO_PROXY: git.mesh.kinaz.me,localhost,127.0.0.1,.svc,.cluster.local,10.0.0.0/8,192.168.0.0/16
+      PIP_INDEX_URL:
+        from_secret: pip_index_url
+      UV_DEFAULT_INDEX:
+        from_secret: uv_default_index
+      APT_DEBIAN_MIRROR:
+        from_secret: apt_debian_mirror
+      APT_DEBIAN_SECURITY_MIRROR:
+        from_secret: apt_debian_security_mirror
+      NO_PROXY_EXTRA:
+        from_secret: no_proxy_extra
     commands:
       - mkdir -p /kaniko/.docker
+      - test -n "$REGISTRY_HOST"
+      - test -n "$REGISTRY_NAMESPACE"
+      - test -n "$NODE_BASE_IMAGE"
+      - test -n "$PYTHON_BASE_IMAGE"
       - auth="$(printf '%s:%s' "$REGISTRY_USERNAME" "$REGISTRY_PASSWORD" | base64 | tr -d '\n')"
-      - printf '{"auths":{"git.mesh.kinaz.me":{"auth":"%s"}}}\n' "$auth" > /kaniko/.docker/config.json
-      - /kaniko/executor --context "$CI_WORKSPACE/coding-agent" --dockerfile "$CI_WORKSPACE/coding-agent/Dockerfile" --cache=true --cache-repo "git.mesh.kinaz.me/kina/coding-agent/cache" --build-arg NODE_BASE_IMAGE="$NODE_BASE_IMAGE" --build-arg PYTHON_BASE_IMAGE=git.mesh.kinaz.me/kina/python:3.12-slim --build-arg PIP_DEFAULT_TIMEOUT="$PIP_DEFAULT_TIMEOUT" --build-arg PIP_INDEX_URL="$PIP_INDEX_URL" --build-arg UV_DEFAULT_INDEX="$UV_DEFAULT_INDEX" --build-arg APT_DEBIAN_MIRROR="$APT_DEBIAN_MIRROR" --build-arg APT_DEBIAN_SECURITY_MIRROR="$APT_DEBIAN_SECURITY_MIRROR" --destination "git.mesh.kinaz.me/kina/coding-agent:${CI_COMMIT_SHA}" --destination "git.mesh.kinaz.me/kina/coding-agent:main"
+      - printf '{"auths":{"%s":{"auth":"%s"}}}\n' "$REGISTRY_HOST" "$auth" > /kaniko/.docker/config.json
+      - export no_proxy="localhost,127.0.0.1,.svc,.cluster.local$${NO_PROXY_EXTRA:+,$NO_PROXY_EXTRA}"
+      - export NO_PROXY="$no_proxy"
+      - /kaniko/executor --context "$CI_WORKSPACE/coding-agent" --dockerfile "$CI_WORKSPACE/coding-agent/Dockerfile" --cache=true --cache-repo "$REGISTRY_HOST/$REGISTRY_NAMESPACE/coding-agent/cache" --build-arg NODE_BASE_IMAGE="$NODE_BASE_IMAGE" --build-arg PYTHON_BASE_IMAGE="$PYTHON_BASE_IMAGE" --build-arg PIP_DEFAULT_TIMEOUT="$PIP_DEFAULT_TIMEOUT" --build-arg PIP_INDEX_URL="$PIP_INDEX_URL" --build-arg UV_DEFAULT_INDEX="$UV_DEFAULT_INDEX" --build-arg APT_DEBIAN_MIRROR="$APT_DEBIAN_MIRROR" --build-arg APT_DEBIAN_SECURITY_MIRROR="$APT_DEBIAN_SECURITY_MIRROR" --destination "$REGISTRY_HOST/$REGISTRY_NAMESPACE/coding-agent:${CI_COMMIT_SHA}" --destination "$REGISTRY_HOST/$REGISTRY_NAMESPACE/coding-agent:main"
     when:
       - event:
           - push
@@ -60,10 +79,17 @@ steps:
   build-deploy-tools:
     image: gcr.io/kaniko-project/executor:v1.24.0-debug
     environment:
+      REGISTRY_HOST:
+        from_secret: registry_host
+      REGISTRY_NAMESPACE:
+        from_secret: registry_namespace
       REGISTRY_USERNAME:
         from_secret: registry_username
       REGISTRY_PASSWORD:
         from_secret: registry_password
+      PYTHON_BASE_IMAGE:
+        from_secret: python_base_image
+      DEPLOY_TOOLS_TAG: kubectl-1.36.0-helm-3.17.3-python-3.12-slim
       http_proxy:
         from_secret: proxy_url
       https_proxy:
@@ -72,15 +98,22 @@ steps:
         from_secret: proxy_url
       HTTPS_PROXY:
         from_secret: proxy_url
-      APT_DEBIAN_MIRROR: https://mirrors.aliyun.com/debian
-      APT_DEBIAN_SECURITY_MIRROR: https://mirrors.aliyun.com/debian-security
-      no_proxy: git.mesh.kinaz.me,localhost,127.0.0.1,.svc,.cluster.local,10.0.0.0/8,192.168.0.0/16
-      NO_PROXY: git.mesh.kinaz.me,localhost,127.0.0.1,.svc,.cluster.local,10.0.0.0/8,192.168.0.0/16
+      APT_DEBIAN_MIRROR:
+        from_secret: apt_debian_mirror
+      APT_DEBIAN_SECURITY_MIRROR:
+        from_secret: apt_debian_security_mirror
+      NO_PROXY_EXTRA:
+        from_secret: no_proxy_extra
     commands:
       - mkdir -p /kaniko/.docker
+      - test -n "$REGISTRY_HOST"
+      - test -n "$REGISTRY_NAMESPACE"
+      - test -n "$PYTHON_BASE_IMAGE"
       - auth="$(printf '%s:%s' "$REGISTRY_USERNAME" "$REGISTRY_PASSWORD" | base64 | tr -d '\n')"
-      - printf '{"auths":{"git.mesh.kinaz.me":{"auth":"%s"}}}\n' "$auth" > /kaniko/.docker/config.json
-      - /kaniko/executor --context "$CI_WORKSPACE" --dockerfile "$CI_WORKSPACE/docker/deploy-tools.Dockerfile" --build-arg PYTHON_BASE_IMAGE=git.mesh.kinaz.me/kina/python:3.12-slim --build-arg APT_DEBIAN_MIRROR="$APT_DEBIAN_MIRROR" --build-arg APT_DEBIAN_SECURITY_MIRROR="$APT_DEBIAN_SECURITY_MIRROR" --destination "git.mesh.kinaz.me/kina/coding-agent-deploy-tools:kubectl-1.36.0-helm-3.17.3-python-3.12-slim"
+      - printf '{"auths":{"%s":{"auth":"%s"}}}\n' "$REGISTRY_HOST" "$auth" > /kaniko/.docker/config.json
+      - export no_proxy="localhost,127.0.0.1,.svc,.cluster.local$${NO_PROXY_EXTRA:+,$NO_PROXY_EXTRA}"
+      - export NO_PROXY="$no_proxy"
+      - /kaniko/executor --context "$CI_WORKSPACE" --dockerfile "$CI_WORKSPACE/docker/deploy-tools.Dockerfile" --build-arg PYTHON_BASE_IMAGE="$PYTHON_BASE_IMAGE" --build-arg APT_DEBIAN_MIRROR="$APT_DEBIAN_MIRROR" --build-arg APT_DEBIAN_SECURITY_MIRROR="$APT_DEBIAN_SECURITY_MIRROR" --destination "$REGISTRY_HOST/$REGISTRY_NAMESPACE/coding-agent-deploy-tools:$DEPLOY_TOOLS_TAG"
     when:
       - event:
           - manual

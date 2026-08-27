@@ -33,11 +33,15 @@ class RestoreOps:
         *,
         prompt: str | None = None,
         resume_reason: str = "user_resume",
+        previous_run_id: str | None = None,
+        run_id_override: str | None = None,
     ) -> AgentRunRecord:
         return await self._runtime_resume_session_orchestration.resume_session(
             session_id,
             prompt=prompt,
             resume_reason=resume_reason,
+            previous_run_id=previous_run_id,
+            run_id_override=run_id_override,
         )
 
     async def _run_resumed_local_session(

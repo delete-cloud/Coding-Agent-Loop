@@ -7,9 +7,16 @@ from typing import Any
 
 from fastapi import HTTPException
 from fastapi.params import Depends as DependsParam
+from fastapi.responses import JSONResponse
 
+from coding_agent.events.connected_chat import (
+    ChatCommandConflictError,
+    ResumeSourceUnsettledError,
+    TurnInProgressError,
+)
 from coding_agent.server.auth import (
     AuthContext,
+    auth_context_from_headers,
 )
 from coding_agent.server.session_manager import Session
 from coding_agent.server.stores.session_owner_store import (
@@ -101,6 +108,74 @@ def _require_admin_context(auth_context: AuthContext | None) -> None:
         raise HTTPException(status_code=403, detail="Admin token required")
 
 
+async def _connected_chat_auth(
+    x_api_key: str | None,
+    authorization: str | None,
+) -> AuthContext | JSONResponse | None:
+    try:
+        return await auth_context_from_headers(x_api_key, authorization)
+    except HTTPException as exc:
+        if exc.status_code == 401:
+            return _chat_error(
+                401,
+                "credentials_required",
+                "Authentication credentials are required",
+            )
+        raise
+
+
+def _chat_error(
+    status: int,
+    code: str,
+    message: str,
+    *,
+    retryable: bool = False,
+    replay_required: bool | None = None,
+) -> JSONResponse:
+    detail: dict[str, object] = {
+        "code": code,
+        "message": message,
+        "retryable": retryable,
+    }
+    if replay_required is not None:
+        detail["replay_required"] = replay_required
+    return JSONResponse(status_code=status, content={"error": detail})
+
+
+_CHAT_ADMISSION_ERRORS: tuple[tuple[type[Exception], str, str, bool], ...] = (
+    (
+        TurnInProgressError,
+        "turn_in_progress",
+        "A root turn is already active",
+        True,
+    ),
+    (
+        ChatCommandConflictError,
+        "command_conflict",
+        "Command ID was reused with different input",
+        False,
+    ),
+    (
+        ResumeSourceUnsettledError,
+        "resume_source_unsettled",
+        "The source run has not durably settled",
+        True,
+    ),
+)
+
+
+def _chat_admission_error(exc: Exception) -> JSONResponse:
+    """Map a checked chat admission failure to its contract error envelope."""
+    for error_type, code, message, retryable in _CHAT_ADMISSION_ERRORS:
+        if isinstance(exc, error_type):
+            return _chat_error(409, code, message, retryable=retryable)
+    raise TypeError(f"unmapped chat admission error: {type(exc).__name__}")
+
+
+def _chat_session_not_found_error() -> JSONResponse:
+    return _chat_error(404, "session_not_found", "Session not found")
+
+
 async def _get_visible_session(
     session_id: str,
     auth_context: AuthContext | None,
@@ -118,6 +193,10 @@ async def _get_visible_session(
 __all__ = [
     "_safe_dict",
     "_auth_context_can_access_session",
+    "_chat_admission_error",
+    "_chat_error",
+    "_connected_chat_auth",
+    "_chat_session_not_found_error",
     "_codex_account_not_connected_exception",
     "_get_visible_session",
     "_http_metrics_route_label",

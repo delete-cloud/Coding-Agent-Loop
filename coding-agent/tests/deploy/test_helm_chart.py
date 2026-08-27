@@ -1138,6 +1138,7 @@ def test_runtime_image_builds_and_copies_webui_dist() -> None:
     assert "FROM ${NODE_BASE_IMAGE} AS webui" in dockerfile
     assert "ARG PNPM_VERSION=" in dockerfile
     assert 'corepack prepare "pnpm@${PNPM_VERSION}" --activate' in dockerfile
+    assert "WORKDIR /webui/app" in dockerfile
     assert (
         "COPY webui/app/package.json webui/app/pnpm-lock.yaml webui/app/pnpm-workspace.yaml"
         in dockerfile
