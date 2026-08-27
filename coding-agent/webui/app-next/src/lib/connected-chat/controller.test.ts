@@ -256,6 +256,32 @@ describe("ConnectedChatController", () => {
     expect(controller.getState().status).toBe("error");
   });
 
+  it("clears an unchanged sent draft after a pre-frame owning transport failure", async () => {
+    const client = new FakeClient();
+    const controller = new ConnectedChatController(client);
+    await selectReady(controller, client);
+    const sent = controller.send("Run tests", "cmd-01");
+    client.prompts[0].fail(new TypeError("network"));
+    await waitUntil(() => client.snapshots.length === 2);
+    client.snapshots[1].resolve(snapshot("session-01", [events[0]]));
+    await sent;
+    expect(controller.getState().draft).toBe("");
+    expect(controller.getState().timeline.order).toContain("evt-user-01");
+  });
+
+  it("keeps an unsent draft across same-session reload", async () => {
+    const client = new FakeClient();
+    const controller = new ConnectedChatController(client);
+    await selectReady(controller, client);
+    controller.setDraft("unsent note");
+    const reloaded = controller.selectSession("session-01");
+    client.snapshots.at(-1)!.resolve(snapshot("session-01", [events[0]]));
+    await reloaded;
+    await flush();
+    expect(controller.getState().draft).toBe("unsent note");
+    expect(controller.getState().sessionId).toBe("session-01");
+  });
+
   it("clears a draft only after canonical admission is observed", async () => {
     const client = new FakeClient(); const controller = new ConnectedChatController(client); await selectReady(controller, client);
     const sent = controller.send("Run tests", "cmd-01"); expect(controller.getState().draft).toBe("Run tests");

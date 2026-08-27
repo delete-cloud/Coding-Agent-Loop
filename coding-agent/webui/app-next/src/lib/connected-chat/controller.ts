@@ -152,6 +152,13 @@ export class ConnectedChatController {
   async selectSession(sessionId: string): Promise<void> {
     if (this.disposed) throw new Error("cannot select a session on a disposed controller");
     if (sessionId.length === 0) throw new Error("sessionId must be non-empty");
+    const keepDraft =
+      this.state.sessionId === sessionId &&
+      this.state.status !== "sending" &&
+      this.state.status !== "cancelling" &&
+      this.state.status !== "loading"
+        ? this.state.draft
+        : "";
     const generation = ++this.generation;
     const operation = ++this.operation;
     this.abortOwnedOperations();
@@ -161,6 +168,7 @@ export class ConnectedChatController {
       ...initialState(),
       sessionId,
       status: "loading",
+      draft: keepDraft,
     });
     await this.loadCanonical(sessionId, generation, operation, abort, true);
   }
@@ -194,6 +202,7 @@ export class ConnectedChatController {
     } catch (error) {
       if (!this.isCurrent(generation, operation)) return;
       if (admitted || isOwningTransportFailure(error)) {
+        if (!admitted && this.state.draft === prompt) this.patch({ draft: "" });
         await this.reconcileOwningEof(sessionId, generation, operation);
         return;
       }
