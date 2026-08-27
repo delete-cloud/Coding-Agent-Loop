@@ -601,11 +601,16 @@ describe("AppFrame timeline and composer", () => {
     expect(timelineText(container)).toContain("Run tests");
   });
 
-  it("cancel surfaces the cancelling status", async () => {
+  it("cancel after admission surfaces the cancelling status", async () => {
     const { backend, container } = await renderFollowing();
 
     fireEvent.change(textbox(), { target: { value: "Run tests" } });
     fireEvent.click(screen.getByRole("button", { name: zhMessages.composer.send }));
+    await settle(
+      () => backend.prompts[0].push(chatItem(events[0])),
+      () => textbox().value === "",
+      "canonical admission before cancel",
+    );
     fireEvent.click(screen.getByRole("button", { name: zhMessages.composer.cancel }));
 
     expect(backend.cancels).toHaveLength(1);
