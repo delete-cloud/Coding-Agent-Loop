@@ -1,0 +1,45 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://coding-agent.local/protocol/harness/schema/errors.json",
+  "title": "Harness control-plane error data",
+  "description": "ADR-0076 P3 contract error payloads. Declared for the frozen IDL only; no handler raises these yet.",
+  "definitions": {
+    "StaleFenceData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "expected_epoch", "actual_epoch"],
+      "properties": {
+        "session_id": { "$ref": "./types.json#/definitions/SessionId" },
+        "expected_epoch": { "$ref": "./types.json#/definitions/U64" },
+        "actual_epoch": { "$ref": "./types.json#/definitions/U64" }
+      },
+      "description": "ADR-0068 session fence rejected the mutation: the caller's epoch is stale."
+    },
+    "NotInitializedData": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "reason": { "type": "string" }
+      },
+      "description": "A verb other than initialize arrived before the handshake completed."
+    },
+    "QuiescentGateData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["effect_id"],
+      "properties": {
+        "effect_id": { "$ref": "./types.json#/definitions/U64" }
+      },
+      "description": "Admission refused while the original effect is quiescent-gated; only B(resolved) lifts the gate."
+    },
+    "CursorInvalidData": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cursor": { "type": "string" },
+        "reason": { "type": "string" }
+      },
+      "description": "A delta/settled cursor was applied to the wrong projection or epoch."
+    }
+  }
+}
