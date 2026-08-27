@@ -255,6 +255,10 @@ class SessionManager(
                 return False
             return True
 
+        async def read_epoch() -> str:
+            current = await self._require_session_fact_source(session_id)
+            return current.projection_epoch
+
         async def unregister(subscriber: Any) -> None:
             subscribers = self._chat_subscribers.get(session_id)
             if subscribers is None:
@@ -271,6 +275,7 @@ class SessionManager(
             replay=replay,
             verify_ownership=verify_ownership,
             unregister=unregister,
+            read_epoch=read_epoch,
         ).follow(after_seq=after_seq)
 
 

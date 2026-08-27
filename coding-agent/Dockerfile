@@ -7,15 +7,15 @@ ARG PNPM_VERSION=10.23.0
 
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 
-WORKDIR /webui/app-next
+WORKDIR /webui/app
 
 RUN corepack enable \
     && corepack prepare "pnpm@${PNPM_VERSION}" --activate
 
-COPY webui/app-next/package.json webui/app-next/pnpm-lock.yaml webui/app-next/pnpm-workspace.yaml ./
+COPY webui/app/package.json webui/app/pnpm-lock.yaml webui/app/pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 
-COPY webui/app-next ./
+COPY webui/app ./
 RUN pnpm build
 
 
@@ -78,7 +78,7 @@ RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin coding-agent \
 
 COPY --chown=coding-agent:coding-agent --from=builder /app/.venv /app/.venv
 COPY --chown=coding-agent:coding-agent --from=builder /app/src /app/src
-COPY --chown=coding-agent:coding-agent --from=webui /webui/app-next/out /app/webui-dist
+COPY --chown=coding-agent:coding-agent --from=webui /webui/app/dist /app/webui-dist
 
 WORKDIR /workspace
 USER coding-agent

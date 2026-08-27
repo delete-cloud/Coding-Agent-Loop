@@ -187,6 +187,7 @@ class ChatFollowBridge:
         replay: Callable[[str, str], Awaitable[tuple[Any, ...]]],
         verify_ownership: Callable[[], Awaitable[bool]],
         unregister: Callable[[ChatSubscriber], Awaitable[None]],
+        read_epoch: Callable[[], Awaitable[str]] | None = None,
         queue_size: int = 100,
     ) -> None:
         self.session_id = session_id
@@ -196,6 +197,7 @@ class ChatFollowBridge:
         self._replay = replay
         self._verify_ownership = verify_ownership
         self._unregister = unregister
+        self._read_epoch = read_epoch
         self._queue_size = queue_size
 
     def cursor(self, after_seq: str, high_water_seq: str) -> str:
@@ -244,7 +246,7 @@ class ChatFollowBridge:
             except ChatCursorError:
                 yield StreamControl(
                     "replay_required",
-                    "cursor_wrong_epoch",
+                    "sequence_loss",
                     self.cursor(last_safe, high_water),
                 )
                 return
@@ -300,7 +302,7 @@ class ChatFollowBridge:
                         except ChatCursorError:
                             yield StreamControl(
                                 "replay_required",
-                                "cursor_wrong_epoch",
+                                "sequence_loss",
                                 self.cursor(last_safe, high_water),
                             )
                             return
@@ -329,6 +331,15 @@ class ChatFollowBridge:
                         self.cursor(last_safe, high_water),
                     )
                     return
+                if self._read_epoch is not None:
+                    current_epoch = await self._read_epoch()
+                    if current_epoch != self.projection_epoch:
+                        yield StreamControl(
+                            "replay_required",
+                            "sequence_loss",
+                            self.cursor(last_safe, high_water),
+                        )
+                        return
         finally:
             await asyncio.shield(self._unregister(subscriber))
 
