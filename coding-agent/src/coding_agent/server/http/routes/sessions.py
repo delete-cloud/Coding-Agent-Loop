@@ -78,6 +78,9 @@ from fastapi import APIRouter
 logger = logging.getLogger(LOGGER_NAME)
 router = APIRouter()
 
+_SESSION_TITLE_MAX_LENGTH = 80
+_SESSION_TITLE_EVENT_PAGE_SIZE = 1000
+
 
 @router.post("/sessions", response_model=SessionResponse)
 @limiter.limit(RateLimits.CREATE_SESSION)
@@ -485,7 +488,10 @@ async def list_sessions(
             continue
         if not _auth_context_can_access_session(auth_context, session):
             continue
-        summaries.append(await _session_summary_response(session))
+        summary = await _session_summary_response(session)
+        if summary.title is None:
+            continue
+        summaries.append(summary)
     return SessionListResponse(sessions=summaries)
 
 
@@ -509,12 +515,39 @@ async def get_session(
     return await _session_summary_response(session)
 
 
+async def _first_user_prompt_text(session_id: str) -> str | None:
+    manager = _bindings.module().session_manager
+    if manager._authoritative_store() is None:
+        return None
+
+    cursor: str | None = None
+    while True:
+        snapshot = await manager.snapshot_chat_events(
+            session_id,
+            cursor=cursor,
+            limit=_SESSION_TITLE_EVENT_PAGE_SIZE,
+        )
+        for event in snapshot.events:
+            if event.kind != "user_prompt":
+                continue
+            text = event.payload.get("text")
+            if not isinstance(text, str):
+                raise RuntimeError("user_prompt event text must be a string")
+            normalized = " ".join(text.split())
+            if not normalized:
+                return None
+            return normalized[:_SESSION_TITLE_MAX_LENGTH]
+        if snapshot.next_cursor is None:
+            return None
+        cursor = snapshot.next_cursor
+
+
 async def _session_summary_response(session: Session) -> SessionSummaryResponse:
     payload = session.as_dict()
     payload.update(
         await _bindings.module().session_manager.session_resume_metadata(session.id)
     )
-    payload["title"] = None
+    payload["title"] = await _first_user_prompt_text(session.id)
     return SessionSummaryResponse(**payload)
 
 

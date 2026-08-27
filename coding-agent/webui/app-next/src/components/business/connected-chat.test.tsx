@@ -45,7 +45,7 @@ const events = fixture.events.map((entry) => entry.data as ChatEventEnvelope);
 
 const twoSessions = [
   { session_id: "session-01", title: "Run tests" },
-  { session_id: "session-02", title: null },
+  { session_id: "session-02", title: "Fix lint" },
 ];
 
 const liveApps: Array<{
@@ -131,9 +131,9 @@ describe("AppFrame catalog states", () => {
     const rows = container.querySelectorAll(".session");
     expect(rows).toHaveLength(2);
     expect(rows[0].textContent).toContain("Run tests");
-    expect(rows[0].textContent).toContain("session-01");
-    // A null title falls back to the stable session id.
-    expect(rows[1].textContent).toContain("session-02");
+    expect(rows[0].textContent).not.toContain("session-01");
+    expect(rows[1].textContent).toContain("Fix lint");
+    expect(rows[1].textContent).not.toContain("session-02");
 
     const selected = container.querySelector(".session.sel");
     expect(selected?.textContent).toContain("Run tests");
@@ -145,14 +145,29 @@ describe("AppFrame catalog states", () => {
     expect(container.querySelector(".sessionbar-title")?.textContent).toBe("Run tests");
   });
 
+  it("hides catalog rows without a title (empty/unsent sessions)", async () => {
+    const { backend, container } = renderConnected();
+    await resolveCatalog(backend, [
+      { session_id: "session-01", title: "Run tests" },
+      { session_id: "session-02", title: null },
+    ]);
+
+    expect(container.querySelectorAll(".session")).toHaveLength(1);
+    const list = container.querySelector(".session-list");
+    expect(list?.textContent).toContain("Run tests");
+    expect(list?.textContent).not.toContain("session-02");
+    // The first visible session is the selection.
+    expect(backend.snapshotCalls.map((call) => call.sessionId)).toEqual(["session-01"]);
+  });
+
   it("honors a valid ?session= param as the selection", async () => {
     nav.session = "session-02";
     const { backend, container } = renderConnected();
     await resolveCatalog(backend, twoSessions);
 
     const selected = container.querySelector(".session.sel");
-    expect(selected?.textContent).toContain("session-02");
-    expect(container.querySelector(".sessionbar-title")?.textContent).toBe("session-02");
+    expect(selected?.textContent).toContain("Fix lint");
+    expect(container.querySelector(".sessionbar-title")?.textContent).toBe("Fix lint");
     expect(backend.snapshotCalls.map((call) => call.sessionId)).toEqual(["session-02"]);
   });
 
@@ -204,12 +219,21 @@ describe("AppFrame catalog states", () => {
     expect(container.querySelectorAll(".session")).toHaveLength(2);
   });
 
-  it("creates a session, refreshes the catalog, and navigates to it", async () => {
-    const { backend } = renderConnected();
+  it("keeps an omitted first-send session selected until its catalog title arrives", async () => {
+    const { backend, container, controller, rerenderApp } = renderConnected();
     await resolveCatalog(backend, []);
 
+    // New Session is a local draft: no POST until the first prompt is sent.
     fireEvent.click(screen.getByRole("button", { name: zhMessages.sidebar.newSession }));
-    expect(backend.creates).toHaveLength(1);
+    expect(backend.creates).toHaveLength(0);
+
+    fireEvent.change(textbox(), { target: { value: "Refactor the shell" } });
+    fireEvent.click(screen.getByRole("button", { name: zhMessages.composer.send }));
+    await settle(
+      () => {},
+      () => backend.creates.length === 1,
+      "first send to create the session",
+    );
     // Pending state switches the button label and disables it.
     expect(
       screen.getByRole("button", { name: zhMessages.sidebar.creating }),
@@ -220,12 +244,137 @@ describe("AppFrame catalog states", () => {
       () => backend.lists.length === 2,
       "create flow to refresh catalog",
     );
-    // The create flow refreshes the list before returning the id.
+    // Live GET /sessions omits the new session until its first prompt has
+    // produced a title.
     expect(backend.lists).toHaveLength(2);
-    await resolveCatalog(backend, [{ session_id: "session-09", title: null }]);
+    await resolveCatalog(backend, []);
 
     expect(nav.pushes).toContain("/?session=session-09");
     expect(backend.snapshotCalls.map((call) => call.sessionId)).toEqual(["session-09"]);
+    expect(controller.getState().sessionId).toBe("session-09");
+    const row = container.querySelector(".session.sel");
+    expect(row?.textContent).toContain("Refactor the shell");
+    expect(row?.textContent).toContain("anthropic · claude-sonnet-4");
+    expect(row?.textContent).not.toContain("session-09");
+    expect(container.querySelector(".sessionbar-title")?.textContent).toBe(
+      "Refactor the shell",
+    );
+    expect(textbox().value).toBe("");
+    expect(timelineText(container)).toContain(zhMessages.timeline.loading);
+
+    // Simulate the router applying the push while the first prompt finishes.
+    nav.session = "session-09";
+    rerenderApp();
+    await resolveSnapshot(backend, "session-09");
+    await waitUntil(() => backend.promptCalls.length === 1, "first prompt stream to start");
+    await settle(
+      () => backend.prompts[0].end(),
+      () => backend.snapshotCalls.length === 2,
+      "prompt EOF to request the canonical snapshot",
+    );
+    await act(async () => {
+      backend.snapshots[1].resolve(makeSnapshot("session-09", []));
+      await flush();
+    });
+    await waitUntil(() => backend.lists.length === 3, "completed first send to refresh catalog");
+    await act(async () => {
+      backend.lists[2].resolve({
+        contract_version: "1.0.0",
+        sessions: [
+          {
+            session_id: "session-09",
+            title: "Server-generated title",
+            provider_name: "codex",
+            model_name: "gpt-5.4",
+          },
+          {
+            session_id: "session-01",
+            title: "Older session",
+            provider_name: "anthropic",
+            model_name: "claude-sonnet-4",
+          },
+        ],
+      });
+      await flush();
+    });
+
+    const titledRow = Array.from(container.querySelectorAll(".session")).find((candidate) =>
+      candidate.textContent?.includes("Server-generated title"),
+    );
+    expect(titledRow?.textContent).toContain("codex · gpt-5.4");
+    expect(titledRow?.textContent).not.toContain("Refactor the shell");
+
+    // Once the server title replaces the stand-in, URL navigation is
+    // authoritative again.
+    nav.session = "session-01";
+    rerenderApp();
+    await waitUntil(
+      () => controller.getState().sessionId === "session-01",
+      "titled summary to release the pending selection",
+    );
+    expect(container.querySelector(".session.sel")?.textContent).toContain("Older session");
+  });
+
+  it("returns URL authority after the optimistic pending navigation lands", async () => {
+    const { backend, container, controller, rerenderApp } = renderConnected();
+    await resolveCatalog(backend, []);
+
+    fireEvent.click(screen.getByRole("button", { name: zhMessages.sidebar.newSession }));
+    fireEvent.change(textbox(), { target: { value: "Refactor the shell" } });
+    fireEvent.click(screen.getByRole("button", { name: zhMessages.composer.send }));
+    await waitUntil(() => backend.creates.length === 1, "first send to create the session");
+    await settle(
+      () => backend.creates[0].resolve({ session_id: "session-09" }),
+      () => backend.lists.length === 2,
+      "create flow to refresh catalog",
+    );
+    await act(async () => {
+      backend.lists[1].resolve({
+        contract_version: "1.0.0",
+        sessions: [
+          {
+            session_id: "session-01",
+            title: "Older session",
+            provider_name: "anthropic",
+            model_name: "claude-sonnet-4",
+          },
+        ],
+      });
+      await flush();
+    });
+    await waitUntil(
+      () => controller.getState().sessionId === "session-09",
+      "pending session to become selected",
+    );
+
+    const pendingRow = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(".session"),
+    ).find((candidate) => candidate.textContent?.includes("Refactor the shell"));
+    if (pendingRow === undefined) throw new Error("missing pending session row");
+    fireEvent.click(pendingRow);
+    expect(nav.pushes).toEqual([
+      "/?session=session-09",
+      "/?session=session-09",
+    ]);
+    expect(container.querySelector(".session.sel")?.textContent).toContain(
+      "Refactor the shell",
+    );
+
+    nav.session = "session-09";
+    rerenderApp();
+    await act(async () => {
+      await flush();
+    });
+    nav.session = "session-01";
+    rerenderApp();
+    await waitUntil(
+      () => controller.getState().sessionId === "session-01",
+      "browser navigation to restore URL selection",
+    );
+    expect(container.querySelector(".session.sel")?.textContent).toContain("Older session");
+    expect(container.querySelector(".session-list")?.textContent).toContain(
+      "Refactor the shell",
+    );
   });
 
   it("surfaces create-session failures without replacing them with a catalog refresh", async () => {
@@ -233,6 +382,13 @@ describe("AppFrame catalog states", () => {
     await resolveCatalog(backend, []);
 
     fireEvent.click(screen.getByRole("button", { name: zhMessages.sidebar.newSession }));
+    fireEvent.change(textbox(), { target: { value: "Refactor the shell" } });
+    fireEvent.click(screen.getByRole("button", { name: zhMessages.composer.send }));
+    await settle(
+      () => {},
+      () => backend.creates.length === 1,
+      "first send to create the session",
+    );
     await settle(
       () =>
         backend.creates[0].reject(
@@ -253,13 +409,24 @@ describe("AppFrame catalog states", () => {
       name: zhMessages.sidebar.newSession,
     }) as HTMLButtonElement;
     expect(newSessionButton.disabled).toBe(false);
+    // The draft survives the failure so the user can retry.
+    expect(textbox().value).toBe("Refactor the shell");
   });
 
-  it("creates a session, renders its EventRecord turn, and accepts a follow-up", async () => {
+  it("creates a session on first send, renders its EventRecord turn, and accepts a follow-up", async () => {
     const { backend, container } = renderConnected();
     await resolveCatalog(backend, []);
 
+    // The first prompt is typed into the local draft; sending it creates the
+    // session, selects it, and only then starts the owning prompt stream.
     fireEvent.click(screen.getByRole("button", { name: zhMessages.sidebar.newSession }));
+    fireEvent.change(textbox(), { target: { value: "Run tests" } });
+    fireEvent.click(screen.getByRole("button", { name: zhMessages.composer.send }));
+    await settle(
+      () => {},
+      () => backend.creates.length === 1,
+      "first send to create the session",
+    );
     await settle(
       () => backend.creates[0].resolve({ session_id: "session-09" }),
       () => backend.lists.length === 2,
@@ -267,13 +434,17 @@ describe("AppFrame catalog states", () => {
     );
     await resolveCatalog(backend, [{ session_id: "session-09", title: null }]);
     await resolveSnapshot(backend, "session-09");
+    await settle(
+      () => {},
+      () => backend.promptCalls.length === 1,
+      "draft flow to send the first prompt",
+    );
+    expect(backend.promptCalls[0].request.prompt).toBe("Run tests");
     const turnEvents = [events[0], events[5], events[6]].map((event) => ({
       ...event,
       session_id: "session-09",
     }));
 
-    fireEvent.change(textbox(), { target: { value: "Run tests" } });
-    fireEvent.click(screen.getByRole("button", { name: zhMessages.composer.send }));
     await settle(
       () => {
         backend.prompts[0].push(chatItem(turnEvents[0]));
@@ -336,9 +507,9 @@ describe("AppFrame URL-led selection", () => {
     ]);
     await resolveSnapshot(backend, "session-02");
 
-    expect(container.querySelector(".sessionbar-title")?.textContent).toBe("session-02");
+    expect(container.querySelector(".sessionbar-title")?.textContent).toBe("Fix lint");
     const selected = container.querySelector(".session.sel");
-    expect(selected?.textContent).toContain("session-02");
+    expect(selected?.textContent).toContain("Fix lint");
     expect(railHealth(container)).toBe("ok");
   });
 
@@ -365,11 +536,11 @@ describe("AppFrame URL-led selection", () => {
     // NOW the stale session-01 snapshot resolves late, carrying events.
     await settle(
       () => backend.snapshots[0].resolve(makeSnapshot("session-01", events)),
-      () => container.querySelector(".sessionbar-title")?.textContent === "session-02",
+      () => container.querySelector(".sessionbar-title")?.textContent === "Fix lint",
       "stale snapshot to leave session-02 selected",
     );
 
-    expect(container.querySelector(".sessionbar-title")?.textContent).toBe("session-02");
+    expect(container.querySelector(".sessionbar-title")?.textContent).toBe("Fix lint");
     expect(timelineText(container)).not.toContain("Run tests");
     expect(timelineText(container)).toContain(zhMessages.timeline.empty);
     expect(railHealth(container)).toBe("ok");

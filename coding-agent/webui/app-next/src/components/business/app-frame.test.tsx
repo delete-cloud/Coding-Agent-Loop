@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import zhMessages from "../../../messages/zh.json";
@@ -9,7 +9,13 @@ import {
   resolveSnapshot,
   withIntl,
 } from "../../../test/helpers/app-frame";
-import { FakeBackend } from "../../../test/helpers/connected-chat-fake";
+import {
+  deferred,
+  flush,
+  makeSnapshot,
+  waitUntil,
+  FakeBackend,
+} from "../../../test/helpers/connected-chat-fake";
 import { AppFrame, AppFrameView } from "@/components/business/app-frame";
 import type { RuntimeConfigPatch } from "@/lib/connected-chat/client";
 import { ChatApiError } from "@/lib/connected-chat/client";
@@ -204,6 +210,13 @@ describe("AppFrame runtime settings", () => {
     await waitFor(() => expect(updateRuntimeConfig).toHaveBeenCalledTimes(2));
 
     fireEvent.click(screen.getByRole("button", { name: zhMessages.sidebar.newSession }));
+    // New Session only opens a local draft; the POST fires on the first send.
+    expect(createSession).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByRole("textbox", { name: zhMessages.composer.inputLabel }), {
+      target: { value: "Hello" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: zhMessages.composer.send }));
+    await waitFor(() => expect(createSession).toHaveBeenCalled());
 
     expect(createSession.mock.calls.at(-1)?.[0]).toEqual({
       provider: "deepseek",
@@ -246,6 +259,11 @@ describe("AppFrame runtime settings", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: zhMessages.sidebar.newSession }));
+    fireEvent.change(screen.getByRole("textbox", { name: zhMessages.composer.inputLabel }), {
+      target: { value: "Hello" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: zhMessages.composer.send }));
+    await waitFor(() => expect(createSession).toHaveBeenCalled());
 
     expect(createSession.mock.calls.at(-1)?.[0]).toEqual({
       provider: "anthropic",
@@ -290,6 +308,11 @@ describe("AppFrame runtime settings", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: zhMessages.sidebar.newSession }));
+    fireEvent.change(screen.getByRole("textbox", { name: zhMessages.composer.inputLabel }), {
+      target: { value: "Hello" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: zhMessages.composer.send }));
+    await waitFor(() => expect(createSession).toHaveBeenCalled());
 
     expect(createSession.mock.calls.at(-1)?.[0]).toEqual({
       provider: "deepseek",
@@ -321,6 +344,10 @@ describe("AppFrame runtime settings", () => {
 
     await waitFor(() => expect(listOAuthAccounts).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: zhMessages.sidebar.newSession }));
+    fireEvent.change(screen.getByRole("textbox", { name: zhMessages.composer.inputLabel }), {
+      target: { value: "Hello" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: zhMessages.composer.send }));
 
     await waitFor(() => expect(createSession).toHaveBeenCalled());
     expect(createSession.mock.calls.at(-1)?.[0]).toEqual({
@@ -328,6 +355,114 @@ describe("AppFrame runtime settings", () => {
       model: "gpt-5.4",
     });
   });
+  it("uses the connected Codex live default when fallback persistence races account discovery", async () => {
+    const accountProvider = "codex:night-owl";
+    let resolveAccounts!: (
+      accounts: Array<{ provider: string; label: string }>,
+    ) => void;
+    const accountsPromise = new Promise<Array<{ provider: string; label: string }>>((resolve) => {
+      resolveAccounts = resolve;
+    });
+    const { backend, services } = fakeServices();
+    attachSettingsClient(backend);
+    const listProviderModels = vi.fn(async (provider: string) => ({
+      provider,
+      source: "live" as const,
+      models:
+        provider === accountProvider
+          ? ["gpt-5.6-sol", "gpt-5.4"]
+          : ["claude-sonnet-4"],
+    }));
+    Object.assign(backend, {
+      listOAuthAccounts: vi.fn(() => accountsPromise),
+      listProviderModels,
+    });
+    const createSession = vi.spyOn(backend, "createSession");
+    render(withIntl(<AppFrame services={services} />));
+    await resolveCatalog(backend, []);
+
+    await waitFor(() =>
+      expect(
+        listProviderModels.mock.calls.some(([provider]) => provider === "anthropic"),
+      ).toBe(true),
+    );
+    fireEvent.click(screen.getByRole("button", { name: zhMessages.sidebar.newSession }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "claude-sonnet-4 · anthropic" }),
+    );
+    fireEvent.click(screen.getByRole("option", { name: "claude-sonnet-4" }));
+    await waitFor(() => expect(localStorage.getItem(SETTINGS_LS_KEY)).not.toBeNull());
+
+    await act(async () => {
+      resolveAccounts([{ provider: accountProvider, label: "Night Owl" }]);
+      await flush();
+    });
+
+    expect(
+      await screen.findByRole("button", { name: /gpt-5\.6-sol.*Night Owl/ }),
+    ).toBeDefined();
+    fireEvent.change(screen.getByRole("textbox", { name: zhMessages.composer.inputLabel }), {
+      target: { value: "Hello" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: zhMessages.composer.send }));
+
+    await waitFor(() => expect(createSession).toHaveBeenCalled());
+    expect(createSession.mock.calls.at(-1)?.[0]).toEqual({
+      provider: accountProvider,
+      model: "gpt-5.6-sol",
+    });
+  });
+
+  it("does not replace a non-default choice made while account discovery is pending", async () => {
+    const accountProvider = "codex:night-owl";
+    let resolveAccounts!: (
+      accounts: Array<{ provider: string; label: string }>,
+    ) => void;
+    const accountsPromise = new Promise<Array<{ provider: string; label: string }>>((resolve) => {
+      resolveAccounts = resolve;
+    });
+    const { backend, services } = fakeServices();
+    attachSettingsClient(backend);
+    const listProviderModels = vi.fn(async (provider: string) => ({
+      provider,
+      source: "live" as const,
+      models:
+        provider === accountProvider
+          ? ["gpt-5.6-sol"]
+          : provider === "deepseek"
+            ? ["deepseek-chat"]
+            : ["claude-sonnet-4"],
+    }));
+    Object.assign(backend, {
+      listOAuthAccounts: vi.fn(() => accountsPromise),
+      listProviderModels,
+    });
+    render(withIntl(<AppFrame services={services} />));
+    await resolveCatalog(backend, []);
+
+    fireEvent.click(screen.getByRole("button", { name: zhMessages.sidebar.newSession }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "claude-sonnet-4 · anthropic" }),
+    );
+    fireEvent.click(screen.getByRole("option", { name: "deepseek" }));
+    fireEvent.click(await screen.findByRole("option", { name: "deepseek-chat" }));
+    await waitFor(() =>
+      expect(localStorage.getItem(SETTINGS_LS_KEY)).toContain("deepseek-chat"),
+    );
+
+    await act(async () => {
+      resolveAccounts([{ provider: accountProvider, label: "Night Owl" }]);
+      await flush();
+    });
+
+    expect(
+      await screen.findByRole("button", { name: "deepseek-chat · deepseek" }),
+    ).toBeDefined();
+    expect(
+      listProviderModels.mock.calls.some(([provider]) => provider === accountProvider),
+    ).toBe(false);
+  });
+
 });
 
 describe("AppFrame composer model chip", () => {
@@ -505,5 +640,297 @@ describe("AppFrame details lifecycle (02 §4)", () => {
     expect(details?.classList.contains("closed")).toBe(true);
     expect(details?.getAttribute("aria-hidden")).toBe("true");
     expect(detailsToggle().getAttribute("aria-expanded")).toBe("false");
+  });
+});
+
+describe("AppFrame draft sessions", () => {
+  it("New Session opens a local draft: live composer, no POST, no new row", async () => {
+    const { backend, services } = fakeServices();
+    const { container } = render(withIntl(<AppFrame services={services} />));
+    await resolveCatalog(backend, [
+      { session_id: "session-01", title: "Existing session" },
+    ]);
+
+    fireEvent.click(screen.getByRole("button", { name: zhMessages.sidebar.newSession }));
+
+    expect(backend.creates).toHaveLength(0);
+    expect(nav.pushes).toHaveLength(0);
+    // The composer is live immediately, bound to the local draft.
+    expect(
+      screen.getByRole("textbox", { name: zhMessages.composer.inputLabel }),
+    ).toBeDefined();
+    // No catalog row is added and no existing row stays selected.
+    expect(container.querySelectorAll(".session")).toHaveLength(1);
+    expect(container.querySelector(".session.sel")).toBeNull();
+  });
+
+  it("hides catalog rows without a title and never shows the session id", async () => {
+    const { backend, services } = fakeServices();
+    const { container } = render(withIntl(<AppFrame services={services} />));
+    await resolveCatalog(backend, [
+      { session_id: "session-01", title: "Existing session" },
+      { session_id: "9f8b7c6d-untitled-uuid", title: null },
+    ]);
+
+    const list = container.querySelector(".session-list");
+    expect(container.querySelectorAll(".session")).toHaveLength(1);
+    expect(list?.textContent).toContain("Existing session");
+    expect(list?.textContent).not.toContain("9f8b7c6d-untitled-uuid");
+  });
+
+  it("shows provider · model as the row meta instead of the session id", async () => {
+    const { backend, services } = fakeServices();
+    const { container } = render(withIntl(<AppFrame services={services} />));
+    await resolveCatalog(backend, [
+      {
+        session_id: "session-01",
+        title: "Existing session",
+        provider_name: "anthropic",
+        model_name: "claude-sonnet-4",
+      },
+    ]);
+
+    const row = container.querySelector(".session");
+    expect(row?.textContent).toContain("anthropic · claude-sonnet-4");
+    expect(row?.textContent).not.toContain("session-01");
+  });
+
+  it("keeps the first-send session visible and selected while the catalog omits it", async () => {
+    const { backend, services } = fakeServices();
+    const { container } = render(withIntl(<AppFrame services={services} />));
+    await resolveCatalog(backend, []);
+
+    fireEvent.click(screen.getByRole("button", { name: zhMessages.sidebar.newSession }));
+    fireEvent.change(screen.getByRole("textbox", { name: zhMessages.composer.inputLabel }), {
+      target: { value: "Refactor the shell" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: zhMessages.composer.send }));
+
+    // POST /sessions happens on the first send, not on New Session.
+    await waitUntil(() => backend.creates.length === 1, "first send to create the session");
+    await act(async () => {
+      backend.creates[0].resolve({ session_id: "session-09" });
+      await flush();
+    });
+    await act(async () => {
+      backend.lists.at(-1)?.resolve({
+        contract_version: "1.0.0",
+        sessions: [],
+      });
+      await flush();
+    });
+
+    // The flow navigates and selects the created session before prompting.
+    await waitUntil(
+      () => backend.snapshotCalls.length === 1,
+      "draft flow to select the created session",
+    );
+    expect(nav.pushes).toContain("/?session=session-09");
+    expect(backend.snapshotCalls[0].sessionId).toBe("session-09");
+
+    // Live GET /sessions omits the untitled session. Its local stand-in stays
+    // selected, and the conversation remains bound to the new controller state.
+    await waitFor(() =>
+      expect(container.querySelector(".session.sel")?.textContent).toContain(
+        "Refactor the shell",
+      ),
+    );
+    expect(container.querySelector(".session.sel")?.textContent).not.toContain("session-09");
+    expect(container.querySelector(".sessionbar-title")?.textContent).toBe(
+      "Refactor the shell",
+    );
+    expect(
+      screen.getByRole("textbox", { name: zhMessages.composer.inputLabel }),
+    ).toBeDefined();
+    expect(screen.getByText(zhMessages.timeline.loading)).toBeDefined();
+
+    // Once the snapshot lands, the prompt is sent.
+    await act(async () => {
+      backend.snapshots[0].resolve(makeSnapshot("session-09", []));
+      await flush();
+    });
+    await waitUntil(() => backend.promptCalls.length === 1, "draft flow to send the first prompt");
+    expect(backend.promptCalls[0].request.prompt).toBe("Refactor the shell");
+  });
+
+  it("does not send the first prompt after navigation selects another session", async () => {
+    nav.session = "session-original";
+    const { backend, controller, services } = fakeServices();
+    const selectSession = controller.selectSession.bind(controller);
+    const pendingFirstSelect = deferred<void>();
+    vi.spyOn(controller, "selectSession").mockImplementation((sessionId) =>
+      sessionId === "session-new" ? pendingFirstSelect.promise : selectSession(sessionId),
+    );
+    const { container, rerender } = render(withIntl(<AppFrame services={services} />));
+    const catalogSessions = [
+      { session_id: "session-original", title: "Original session" },
+      { session_id: "session-replacement", title: "Replacement session" },
+    ];
+    await resolveCatalog(backend, catalogSessions);
+    await resolveSnapshot(backend, "session-original");
+
+    fireEvent.click(screen.getByRole("button", { name: zhMessages.sidebar.newSession }));
+    fireEvent.change(screen.getByRole("textbox", { name: zhMessages.composer.inputLabel }), {
+      target: { value: "Stay with the new session" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: zhMessages.composer.send }));
+    await waitUntil(() => backend.creates.length === 1, "first send to create the session");
+    await act(async () => {
+      backend.creates[0].resolve({ session_id: "session-new" });
+      await flush();
+    });
+    await waitUntil(() => backend.lists.length === 2, "create to refresh the catalog");
+    await act(async () => {
+      backend.lists[1].resolve({ contract_version: "1.0.0", sessions: catalogSessions });
+      await flush();
+    });
+    await waitUntil(
+      () => nav.pushes.includes("/?session=session-new"),
+      "created session navigation",
+    );
+
+    nav.session = "session-new";
+    rerender(withIntl(<AppFrame services={services} />));
+    await act(async () => {
+      await flush();
+    });
+    nav.session = "session-replacement";
+    rerender(withIntl(<AppFrame services={services} />));
+    await waitUntil(
+      () => backend.snapshotCalls.at(-1)?.sessionId === "session-replacement",
+      "navigation to select the replacement session",
+    );
+    await resolveSnapshot(backend, "session-replacement");
+
+    await act(async () => {
+      pendingFirstSelect.resolve();
+      await flush();
+    });
+    await waitUntil(
+      () => backend.closedSessionIds.length === 1,
+      "misrouted first send to close its untitled session",
+    );
+
+    expect(controller.getState().sessionId).toBe("session-replacement");
+    expect(backend.promptCalls).toHaveLength(0);
+    expect(backend.closedSessionIds).toEqual(["session-new"]);
+    expect(container.querySelector(".session-list")?.textContent).not.toContain(
+      "Stay with the new session",
+    );
+  });
+
+  it("returns to the original catalog session from a pending first-send URL", async () => {
+    nav.session = "session-original";
+    const { backend, services } = fakeServices();
+    const { container, rerender } = render(withIntl(<AppFrame services={services} />));
+    const catalogSessions = [{ session_id: "session-original", title: "Original session" }];
+    await resolveCatalog(backend, catalogSessions);
+    await resolveSnapshot(backend, "session-original");
+
+    fireEvent.click(screen.getByRole("button", { name: zhMessages.sidebar.newSession }));
+    fireEvent.change(screen.getByRole("textbox", { name: zhMessages.composer.inputLabel }), {
+      target: { value: "Pending first prompt" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: zhMessages.composer.send }));
+    await waitUntil(() => backend.creates.length === 1, "first send to create the session");
+    await act(async () => {
+      backend.creates[0].resolve({ session_id: "session-new" });
+      await flush();
+    });
+    await waitUntil(() => backend.lists.length === 2, "create to refresh the catalog");
+    await act(async () => {
+      backend.lists[1].resolve({ contract_version: "1.0.0", sessions: catalogSessions });
+      await flush();
+    });
+    await waitUntil(
+      () => nav.pushes.includes("/?session=session-new"),
+      "created session navigation",
+    );
+    await resolveSnapshot(backend, "session-new");
+    await waitUntil(
+      () => backend.promptCalls.length === 1,
+      "first prompt to start before browser Back",
+    );
+
+    nav.session = "session-new";
+    rerender(withIntl(<AppFrame services={services} />));
+    await waitFor(() =>
+      expect(container.querySelector(".session.sel")?.textContent).toContain(
+        "Pending first prompt",
+      ),
+    );
+    nav.session = null;
+    rerender(withIntl(<AppFrame services={services} />));
+    await waitUntil(() => backend.lists.length === 3, "aborted first send to refresh the catalog");
+    await act(async () => {
+      backend.lists[2].resolve({ contract_version: "1.0.0", sessions: catalogSessions });
+      await flush();
+    });
+
+    await waitFor(() =>
+      expect(container.querySelector(".session.sel")?.textContent).toContain("Original session"),
+    );
+    expect(container.querySelectorAll(".session")).toHaveLength(2);
+    expect(container.querySelector(".session-list")?.textContent).toContain(
+      "Pending first prompt",
+    );
+  });
+
+  it("closes the created session when cancel happens during create", async () => {
+    const { backend, services } = fakeServices();
+    render(withIntl(<AppFrame services={services} />));
+    await resolveCatalog(backend, []);
+
+    fireEvent.click(screen.getByRole("button", { name: zhMessages.sidebar.newSession }));
+    fireEvent.change(screen.getByRole("textbox", { name: zhMessages.composer.inputLabel }), {
+      target: { value: "Cancel this create" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: zhMessages.composer.send }));
+    await waitUntil(() => backend.creates.length === 1, "first send to create the session");
+    fireEvent.click(screen.getByRole("button", { name: zhMessages.composer.cancel }));
+
+    await act(async () => {
+      backend.creates[0].resolve({ session_id: "session-cancelled" });
+      await flush();
+    });
+    await waitUntil(() => backend.lists.length === 2, "create to refresh the catalog");
+    await act(async () => {
+      backend.lists[1].resolve({ contract_version: "1.0.0", sessions: [] });
+      await flush();
+    });
+
+    await waitUntil(
+      () => backend.closedSessionIds.length === 1,
+      "cancelled create to close its session",
+    );
+    expect(backend.closedSessionIds).toEqual(["session-cancelled"]);
+    expect(backend.promptCalls).toHaveLength(0);
+  });
+
+  it("keeps the draft when session creation fails", async () => {
+    const { backend, services } = fakeServices();
+    render(withIntl(<AppFrame services={services} />));
+    await resolveCatalog(backend, []);
+
+    fireEvent.click(screen.getByRole("button", { name: zhMessages.sidebar.newSession }));
+    fireEvent.change(screen.getByRole("textbox", { name: zhMessages.composer.inputLabel }), {
+      target: { value: "Refactor the shell" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: zhMessages.composer.send }));
+    await waitUntil(() => backend.creates.length === 1, "first send to create the session");
+    await act(async () => {
+      backend.creates[0].reject(new Error("provider unavailable"));
+      await flush();
+    });
+
+    await waitFor(() =>
+      expect(screen.getByRole("alert").textContent).toContain("provider unavailable"),
+    );
+    expect(backend.lists).toHaveLength(1);
+    // The draft survives the failure so the user can retry.
+    expect(
+      (screen.getByRole("textbox", { name: zhMessages.composer.inputLabel }) as HTMLTextAreaElement)
+        .value,
+    ).toBe("Refactor the shell");
   });
 });
