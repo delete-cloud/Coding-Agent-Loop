@@ -21,3 +21,10 @@ webui/app/tsconfig.tsbuildinfo
 webui/app/.vite/
 webui/app/.vitest/
 webui/app/coverage/
+
+# Next.js generated/local artifacts
+webui/app-next/node_modules/
+webui/app-next/.next/
+webui/app-next/out/
+webui/app-next/coverage/
+webui/app-next/*.tsbuildinfo

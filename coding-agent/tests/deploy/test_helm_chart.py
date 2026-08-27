@@ -1138,15 +1138,43 @@ def test_runtime_image_builds_and_copies_webui_dist() -> None:
     assert "FROM ${NODE_BASE_IMAGE} AS webui" in dockerfile
     assert "ARG PNPM_VERSION=" in dockerfile
     assert 'corepack prepare "pnpm@${PNPM_VERSION}" --activate' in dockerfile
-    assert "WORKDIR /webui/app" in dockerfile
+    assert "WORKDIR /webui/app-next" in dockerfile
     assert (
-        "COPY webui/app/package.json webui/app/pnpm-lock.yaml webui/app/pnpm-workspace.yaml"
+        "COPY webui/app-next/package.json webui/app-next/pnpm-lock.yaml "
+        "webui/app-next/pnpm-workspace.yaml"
         in dockerfile
     )
+    assert "COPY webui/app-next ./" in dockerfile
     assert "pnpm install --frozen-lockfile" in dockerfile
     assert "pnpm build" in dockerfile
     assert (
-        "COPY --chown=coding-agent:coding-agent --from=webui /webui/app/dist /app/webui-dist"
+        "COPY --chown=coding-agent:coding-agent --from=webui "
+        "/webui/app-next/out /app/webui-dist"
         in dockerfile
     )
+    assert "/webui/app/dist" not in dockerfile
     assert 'WEBUI_DIST_DIR="/app/webui-dist"' in dockerfile
+
+
+def test_dockerignore_excludes_app_next_generated_artifacts() -> None:
+    exclusions = {
+        line.strip()
+        for line in (ROOT / ".dockerignore").read_text().splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+
+    assert {
+        "webui/app-next/node_modules/",
+        "webui/app-next/.next/",
+        "webui/app-next/out/",
+        "webui/app-next/coverage/",
+        "webui/app-next/*.tsbuildinfo",
+    } <= exclusions
+    assert {
+        "webui/app/node_modules/",
+        "webui/app/dist/",
+        "webui/app/tsconfig.tsbuildinfo",
+        "webui/app/.vite/",
+        "webui/app/.vitest/",
+        "webui/app/coverage/",
+    } <= exclusions
