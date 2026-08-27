@@ -307,15 +307,15 @@ class SessionManager(
             finally:
                 await follow.aclose()
                 if owns_task and task is not None:
+                    from coding_agent.events.connected_chat import (
+                        RootRunAlreadySettledError,
+                    )
+                    from coding_agent.server.stores.session_owner_store import (
+                        SessionOwnershipConflictError,
+                    )
+
                     try:
                         if not task.done() and not saw_terminal:
-                            from coding_agent.events.connected_chat import (
-                                RootRunAlreadySettledError,
-                            )
-                            from coding_agent.server.stores.session_owner_store import (
-                                SessionOwnershipConflictError,
-                            )
-
                             try:
                                 settlement = asyncio.create_task(
                                     self.settle_root_run(
@@ -330,13 +330,15 @@ class SessionManager(
                                 SessionOwnershipConflictError,
                             ):
                                 pass
+                    finally:
                         if not task.done():
                             task.cancel()
                         try:
                             await task
                         except asyncio.CancelledError:
                             pass
-                    finally:
+                        except RootRunAlreadySettledError:
+                            pass
                         self._chat_run_tasks.pop(admission.run_id, None)
                         runs = self._chat_runs_by_session.get(session_id)
                         if runs is not None:

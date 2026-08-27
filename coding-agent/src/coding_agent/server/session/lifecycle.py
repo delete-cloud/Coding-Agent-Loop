@@ -360,6 +360,8 @@ class LifecycleOps:
             await self._persist_session_async(session)
 
     async def _stop_connected_chat_tasks(self, session_id: str) -> None:
+        from coding_agent.events.connected_chat import RootRunAlreadySettledError
+
         run_ids = list(self._chat_runs_by_session.get(session_id, ()))
         for run_id in run_ids:
             task = self._chat_run_tasks.pop(run_id, None)
@@ -369,6 +371,8 @@ class LifecycleOps:
             try:
                 await task
             except asyncio.CancelledError:
+                pass
+            except RootRunAlreadySettledError:
                 pass
         self._chat_runs_by_session.pop(session_id, None)
 

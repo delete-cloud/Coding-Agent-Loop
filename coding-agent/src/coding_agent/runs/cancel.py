@@ -82,6 +82,15 @@ class RuntimeCancelOrchestrationService:
             await self.persist_session(session)
             return result
         if task is None or task.done():
+            if session.turn_in_progress and session.current_turn_id is not None:
+                result = await service.cancel_attached_executor_turn(session)
+                await self.persist_session(session)
+                if result.status == "cancelled":
+                    return RuntimeCancelResult(
+                        turn_id=result.turn_id,
+                        status="cancelling",
+                    )
+                return result
             result = service.cancel_idle_or_finished_local_turn(session)
             await self.persist_session(session)
             return result
