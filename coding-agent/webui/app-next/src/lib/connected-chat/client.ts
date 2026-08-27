@@ -233,6 +233,15 @@ export class ConnectedChatClient {
     return parseSessionCreated(await response.json());
   }
 
+  async closeSession(sessionId: string, signal?: AbortSignal): Promise<void> {
+    const response = await this.fetchImpl(this.sessionPath(sessionId, ""), {
+      method: "DELETE",
+      headers: { accept: "application/json" },
+      signal: signal ?? null,
+    });
+    if (!response.ok) await this.parseErrorResponse(response);
+  }
+
   async updateRuntimeConfig(
     sessionId: string,
     patch: RuntimeConfigPatch,

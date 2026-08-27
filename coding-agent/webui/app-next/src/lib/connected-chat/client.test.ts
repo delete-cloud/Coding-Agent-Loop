@@ -187,6 +187,20 @@ describe("ConnectedChatClient.createSession", () => {
   });
 });
 
+describe("ConnectedChatClient.closeSession", () => {
+  it("DELETEs the encoded session path", async () => {
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 204 }));
+    const client = clientWith(fetchImpl as unknown as typeof fetch);
+
+    await client.closeSession("session/with spaces");
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      `${BASE}/sessions/session%2Fwith%20spaces`,
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
+});
+
 describe("ConnectedChatClient.updateRuntimeConfig", () => {
   it("PATCHes /sessions/{id}/runtime-config and never treats api_key as a response field", async () => {
     const fetchImpl = vi.fn(async () =>

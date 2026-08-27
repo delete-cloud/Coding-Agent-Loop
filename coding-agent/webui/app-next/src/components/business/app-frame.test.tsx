@@ -9,7 +9,13 @@ import {
   resolveSnapshot,
   withIntl,
 } from "../../../test/helpers/app-frame";
-import { flush, makeSnapshot, waitUntil, FakeBackend } from "../../../test/helpers/connected-chat-fake";
+import {
+  deferred,
+  flush,
+  makeSnapshot,
+  waitUntil,
+  FakeBackend,
+} from "../../../test/helpers/connected-chat-fake";
 import { AppFrame, AppFrameView } from "@/components/business/app-frame";
 import type { RuntimeConfigPatch } from "@/lib/connected-chat/client";
 import { ChatApiError } from "@/lib/connected-chat/client";
@@ -745,6 +751,160 @@ describe("AppFrame draft sessions", () => {
     });
     await waitUntil(() => backend.promptCalls.length === 1, "draft flow to send the first prompt");
     expect(backend.promptCalls[0].request.prompt).toBe("Refactor the shell");
+  });
+
+  it("does not send the first prompt after navigation selects another session", async () => {
+    nav.session = "session-original";
+    const { backend, controller, services } = fakeServices();
+    const selectSession = controller.selectSession.bind(controller);
+    const pendingFirstSelect = deferred<void>();
+    vi.spyOn(controller, "selectSession").mockImplementation((sessionId) =>
+      sessionId === "session-new" ? pendingFirstSelect.promise : selectSession(sessionId),
+    );
+    const { container, rerender } = render(withIntl(<AppFrame services={services} />));
+    const catalogSessions = [
+      { session_id: "session-original", title: "Original session" },
+      { session_id: "session-replacement", title: "Replacement session" },
+    ];
+    await resolveCatalog(backend, catalogSessions);
+    await resolveSnapshot(backend, "session-original");
+
+    fireEvent.click(screen.getByRole("button", { name: zhMessages.sidebar.newSession }));
+    fireEvent.change(screen.getByRole("textbox", { name: zhMessages.composer.inputLabel }), {
+      target: { value: "Stay with the new session" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: zhMessages.composer.send }));
+    await waitUntil(() => backend.creates.length === 1, "first send to create the session");
+    await act(async () => {
+      backend.creates[0].resolve({ session_id: "session-new" });
+      await flush();
+    });
+    await waitUntil(() => backend.lists.length === 2, "create to refresh the catalog");
+    await act(async () => {
+      backend.lists[1].resolve({ contract_version: "1.0.0", sessions: catalogSessions });
+      await flush();
+    });
+    await waitUntil(
+      () => nav.pushes.includes("/?session=session-new"),
+      "created session navigation",
+    );
+
+    nav.session = "session-new";
+    rerender(withIntl(<AppFrame services={services} />));
+    await act(async () => {
+      await flush();
+    });
+    nav.session = "session-replacement";
+    rerender(withIntl(<AppFrame services={services} />));
+    await waitUntil(
+      () => backend.snapshotCalls.at(-1)?.sessionId === "session-replacement",
+      "navigation to select the replacement session",
+    );
+    await resolveSnapshot(backend, "session-replacement");
+
+    await act(async () => {
+      pendingFirstSelect.resolve();
+      await flush();
+    });
+    await waitUntil(
+      () => backend.closedSessionIds.length === 1,
+      "misrouted first send to close its untitled session",
+    );
+
+    expect(controller.getState().sessionId).toBe("session-replacement");
+    expect(backend.promptCalls).toHaveLength(0);
+    expect(backend.closedSessionIds).toEqual(["session-new"]);
+    expect(container.querySelector(".session-list")?.textContent).not.toContain(
+      "Stay with the new session",
+    );
+  });
+
+  it("returns to the original catalog session from a pending first-send URL", async () => {
+    nav.session = "session-original";
+    const { backend, services } = fakeServices();
+    const { container, rerender } = render(withIntl(<AppFrame services={services} />));
+    const catalogSessions = [{ session_id: "session-original", title: "Original session" }];
+    await resolveCatalog(backend, catalogSessions);
+    await resolveSnapshot(backend, "session-original");
+
+    fireEvent.click(screen.getByRole("button", { name: zhMessages.sidebar.newSession }));
+    fireEvent.change(screen.getByRole("textbox", { name: zhMessages.composer.inputLabel }), {
+      target: { value: "Pending first prompt" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: zhMessages.composer.send }));
+    await waitUntil(() => backend.creates.length === 1, "first send to create the session");
+    await act(async () => {
+      backend.creates[0].resolve({ session_id: "session-new" });
+      await flush();
+    });
+    await waitUntil(() => backend.lists.length === 2, "create to refresh the catalog");
+    await act(async () => {
+      backend.lists[1].resolve({ contract_version: "1.0.0", sessions: catalogSessions });
+      await flush();
+    });
+    await waitUntil(
+      () => nav.pushes.includes("/?session=session-new"),
+      "created session navigation",
+    );
+    await resolveSnapshot(backend, "session-new");
+    await waitUntil(
+      () => backend.promptCalls.length === 1,
+      "first prompt to start before browser Back",
+    );
+
+    nav.session = "session-new";
+    rerender(withIntl(<AppFrame services={services} />));
+    await waitFor(() =>
+      expect(container.querySelector(".session.sel")?.textContent).toContain(
+        "Pending first prompt",
+      ),
+    );
+    nav.session = null;
+    rerender(withIntl(<AppFrame services={services} />));
+    await waitUntil(() => backend.lists.length === 3, "aborted first send to refresh the catalog");
+    await act(async () => {
+      backend.lists[2].resolve({ contract_version: "1.0.0", sessions: catalogSessions });
+      await flush();
+    });
+
+    await waitFor(() =>
+      expect(container.querySelector(".session.sel")?.textContent).toContain("Original session"),
+    );
+    expect(container.querySelectorAll(".session")).toHaveLength(2);
+    expect(container.querySelector(".session-list")?.textContent).toContain(
+      "Pending first prompt",
+    );
+  });
+
+  it("closes the created session when cancel happens during create", async () => {
+    const { backend, services } = fakeServices();
+    render(withIntl(<AppFrame services={services} />));
+    await resolveCatalog(backend, []);
+
+    fireEvent.click(screen.getByRole("button", { name: zhMessages.sidebar.newSession }));
+    fireEvent.change(screen.getByRole("textbox", { name: zhMessages.composer.inputLabel }), {
+      target: { value: "Cancel this create" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: zhMessages.composer.send }));
+    await waitUntil(() => backend.creates.length === 1, "first send to create the session");
+    fireEvent.click(screen.getByRole("button", { name: zhMessages.composer.cancel }));
+
+    await act(async () => {
+      backend.creates[0].resolve({ session_id: "session-cancelled" });
+      await flush();
+    });
+    await waitUntil(() => backend.lists.length === 2, "create to refresh the catalog");
+    await act(async () => {
+      backend.lists[1].resolve({ contract_version: "1.0.0", sessions: [] });
+      await flush();
+    });
+
+    await waitUntil(
+      () => backend.closedSessionIds.length === 1,
+      "cancelled create to close its session",
+    );
+    expect(backend.closedSessionIds).toEqual(["session-cancelled"]);
+    expect(backend.promptCalls).toHaveLength(0);
   });
 
   it("keeps the draft when session creation fails", async () => {

@@ -1,7 +1,7 @@
 // Test-only fake implementing every client seam the connected-chat React
 // adapter consumes: the controller stream/REST surface plus the session
-// catalog surface (list/create). All responses are controllable deferreds and
-// streams so tests decide exactly when the "server" answers.
+// catalog surface (list/create/close). All responses are controllable deferreds
+// and streams so tests decide exactly when the "server" answers.
 
 import type {
   ChatStreamItem,
@@ -133,6 +133,7 @@ export class FakeBackend {
   cancels: Array<ReturnType<typeof deferred<CancelAck>>> = [];
   lists: Array<ReturnType<typeof deferred<ChatSessionList>>> = [];
   creates: Array<ReturnType<typeof deferred<SessionCreated>>> = [];
+  closedSessionIds: string[] = [];
   followCalls: Array<{ sessionId: string; cursor: string }> = [];
   promptCalls: Array<{ sessionId: string; request: PromptRequest }> = [];
   resumeCalls: Array<{ sessionId: string; request: ResumeRequest }> = [];
@@ -188,6 +189,11 @@ export class FakeBackend {
     const value = abortableDeferred<SessionCreated>(signal);
     this.creates.push(value);
     return value.promise;
+  }
+
+  closeSession(sessionId: string) {
+    this.closedSessionIds.push(sessionId);
+    return Promise.resolve();
   }
 }
 

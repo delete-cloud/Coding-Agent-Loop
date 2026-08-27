@@ -148,6 +148,7 @@ export function healthForStatus(status: ConnectedChatStatus | null): RailHealth 
 export interface SessionCatalogClient {
   listSessions(signal?: AbortSignal): Promise<ChatSessionList>;
   createSession(request: CreateSessionRequest, signal?: AbortSignal): Promise<SessionCreated>;
+  closeSession(sessionId: string, signal?: AbortSignal): Promise<void>;
 }
 
 export interface ConnectedChatServices {

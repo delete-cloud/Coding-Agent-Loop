@@ -141,10 +141,10 @@ export function AppFrame({ services }: AppFrameProps) {
  *    session creation navigate, browser back/forward lands here as a search
  *    param change, and an effect forwards the normalized id to the controller
  *    (stale generations are owned and discarded by the controller itself);
- *  - a newly created session is selected locally during the router/catalog
- *    gap, then yields to URL-led selection once its titled summary arrives;
- *  - normalization: a valid catalog id wins, otherwise the first session; no
- *    catalog or pending sessions → no selection (empty states, inert composer);
+ *  - a newly created session is selected locally during the router gap, then
+ *    remains visible until its titled catalog summary arrives;
+ *  - normalization: a valid URL id wins, otherwise the first titled catalog
+ *    session; pending rows never become an absent-query fallback;
  *  - no services (static prerender) renders a safe loading shell: sidebar and
  *    timeline loading notes, static composer, neutral rail dot.
  *
@@ -193,15 +193,31 @@ export function AppFrameView() {
     return [...omittedRows, ...catalogRows];
   }, [catalog.sessions, pendingSessions]);
 
+  const defaultCatalogSelection = useMemo(() => {
+    for (const summary of catalog.sessions) {
+      const item = toSidebarSession(summary);
+      if (item !== null) return item;
+    }
+    return null;
+  }, [catalog.sessions]);
+
   // The local first-send id wins only until the router applies its pushed URL.
   // The pending row itself can outlive that optimistic selection.
   const selection = useMemo(() => {
     if (sessions.length === 0) return null;
     if (pendingSelectionId !== null && pendingSessions[pendingSelectionId] !== undefined) {
-      return sessions.find((session) => session.id === pendingSelectionId) ?? sessions[0];
+      return sessions.find((session) => session.id === pendingSelectionId) ?? null;
     }
-    return sessions.find((session) => session.id === sessionParam) ?? sessions[0];
-  }, [pendingSelectionId, pendingSessions, sessions, sessionParam]);
+    return (
+      sessions.find((session) => session.id === sessionParam) ?? defaultCatalogSelection
+    );
+  }, [
+    defaultCatalogSelection,
+    pendingSelectionId,
+    pendingSessions,
+    sessions,
+    sessionParam,
+  ]);
   const selectedId = selection === null ? null : selection.id;
 
   useEffect(() => {
@@ -423,26 +439,48 @@ export function AppFrameView() {
     void (async () => {
       try {
         const id = await catalog.createSession(request);
-        if (generation !== draftGenerationRef.current) return;
+        const pendingSession = {
+          id,
+          title: prompt.trim().split("\n")[0] ?? "",
+          meta: formatProviderModel(request.provider, request.model),
+        };
+        const closeAbandonedSession = async () => {
+          try {
+            await services.catalog.closeSession(id);
+            setPendingSessions((previous) => {
+              if (previous[id] === undefined) return previous;
+              const remaining = { ...previous };
+              delete remaining[id];
+              return remaining;
+            });
+            catalog.refresh();
+          } catch (error) {
+            setPendingSessions((previous) => ({ ...previous, [id]: pendingSession }));
+            setCreateError(errorMessageOf(error));
+          }
+        };
+        if (generation !== draftGenerationRef.current) {
+          await closeAbandonedSession();
+          return;
+        }
         setRuntimeOverlay({
           sessionId: id,
           provider: request.provider,
           model: request.model,
           baseUrl: request.base_url ?? "",
         });
-        setPendingSessions((previous) => ({
-          ...previous,
-          [id]: {
-            id,
-            title: prompt.trim().split("\n")[0] ?? "",
-            meta: formatProviderModel(request.provider, request.model),
-          },
-        }));
+        setPendingSessions((previous) => ({ ...previous, [id]: pendingSession }));
         setDraftActive(false);
         setDraftPrompt("");
         navigateToSession(id, true);
         await services.controller.selectSession(id);
-        if (generation !== draftGenerationRef.current) return;
+        if (
+          generation !== draftGenerationRef.current ||
+          services.controller.getState().sessionId !== id
+        ) {
+          await closeAbandonedSession();
+          return;
+        }
         await services.controller.send(prompt, crypto.randomUUID());
         if (generation !== draftGenerationRef.current) return;
         catalog.refresh();
