@@ -1699,7 +1699,11 @@ async def test_resume_session_creates_new_run_linked_to_interrupted_run(
 
         async def run_turn(self, prompt: str) -> TurnOutcome:
             observed_prompt.append(prompt)
-            return TurnOutcome(stop_reason=StopReason.NO_TOOL_CALLS)
+            return TurnOutcome(
+                stop_reason=StopReason.NO_TOOL_CALLS,
+                final_message="resume complete",
+                steps_taken=1,
+            )
 
     fake_pipeline = types.SimpleNamespace(
         _registry=types.SimpleNamespace(

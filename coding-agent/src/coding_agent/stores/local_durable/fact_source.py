@@ -4,6 +4,14 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import UTC, datetime
+from coding_agent.events.connected_chat import (
+    CHAT_EVENT_KINDS,
+    CONNECTED_CHAT_PROJECTION,
+    ChatSnapshot,
+    ConnectedChatCursor,
+    encode_chat_cursor,
+    project_chat_event,
+)
 from coding_agent.stores.runtime_store import (
     CursorEpochMismatchError,
     DEFAULT_HARNESS_PROJECTION,
@@ -16,6 +24,7 @@ from coding_agent.stores.runtime_store import (
     RetentionFloorReplay,
     SessionFactSourceState,
     TrustedHandoff,
+    _agent_run_from_sqlite_row,
     _json_object_from_sql,
     _json_to_sql,
     _sqlite_optional_str,
@@ -241,6 +250,117 @@ class LocalFactSourceMixin:
                 (cursor.session_id, after, epoch, limit),
             ).fetchall()
         return [_event_record_from_sqlite_row(row) for row in rows]
+
+    async def snapshot_chat_events(
+        self,
+        session_id: str,
+        cursor: ConnectedChatCursor | None,
+        limit: int,
+    ) -> ChatSnapshot:
+        _require_non_empty("session_id", session_id)
+        _require_positive_int("limit", limit)
+        with self._lock, self._connect() as connection:
+            fact = self._ensure_fact_source(connection, session_id)
+            state = fact.state
+            if cursor is None:
+                after = max(0, fact.retention_floor_int - 1)
+                high_water = fact.session_seq_int
+            else:
+                from coding_agent.events.connected_chat import decode_chat_cursor
+
+                cursor = decode_chat_cursor(
+                    encode_chat_cursor(cursor),
+                    expected_session_id=session_id,
+                    fact_state=state,
+                )
+                after = parse_u64(cursor.after_seq, field_name="after_seq")
+                high_water = parse_u64(
+                    cursor.high_water_seq, field_name="high_water_seq"
+                )
+            events = []
+            scanned_after = after
+            scanned_rows = 0
+            max_scan = max(1024, limit * 64)
+            chunk_size = max(16, min(256, limit * 2))
+            kind_placeholders = ",".join("?" * len(CHAT_EVENT_KINDS))
+            while (
+                scanned_after < high_water
+                and len(events) < limit
+                and scanned_rows < max_scan
+            ):
+                rows = connection.execute(
+                    f"""
+                    SELECT event.*, run.*
+                    FROM session_event_records AS event
+                    LEFT JOIN agent_runs AS run
+                      ON run.run_id = json_extract(event.payload, '$.run_id')
+                     AND run.session_id = event.session_id
+                    WHERE event.session_id = ?
+                      AND event.session_seq > ?
+                      AND event.session_seq <= ?
+                      AND event.event_kind IN ({kind_placeholders})
+                    ORDER BY event.session_seq
+                    LIMIT ?
+                    """,
+                    (
+                        session_id,
+                        scanned_after,
+                        high_water,
+                        *CHAT_EVENT_KINDS,
+                        chunk_size,
+                    ),
+                ).fetchall()
+                if not rows:
+                    scanned_after = high_water
+                    break
+                scanned_rows += len(rows)
+                for row in rows:
+                    record = _event_record_from_sqlite_row(row)
+                    if record.session_seq is None:
+                        raise ValueError("stored event must include session_seq")
+                    scanned_after = parse_u64(
+                        record.session_seq, field_name="session_seq"
+                    )
+                    run = (
+                        None
+                        if row["run_id"] is None
+                        else _agent_run_from_sqlite_row(row)
+                    )
+                    projected = project_chat_event(record, run)
+                    if projected is not None:
+                        events.append(projected)
+                    if len(events) == limit:
+                        break
+        snapshot_cursor = ConnectedChatCursor(
+            v=1,
+            kind="chat",
+            session_id=session_id,
+            projection=CONNECTED_CHAT_PROJECTION,
+            epoch=state.projection_epoch,
+            after_seq=str(max(0, fact.retention_floor_int - 1)),
+            high_water_seq=str(high_water),
+        )
+        next_cursor = None
+        if scanned_after < high_water:
+            next_cursor = encode_chat_cursor(
+                ConnectedChatCursor(
+                    v=1,
+                    kind="chat",
+                    session_id=session_id,
+                    projection=CONNECTED_CHAT_PROJECTION,
+                    epoch=state.projection_epoch,
+                    after_seq=str(scanned_after),
+                    high_water_seq=str(high_water),
+                )
+            )
+        return ChatSnapshot(
+            session_id=session_id,
+            projection=CONNECTED_CHAT_PROJECTION,
+            projection_epoch=state.projection_epoch,
+            snapshot_cursor=encode_chat_cursor(snapshot_cursor),
+            next_cursor=next_cursor,
+            events=tuple(events),
+        )
 
     async def raise_retention_floor(
         self,

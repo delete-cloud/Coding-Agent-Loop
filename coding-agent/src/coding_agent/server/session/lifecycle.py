@@ -119,6 +119,7 @@ class LifecycleOps:
         provider_name: str | None = None,
         model_name: str | None = None,
         base_url: str | None = None,
+        api_key: str | None = None,
         max_steps: int = 30,
         enable_parallel: bool = True,
         max_parallel: int = 5,
@@ -135,6 +136,7 @@ class LifecycleOps:
             provider_name: Restart-safe provider identifier for later rehydration
             model_name: Restart-safe model identifier for later rehydration
             base_url: Restart-safe provider base URL for later rehydration
+            api_key: Process-local provider API key; never persisted
             max_steps: Maximum steps per turn
             enable_parallel: Enable parallel tool execution
             max_parallel: Maximum number of parallel tool executions
@@ -167,6 +169,12 @@ class LifecycleOps:
         resolved_additional_directories = _session_additional_directories_from_store(
             additional_directories or []
         )
+        resolved_api_key = (
+            None
+            if provider_name == "codex"
+            or (provider_name is not None and provider_name.startswith("codex:"))
+            else api_key or None
+        )
 
         session = Session(
             id=session_id,
@@ -181,6 +189,7 @@ class LifecycleOps:
             provider_name=provider_name,
             model_name=model_name,
             base_url=base_url,
+            api_key=resolved_api_key,
             max_steps=max_steps,
             mcp_servers=resolved_mcp_servers,
             additional_directories=resolved_additional_directories,
@@ -192,6 +201,9 @@ class LifecycleOps:
                 await self._acquire_owner_for_session(session_id)
                 await self._persist_session_async(session)
                 await self._persist_workspace_record_for_session(session)
+                store = self._authoritative_store()
+                if store is not None:
+                    await store.snapshot_chat_events(session_id, None, 1)
             except BaseException:
                 await self._rollback_partially_created_session(session_id)
                 raise
@@ -288,6 +300,7 @@ class LifecycleOps:
             await self._assert_owner(session_id)
             session = await self.get_session_async(session_id)
 
+            await self._stop_connected_chat_tasks(session_id)
             await self._runtime_control_services.task_stopper().stop(
                 session_id=session_id,
                 task=session.task,
@@ -312,22 +325,56 @@ class LifecycleOps:
                 if interrupt_active_turn
                 and session.current_turn_id is not None
                 and session.turn_in_progress
-                and session.task is not None
-                and not session.task.done()
                 else None
             )
 
+            if interrupted_run_id is not None and self.can_settle_root_run_authoritatively():
+                from coding_agent.events.connected_chat import (
+                    RootRunAlreadySettledError,
+                )
+
+                try:
+                    await self.settle_root_run(
+                        session_id,
+                        run_id=interrupted_run_id,
+                        outcome="interrupted",
+                        error=GRACEFUL_SHUTDOWN_INTERRUPTED_RUN_ERROR,
+                    )
+                except RootRunAlreadySettledError:
+                    pass
+
+            await self._stop_connected_chat_tasks(session_id)
             await self._runtime_control_services.task_stopper().stop(
                 session_id=session_id,
                 task=session.task,
             )
-            if interrupted_run_id is not None:
+            if (
+                interrupted_run_id is not None
+                and not self.can_settle_root_run_authoritatively()
+            ):
                 await self._mark_graceful_shutdown_interrupted_run(interrupted_run_id)
 
             await self._runtime_closer.close(session)
             session.task = None
             session.turn_in_progress = False
             await self._persist_session_async(session)
+
+    async def _stop_connected_chat_tasks(self, session_id: str) -> None:
+        from coding_agent.events.connected_chat import RootRunAlreadySettledError
+
+        run_ids = list(self._chat_runs_by_session.get(session_id, ()))
+        for run_id in run_ids:
+            task = self._chat_run_tasks.pop(run_id, None)
+            if task is None or task.done():
+                continue
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except RootRunAlreadySettledError:
+                pass
+        self._chat_runs_by_session.pop(session_id, None)
 
     async def _mark_graceful_shutdown_interrupted_run(self, run_id: str) -> None:
         store = self._runtime_store
@@ -338,7 +385,6 @@ class LifecycleOps:
             return
         if run.status not in GRACEFUL_SHUTDOWN_INTERRUPTABLE_RUN_STATUSES:
             return
-
         interrupted_at = datetime.now(UTC)
         metadata = dict(run.metadata)
         metadata["reclaimable"] = True

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 import asyncio
 from collections.abc import Callable
 from datetime import (
@@ -13,9 +14,14 @@ from typing import (
     Any,
     cast,
 )
+from coding_agent.events.connected_chat import (
+    ChatCommandAdmission,
+    RootRunAlreadySettledError,
+)
 from coding_agent.stores.durable_local import SQLiteLocalDurableStore
 from coding_agent.stores.durable_pg import PGDurableStore
 from coding_agent.stores.runtime_store import (
+    AuthoritativeCommit,
     AuthoritativeUnitOfWork,
     EffectLedgerSlot,
     EventRecord,
@@ -73,6 +79,227 @@ class PersistOps:
 
     def _approval_effect_id(self, session_id: str, request_id: str) -> str:
         return f"{session_id}:approval:{request_id}"
+
+    async def admit_chat_command(
+        self,
+        session_id: str,
+        *,
+        prompt: str,
+        command_id: str,
+        parent_run_id: str | None = None,
+    ) -> ChatCommandAdmission:
+        session = await self.get_session_async(session_id)
+        store = self._authoritative_store()
+        if store is None:
+            raise RuntimeError("durable authoritative store is not configured")
+        authority = self._owner_authorities.get(session_id)
+        if authority is None:
+            raise SessionOwnershipConflictError(
+                "chat admission requires owner authority"
+            )
+        if session.tape_id is None:
+            await self.ensure_session_runtime(session_id)
+            session = await self.get_session_async(session_id)
+        admission = await store.admit_chat_command(
+            authority,
+            prompt=prompt,
+            command_id=command_id,
+            parent_run_id=parent_run_id,
+            session_state=cast(JSONObject, session.to_store_data()),
+        )
+        if not admission.idempotent:
+            session.current_turn_id = admission.run_id
+            session.turn_in_progress = True
+            self._session_cache[session_id] = session
+            await self._publish_admitted_chat_command(session_id, admission)
+        return admission
+
+    async def _publish_admitted_chat_command(
+        self, session_id: str, admission: ChatCommandAdmission
+    ) -> None:
+        from coding_agent.events.connected_chat import (
+            CONNECTED_CHAT_PROJECTION,
+            ConnectedChatCursor,
+        )
+
+        store = self._authoritative_store()
+        if store is None or admission.session_seq is None:
+            return
+        after_seq = str(int(admission.session_seq) - 1)
+        fact = await store.load_session_fact_source(session_id)
+        if fact is None:
+            return
+        snapshot = await store.snapshot_chat_events(
+            session_id,
+            ConnectedChatCursor(
+                v=1,
+                kind="chat",
+                session_id=session_id,
+                projection=CONNECTED_CHAT_PROJECTION,
+                epoch=fact.projection_epoch,
+                after_seq=after_seq,
+                high_water_seq=admission.session_seq,
+            ),
+            1,
+        )
+        if not snapshot.events:
+            return
+        event = snapshot.events[0]
+        for subscriber in tuple(self._chat_subscribers.get(event.session_id, ())):
+            subscriber.publish(event)
+
+    def can_settle_root_run_authoritatively(self) -> bool:
+        return self._authoritative_store() is not None
+
+    async def settle_root_run(
+        self,
+        session_id: str,
+        *,
+        run_id: str,
+        outcome: str,
+        result: str | None = None,
+        error: str | None = None,
+        result_payload: JSONObject | None = None,
+        extra_metadata: JSONObject | None = None,
+    ) -> AuthoritativeCommit:
+        store = self._authoritative_store()
+        if store is None:
+            raise RuntimeError("durable authoritative store is not configured")
+        authority = self._owner_authorities.get(session_id)
+        if authority is None:
+            raise SessionOwnershipConflictError(
+                "root settlement requires owner authority"
+            )
+        await self.flush_chat_assistant_buffer(session_id)
+        settlement = await store.settle_root_run(
+            authority,
+            run_id=run_id,
+            outcome=outcome,
+            result=result,
+            error=error,
+            result_payload=result_payload,
+            extra_metadata=extra_metadata,
+        )
+        session = await self.get_session_async(session_id)
+        if session.current_turn_id == run_id:
+            session.turn_in_progress = False
+            session.turn_status = outcome
+            self._session_cache[session_id] = session
+        await self._publish_chat_commit(settlement)
+        return settlement
+
+
+    async def persist_chat_wire_message(self, session: Session, message: object) -> None:
+        from coding_agent.wire.protocol import (
+            StreamDelta,
+            ThinkingDelta,
+            ToolCallDelta,
+            ToolResultDelta,
+        )
+
+        if self._authoritative_store() is None:
+            return
+        run_id = session.current_turn_id
+        if run_id is None:
+            return
+        if isinstance(message, StreamDelta):
+            previous = self._chat_assistant_buffers.get(session.id)
+            if previous is not None and previous[0] != run_id:
+                await self.flush_chat_assistant_buffer(session.id)
+            current = self._chat_assistant_buffers.get(session.id)
+            prefix = current[1] if current is not None and current[0] == run_id else ""
+            self._chat_assistant_buffers[session.id] = (run_id, prefix + message.content)
+            return
+        await self.flush_chat_assistant_buffer(session.id)
+        if isinstance(message, ThinkingDelta):
+            await self._commit_and_publish_chat_event(
+                session,
+                "thinking",
+                {"run_id": run_id, "text": message.text},
+                run_id,
+            )
+            return
+        if isinstance(message, ToolCallDelta):
+            await self._commit_and_publish_chat_event(
+                session,
+                "tool_call",
+                {
+                    "run_id": run_id,
+                    "call_id": message.call_id,
+                    "tool_name": message.tool_name,
+                    "arguments": message.arguments,
+                },
+                run_id,
+            )
+            return
+        if isinstance(message, ToolResultDelta):
+            output = message.display_result
+            if not output and isinstance(message.result, str):
+                output = message.result
+            await self._commit_and_publish_chat_event(
+                session,
+                "tool_result",
+                {
+                    "run_id": run_id,
+                    "call_id": message.call_id,
+                    "output": output,
+                    "is_error": message.is_error,
+                },
+                run_id,
+            )
+
+    async def flush_chat_assistant_buffer(self, session_id: str) -> None:
+        buffered = self._chat_assistant_buffers.pop(session_id, None)
+        if buffered is None:
+            return
+        run_id, text = buffered
+        if not text:
+            return
+        session = await self.get_session_async(session_id)
+        await self._commit_and_publish_chat_event(
+            session,
+            "assistant_message",
+            {"run_id": run_id, "text": text},
+            run_id,
+        )
+
+    async def _commit_and_publish_chat_event(
+        self,
+        session: Session,
+        event_kind: str,
+        payload: JSONObject,
+        run_id: str,
+    ) -> None:
+        store = self._authoritative_store()
+        if store is None:
+            return
+        authority = self._owner_authorities.get(session.id)
+        if authority is None:
+            raise SessionOwnershipConflictError(
+                "chat event persist requires owner authority"
+            )
+        try:
+            commit = await store.commit_authoritative_uow(
+                authority,
+                AuthoritativeUnitOfWork(
+                    event=EventRecord(
+                        event_id=self._boundary_event_id(
+                            session,
+                            event_kind,
+                            uuid.uuid4().hex,
+                        ),
+                        session_id=session.id,
+                        event_kind=event_kind,
+                        payload=payload,
+                        created_at=datetime.now(UTC),
+                    ),
+                    session_state=cast(JSONObject, session.to_store_data()),
+                    require_unsettled_root_run_id=run_id,
+                ),
+            )
+        except RootRunAlreadySettledError:
+            return
+        await self._publish_chat_commit(commit)
 
     async def _commit_session_uow(
         self,

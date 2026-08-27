@@ -7,7 +7,7 @@ import asyncio
 import os
 import threading
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import (
     Any,
@@ -116,6 +116,337 @@ class SessionManager(
 ):
     """Manages agent sessions with lifecycle and resource management."""
 
+    async def _publish_chat_commit(self, commit: Any) -> None:
+        from coding_agent.events.connected_chat import project_chat_event
+
+        run_id = commit.event.payload.get("run_id")
+        run = None
+        if isinstance(run_id, str):
+            run = await self._require_runtime_store().load_agent_run(run_id)
+        event = project_chat_event(commit.event, run)
+        if event is None:
+            return
+        for subscriber in tuple(self._chat_subscribers.get(event.session_id, ())):
+            subscriber.publish(event)
+
+    async def snapshot_chat_events(
+        self, session_id: str, *, cursor: str | None, limit: int
+    ) -> Any:
+        from coding_agent.events.connected_chat import decode_chat_cursor
+
+        store = self._authoritative_store()
+        if store is None:
+            raise RuntimeError("durable authoritative store is not configured")
+        decoded = None
+        if cursor is not None:
+            fact = await self._require_session_fact_source(session_id)
+            decoded = decode_chat_cursor(
+                cursor,
+                expected_session_id=session_id,
+                fact_state=fact,
+            )
+        return await store.snapshot_chat_events(session_id, decoded, limit)
+
+    async def chat_follow_cursor(self, session_id: str, *, after_seq: str) -> str:
+        from coding_agent.events.connected_chat import (
+            CONNECTED_CHAT_PROJECTION,
+            ConnectedChatCursor,
+            encode_chat_cursor,
+        )
+
+        store = self._authoritative_store()
+        if store is None:
+            raise RuntimeError("durable authoritative store is not configured")
+        fact = await store.load_session_fact_source(session_id)
+        if fact is None:
+            raise KeyError(session_id)
+        return encode_chat_cursor(
+            ConnectedChatCursor(
+                v=1,
+                kind="chat",
+                session_id=session_id,
+                projection=CONNECTED_CHAT_PROJECTION,
+                epoch=fact.projection_epoch,
+                after_seq=after_seq,
+                high_water_seq=fact.session_seq,
+            )
+        )
+
+    async def follow_chat_events(
+        self,
+        session_id: str,
+        *,
+        cursor: str | None,
+        after_seq_override: str | None = None,
+    ) -> AsyncIterator[Any]:
+        from coding_agent.events.connected_chat import (
+            CONNECTED_CHAT_PROJECTION,
+            ConnectedChatCursor,
+            decode_chat_cursor,
+        )
+        from coding_agent.server.http.events import ChatFollowBridge
+        from coding_agent.server.stores.session_owner_store import (
+            SessionOwnershipConflictError,
+        )
+
+        store = self._authoritative_store()
+        if store is None:
+            raise RuntimeError("durable authoritative store is not configured")
+        fact = await self._require_session_fact_source(session_id)
+        if after_seq_override is not None:
+            after_seq = after_seq_override
+        elif cursor is None:
+            after_seq = str(max(0, int(fact.retention_floor) - 1))
+        else:
+            decoded = decode_chat_cursor(
+                cursor, expected_session_id=session_id, fact_state=fact
+            )
+            after_seq = decoded.after_seq
+
+        async def register(subscriber: Any) -> None:
+            await self.get_session_async(session_id)
+            await self.verify_event_stream_ownership(session_id)
+            self._chat_subscribers.setdefault(session_id, set()).add(subscriber)
+
+        async def capture_high_water() -> str:
+            current = await self._require_session_fact_source(session_id)
+            return current.session_seq
+
+        async def replay(start: str, high_water: str) -> tuple[Any, ...]:
+            current = await self._require_session_fact_source(session_id)
+            if current.projection_epoch != fact.projection_epoch:
+                from coding_agent.events.connected_chat import ChatCursorError
+
+                raise ChatCursorError(
+                    "cursor_wrong_epoch",
+                    status=409,
+                    replay_required=True,
+                )
+            events: list[Any] = []
+            after = start
+            while int(after) < int(high_water):
+                bounded = ConnectedChatCursor(
+                    v=1,
+                    kind="chat",
+                    session_id=session_id,
+                    projection=CONNECTED_CHAT_PROJECTION,
+                    epoch=fact.projection_epoch,
+                    after_seq=after,
+                    high_water_seq=high_water,
+                )
+                snapshot = await store.snapshot_chat_events(session_id, bounded, 1000)
+                if snapshot.events:
+                    events.extend(snapshot.events)
+                    after = snapshot.events[-1].session_seq
+                if snapshot.next_cursor is None:
+                    break
+                decoded = decode_chat_cursor(
+                    snapshot.next_cursor,
+                    expected_session_id=session_id,
+                    fact_state=current,
+                )
+                after = decoded.after_seq
+            return tuple(events)
+
+        async def verify_ownership() -> bool:
+            try:
+                await self.verify_event_stream_ownership(session_id)
+            except SessionOwnershipConflictError:
+                return False
+            return True
+
+        async def read_epoch() -> str:
+            current = await self._require_session_fact_source(session_id)
+            return current.projection_epoch
+
+        async def unregister(subscriber: Any) -> None:
+            subscribers = self._chat_subscribers.get(session_id)
+            if subscribers is None:
+                return
+            subscribers.discard(subscriber)
+            if not subscribers:
+                self._chat_subscribers.pop(session_id, None)
+
+        return ChatFollowBridge(
+            session_id=session_id,
+            projection_epoch=fact.projection_epoch,
+            register=register,
+            capture_high_water=capture_high_water,
+            replay=replay,
+            verify_ownership=verify_ownership,
+            unregister=unregister,
+            read_epoch=read_epoch,
+        ).follow(after_seq=after_seq)
+
+
+    def stream_chat_command(
+        self, session_id: str, *, admission: Any
+    ) -> AsyncIterator[Any]:
+        async def stream() -> AsyncIterator[Any]:
+            if admission.session_seq is None:
+                raise RuntimeError(
+                    "chat admission is missing authoritative session_seq"
+                )
+            follow = await self.follow_chat_events(
+                session_id,
+                cursor=None,
+                after_seq_override=str(int(admission.session_seq) - 1),
+            )
+            task: asyncio.Task[Any] | None = None
+            owns_task = False
+            saw_terminal = False
+            try:
+                task = await self._claim_admitted_command(session_id, admission)
+                owns_task = task is not None
+                first = await anext(follow)
+                yield first
+                async for event in follow:
+                    if (
+                        event.kind == "root_terminal"
+                        and event.run_id == admission.run_id
+                    ):
+                        saw_terminal = True
+                        yield event
+                        return
+                    yield event
+            finally:
+                await follow.aclose()
+                if owns_task and task is not None:
+                    from coding_agent.events.connected_chat import (
+                        RootRunAlreadySettledError,
+                    )
+                    from coding_agent.server.stores.session_owner_store import (
+                        SessionOwnershipConflictError,
+                    )
+
+                    try:
+                        if not task.done() and not saw_terminal:
+                            try:
+                                settlement = asyncio.create_task(
+                                    self.settle_root_run(
+                                        session_id,
+                                        run_id=admission.run_id,
+                                        outcome="interrupted",
+                                    )
+                                )
+                                await asyncio.shield(settlement)
+                            except (
+                                RootRunAlreadySettledError,
+                                SessionOwnershipConflictError,
+                            ):
+                                pass
+                    finally:
+                        if not task.done():
+                            task.cancel()
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+                        except RootRunAlreadySettledError:
+                            pass
+                        self._chat_run_tasks.pop(admission.run_id, None)
+                        runs = self._chat_runs_by_session.get(session_id)
+                        if runs is not None:
+                            runs.discard(admission.run_id)
+                            if not runs:
+                                self._chat_runs_by_session.pop(session_id, None)
+
+        return stream()
+
+    async def _require_session_fact_source(self, session_id: str) -> Any:
+        store = self._authoritative_store()
+        if store is None:
+            raise RuntimeError("durable authoritative store is not configured")
+        fact = await store.load_session_fact_source(session_id)
+        if fact is None:
+            await store.snapshot_chat_events(session_id, None, 1)
+            fact = await store.load_session_fact_source(session_id)
+        if fact is None:
+            raise KeyError(session_id)
+        return fact
+
+    async def _claim_admitted_command(
+        self, session_id: str, admission: Any
+    ) -> asyncio.Task[Any] | None:
+        async with self._chat_launch_lock:
+            if admission.run_id in self._chat_run_tasks:
+                return None
+            if admission.idempotent:
+                run = await self._require_runtime_store().load_agent_run(
+                    admission.run_id
+                )
+                if run is None or run.status != "requested":
+                    return None
+            return self._launch_admitted_command(session_id, admission)
+
+    def _launch_admitted_command(
+        self, session_id: str, admission: Any
+    ) -> asyncio.Task[Any]:
+        async def run() -> None:
+            try:
+                prompt = await self._command_prompt(session_id, admission.command_id)
+                if admission.parent_run_id is None:
+                    await self.run_agent(
+                        session_id,
+                        prompt,
+                        run_id_override=admission.run_id,
+                    )
+                else:
+                    await self.resume_session(
+                        session_id,
+                        prompt=prompt,
+                        resume_reason="user_resume",
+                        previous_run_id=admission.parent_run_id,
+                        run_id_override=admission.run_id,
+                    )
+                store = self._authoritative_store()
+                if store is None:
+                    return
+                run = await self._require_runtime_store().load_agent_run(
+                    admission.run_id
+                )
+                if run is not None and run.status == "requested":
+                    await self.settle_root_run(
+                        session_id,
+                        run_id=admission.run_id,
+                        outcome="failed",
+                        error="chat command returned without a terminal outcome",
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await self.settle_root_run(
+                    session_id,
+                    run_id=admission.run_id,
+                    outcome="failed",
+                    error=str(exc),
+                )
+
+        task = asyncio.create_task(run())
+        self._chat_run_tasks[admission.run_id] = task
+        self._chat_runs_by_session.setdefault(session_id, set()).add(admission.run_id)
+        session = self._session_cache.get(session_id)
+        if session is not None:
+            session.task = task
+            session.turn_in_progress = True
+            session.current_turn_id = admission.run_id
+        return task
+
+
+    async def _command_prompt(self, session_id: str, command_id: str) -> str:
+        store = self._authoritative_store()
+        if store is None:
+            raise RuntimeError("durable authoritative store is not configured")
+        receipt = await store.load_receipt_slot(
+            session_id, f"chat-command:{command_id}"
+        )
+        if receipt is None:
+            raise RuntimeError("chat command receipt is missing")
+        prompt = receipt.payload.get("prompt")
+        if not isinstance(prompt, str):
+            raise RuntimeError("chat command prompt is invalid")
+        return prompt
+
     def __init__(
         self,
         store: SessionStore | None = None,
@@ -172,6 +503,11 @@ class SessionManager(
         self._store_io_guard = threading.Lock()
         self._session_turn_locks: dict[str, asyncio.Lock] = {}
         self._session_workspace_export_counts: dict[str, int] = {}
+        self._chat_subscribers: dict[str, set[Any]] = {}
+        self._chat_run_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._chat_runs_by_session: dict[str, set[str]] = {}
+        self._chat_launch_lock = asyncio.Lock()
+        self._chat_assistant_buffers: dict[str, tuple[str, str]] = {}
         self._tape_store = tape_store or self._create_tape_store(data_dir)
         if self._local_durable_store is not None and tape_store is None:
             self._tape_store = FencedSQLiteTapeStore(
@@ -462,6 +798,11 @@ class SessionManager(
             ),
             start_observation=self._runtime_observation_service.start,
             complete_observation=self._runtime_observation_service.complete,
+            settle_root_run=(
+                self.settle_root_run
+                if self.can_settle_root_run_authoritatively()
+                else None
+            ),
             log_turn_exception=lambda message: logger.exception(message),
         )
         self._runtime_turn_service = self._build_runtime_turn_service()

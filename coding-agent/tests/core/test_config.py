@@ -74,6 +74,26 @@ class TestLoadConfig:
         c = load_config()
         assert c.api_key is None
 
+    def test_load_config_reads_anthropic_api_key_env(self, monkeypatch):
+        monkeypatch.delenv("AGENT_API_KEY", raising=False)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-anthropic-token")
+
+        config = load_config(cli_args={"provider": "anthropic"})
+
+        assert config.api_key is not None
+        assert config.api_key.get_secret_value() == "sk-anthropic-token"
+
+    def test_omitted_api_key_falls_back_to_env(self, monkeypatch):
+        monkeypatch.delenv("AGENT_API_KEY", raising=False)
+        monkeypatch.setenv("AGENT_PROVIDER", "anthropic")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-anthropic-env")
+
+        config = load_config()
+
+        assert config.provider == "anthropic"
+        assert config.api_key is not None
+        assert config.api_key.get_secret_value() == "sk-anthropic-env"
+
     def test_copilot_uses_github_token_when_agent_api_key_missing(self, monkeypatch):
         monkeypatch.delenv("AGENT_API_KEY", raising=False)
         monkeypatch.setenv("GITHUB_TOKEN", "ghu-test-token")

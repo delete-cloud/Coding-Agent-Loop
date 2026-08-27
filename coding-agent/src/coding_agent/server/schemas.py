@@ -12,9 +12,11 @@ from pydantic import (
     ConfigDict,
     Field,
     StrictBool,
+    SecretStr,
     StrictInt,
     ValidationInfo,
     field_validator,
+    model_validator,
 )
 
 from coding_agent.core.config import ProviderName
@@ -61,17 +63,160 @@ class GitWorkspaceSourceRequest(BaseModel):
 WorkspaceSourceRequest = DockerWorkspaceSourceRequest | GitWorkspaceSourceRequest
 
 
+class _AdditiveChatPayload(BaseModel):
+    model_config = ConfigDict(extra="allow", strict=True)
+
+
+class _TextChatPayload(_AdditiveChatPayload):
+    text: str = Field(..., min_length=1)
+
+
+class _ProgressChatPayload(_AdditiveChatPayload):
+    current: StrictInt = Field(..., ge=0)
+    total: StrictInt = Field(..., ge=0)
+    label: str = Field(..., min_length=1)
+
+    @model_validator(mode="after")
+    def _current_must_not_exceed_total(self) -> _ProgressChatPayload:
+        if self.current > self.total:
+            raise ValueError("progress current cannot exceed total")
+        return self
+
+
+class _ToolCallChatPayload(_AdditiveChatPayload):
+    call_id: str = Field(..., min_length=1)
+    tool_name: str = Field(..., min_length=1)
+    arguments: dict[str, Any]
+
+
+class _ToolResultChatPayload(_AdditiveChatPayload):
+    call_id: str = Field(..., min_length=1)
+    output: str
+    is_error: StrictBool
+
+
+class _RootTerminalError(BaseModel):
+    model_config = ConfigDict(extra="allow", strict=True)
+
+    code: str = Field(..., min_length=1)
+    message: str = Field(..., min_length=1)
+
+
+class _RootTerminalChatPayload(_AdditiveChatPayload):
+    outcome: Literal["completed", "failed", "cancelled", "interrupted"]
+    result: str | None
+    error: str | _RootTerminalError | None
+
+
+ConnectedChatPayload = (
+    _TextChatPayload
+    | _ProgressChatPayload
+    | _ToolCallChatPayload
+    | _ToolResultChatPayload
+    | _RootTerminalChatPayload
+)
+
+
+_CONNECTED_CHAT_PAYLOADS: dict[str, type[_AdditiveChatPayload]] = {
+    "user_prompt": _TextChatPayload,
+    "assistant_message": _TextChatPayload,
+    "thinking": _TextChatPayload,
+    "progress": _ProgressChatPayload,
+    "tool_call": _ToolCallChatPayload,
+    "tool_result": _ToolResultChatPayload,
+    "root_terminal": _RootTerminalChatPayload,
+}
+
+
+class ConnectedChatEventSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    contract_version: Literal["1.0.0"]
+    source_event_id: str = Field(..., min_length=1)
+    session_seq: str = Field(..., pattern=r"^(0|[1-9][0-9]*)$")
+    session_id: str = Field(..., min_length=1)
+    run_id: str | None = Field(None, min_length=1)
+    kind: Literal[
+        "user_prompt",
+        "assistant_message",
+        "thinking",
+        "progress",
+        "tool_call",
+        "tool_result",
+        "root_terminal",
+    ]
+    created_at: datetime
+    payload: ConnectedChatPayload
+
+    @field_validator("payload", mode="before")
+    @classmethod
+    def _validate_typed_payload(
+        cls, value: Any, info: ValidationInfo
+    ) -> ConnectedChatPayload:
+        kind = info.data.get("kind")
+        payload_type = _CONNECTED_CHAT_PAYLOADS.get(kind)
+        if payload_type is None:
+            raise ValueError("connected-chat kind must precede payload")
+        return payload_type.model_validate(value)
+
+
+class ConnectedChatStreamControlSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    contract_version: Literal["1.0.0"]
+    kind: Literal["replay_required"]
+    reason: Literal[
+        "subscriber_queue_overflow",
+        "ownership_lost",
+        "sequence_loss",
+    ]
+    cursor: str = Field(..., min_length=1)
+
+
+class ConnectedChatSnapshotSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    contract_version: Literal["1.0.0"]
+    session_id: str = Field(..., min_length=1)
+    projection: Literal["connected-chat"]
+    projection_epoch: str = Field(..., pattern=r"^(0|[1-9][0-9]*)$")
+    snapshot_cursor: str = Field(..., min_length=1)
+    next_cursor: str | None = Field(None, min_length=1)
+    events: list[ConnectedChatEventSchema]
+
+
 class PromptRequest(BaseModel):
     """Request schema for sending a prompt."""
 
     prompt: str = Field(..., min_length=1, max_length=10000)
+    command_id: str | None = Field(None, min_length=1, max_length=200)
 
 
 class ResumeSessionRequest(BaseModel):
     """Request schema for resuming a session from durable context."""
 
     prompt: str | None = Field(None, min_length=1, max_length=10000)
+    command_id: str | None = Field(None, min_length=1, max_length=200)
+    parent_run_id: str | None = Field(None, max_length=200)
     resume_reason: str = Field("user_resume", min_length=1, max_length=100)
+
+
+class ConnectedChatErrorDetail(BaseModel):
+    code: str
+    message: str
+    retryable: bool
+    replay_required: bool | None = None
+
+
+class ConnectedChatErrorResponse(BaseModel):
+    error: ConnectedChatErrorDetail
+
+
+class ConnectedChatCancelResponse(BaseModel):
+    contract_version: Literal["1.0.0"] = "1.0.0"
+    session_id: str
+    run_id: str
+    status: Literal["cancelling"]
 
 
 class CreateSessionRequest(BaseModel):
@@ -87,6 +232,7 @@ class CreateSessionRequest(BaseModel):
     provider: str | None = None
     model: str | None = Field(None, min_length=1, max_length=200)
     base_url: str | None = Field(None, min_length=1, max_length=500)
+    api_key: SecretStr | None = None
     max_steps: int | None = Field(None, ge=0)
 
     @field_validator("provider")
@@ -115,10 +261,17 @@ class RuntimeConfigUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     model: str | None = Field(None, min_length=1, max_length=200)
-    provider: ProviderName | None = None
+    provider: str | None = None
+    api_key: SecretStr | None = None
     base_url: str | None = Field(None, min_length=1, max_length=500)
     thinking: ThinkingConfigSchema | None = None
     approval: str | None = Field(None, pattern="^(yolo|interactive|auto)$")
+
+    @field_validator("provider")
+    @classmethod
+    def _validate_provider(cls, value: str | None) -> str | None:
+        return validate_provider_value(value)
+
 
     @field_validator("model", "provider", "thinking", "approval")
     @classmethod
@@ -274,6 +427,7 @@ class SessionResponse(BaseModel):
 class SessionSummaryResponse(BaseModel):
     session_id: str
     id: str
+    title: str | None
     status: Literal[
         "created", "running", "waiting_approval", "completed", "failed", "closed"
     ]
@@ -302,6 +456,7 @@ class SessionSummaryResponse(BaseModel):
 
 
 class SessionListResponse(BaseModel):
+    contract_version: Literal["1.0.0"] = "1.0.0"
     sessions: list[SessionSummaryResponse]
 
 

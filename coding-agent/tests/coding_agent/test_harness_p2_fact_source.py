@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -114,16 +115,45 @@ class HarnessFakePGConnection:
         self.agent_runs: dict[str, dict[str, object]] = {}
         self.checkpoints: dict[str, dict[str, object]] = {}
         self.in_txn = False
+        self.fail_on_agent_run_write = False
+        self._transaction_snapshot: dict[str, object] | None = None
+
+    def _snapshot_transaction_state(self) -> dict[str, object]:
+        return deepcopy(
+            {
+                "session_payloads": self.session_payloads,
+                "session_tape_by_session": self.session_tape_by_session,
+                "session_by_tape": self.session_by_tape,
+                "fact_source": self.fact_source,
+                "events": self.events,
+                "mailbox": self.mailbox,
+                "effects": self.effects,
+                "receipts": self.receipts,
+                "agent_runs": self.agent_runs,
+                "checkpoints": self.checkpoints,
+            }
+        )
+
+    def _restore_transaction_state(self) -> None:
+        snapshot = self._transaction_snapshot
+        if snapshot is None:
+            return
+        for field_name, value in snapshot.items():
+            setattr(self, field_name, value)
+        self._transaction_snapshot = None
 
     async def execute(self, query: str, *args: object) -> str:
         self.calls.append(("execute", query))
         if query.strip() == "BEGIN":
             self.in_txn = True
+            self._transaction_snapshot = self._snapshot_transaction_state()
             return "BEGIN"
         if query.strip() == "COMMIT":
             self.in_txn = False
+            self._transaction_snapshot = None
             return "COMMIT"
         if query.strip() == "ROLLBACK":
+            self._restore_transaction_state()
             self.in_txn = False
             return "ROLLBACK"
         if "INSERT INTO session_tapes" in query:
@@ -234,6 +264,9 @@ class HarnessFakePGConnection:
             }
             return "INSERT"
         if "INSERT INTO agent_runs" in query:
+            if self.fail_on_agent_run_write:
+                self.fail_on_agent_run_write = False
+                raise RuntimeError("injected terminal crash")
             run_id = cast(str, args[0])
             self.agent_runs[run_id] = {
                 "run_id": args[0],
@@ -305,6 +338,26 @@ class HarnessFakePGConnection:
             return self.effects.get((cast(str, args[0]), cast(str, args[1])))
         if "FROM session_receipt_slots" in query:
             return self.receipts.get((cast(str, args[0]), cast(str, args[1])))
+        if (
+            "FROM agent_runs" in query
+            and "superseded_by_checkpoint_id IS NULL" in query
+            and "ORDER BY started_at DESC" in query
+        ):
+            session_id = cast(str, args[0])
+            active = [
+                run
+                for run in self.agent_runs.values()
+                if run["session_id"] == session_id
+                and run["superseded_by_checkpoint_id"] is None
+            ]
+            if not active:
+                return None
+            return max(active, key=lambda run: (run["started_at"], run["run_id"]))
+        if "FROM agent_runs" in query and "run_id = $1" in query:
+            run = self.agent_runs.get(cast(str, args[0]))
+            if run is None or (len(args) > 1 and run["session_id"] != args[1]):
+                return None
+            return run
         if "FROM agent_checkpoints" in query or "FROM checkpoints" in query:
             return self.checkpoints.get(
                 cast(str, args[0]),
@@ -349,9 +402,16 @@ class HarnessFakePGConnection:
             session_id = cast(str, args[0])
             after = args[1]
             epoch_filter = None
+            high_water = None
             if "projection_epoch = $3" in query:
                 epoch_filter = args[2]
                 limit = int(args[3]) if len(args) > 3 else 1000
+            elif "session_seq <= $3" in query:
+                high_water = args[2]
+                if "event_kind = ANY($4" in query:
+                    limit = int(args[4]) if len(args) > 4 else 1000
+                else:
+                    limit = int(args[3]) if len(args) > 3 else 1000
             else:
                 limit = int(args[2]) if len(args) > 2 else 1000
             inclusive = "session_seq >= $2" in query
@@ -365,10 +425,19 @@ class HarnessFakePGConnection:
                     and event["projection_epoch"] != epoch_filter
                 ):
                     continue
-                if inclusive and seq >= after:
-                    rows.append(event)
-                if not inclusive and seq > after:
-                    rows.append(event)
+                if high_water is not None and seq > high_water:
+                    continue
+                selected = inclusive and seq >= after or not inclusive and seq > after
+                if selected:
+                    joined = dict(event)
+                    if "LEFT JOIN agent_runs" in query:
+                        run_id = cast(dict[str, object], event["payload"]).get("run_id")
+                        run = self.agent_runs.get(cast(str, run_id))
+                        if run is not None and run["session_id"] == session_id:
+                            joined.update(run)
+                        else:
+                            joined["run_id"] = None
+                    rows.append(joined)
             return rows[:limit]
         return []
 

@@ -247,6 +247,8 @@ class AuthoritativeUnitOfWork:
     effect: EffectLedgerSlot | None = None
     receipt: OperationReceiptSlot | None = None
     run_state: AgentRunRecord | None = None
+    require_settled_parent_run_id: str | None = None
+    require_unsettled_root_run_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.event, EventRecord):
@@ -266,6 +268,23 @@ class AuthoritativeUnitOfWork:
             self.run_state, AgentRunRecord
         ):
             raise TypeError("run_state must be an AgentRunRecord")
+        if self.require_settled_parent_run_id is not None:
+            _require_non_empty(
+                "require_settled_parent_run_id",
+                self.require_settled_parent_run_id,
+            )
+        if self.require_unsettled_root_run_id is not None:
+            _require_non_empty(
+                "require_unsettled_root_run_id",
+                self.require_unsettled_root_run_id,
+            )
+            if (
+                self.run_state is not None
+                and self.run_state.run_id != self.require_unsettled_root_run_id
+            ):
+                raise ValueError(
+                    "root settlement run_state does not match required run"
+                )
         if self.event.session_seq is not None:
             raise ValueError("event.session_seq is allocated by the store")
         if self.event.projection_epoch is not None:
