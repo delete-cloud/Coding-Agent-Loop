@@ -1,0 +1,235 @@
+openrpc: "1.3.2"
+info:
+  title: Coding Agent Harness Control Plane
+  version: "0.0.0-p3-contract"
+  description: >-
+    ADR-0076 harness control-plane contract, P3 first cut. All eleven D14
+    methods are declared here with ZERO handlers: this document freezes the
+    wire contract only and nothing is bound on the existing HTTP control
+    plane. u64 values travel as decimal strings. The IDL carries EffectRef
+    only; in-process execution handles are not wire types. The unix socket is marked
+    unavailable until P4 (no AF_UNIX bind, no --socket flag, no listen).
+  license:
+    name: Proprietary
+servers:
+  - name: p3-unavailable
+    url: https://harness.invalid/p3-unavailable
+    summary: Non-routable placeholder; P3 declares no live server.
+    x-availability: unavailable-until-p4
+methods:
+  - name: initialize
+    summary: Handshake; reports protocol_version and the unavailable unix socket.
+    params:
+      - name: params
+        required: true
+        schema:
+          $ref: "./schema/types.json#/definitions/InitializeParams"
+    result:
+      name: result
+      required: true
+      schema:
+        $ref: "./schema/types.json#/definitions/InitializeResult"
+
+  - name: session/subscribe
+    summary: Subscribe to session events from an optional cursor.
+    params:
+      - name: params
+        required: true
+        schema:
+          $ref: "./schema/types.json#/definitions/SessionSubscribeParams"
+    result:
+      name: result
+      required: true
+      schema:
+        $ref: "./schema/types.json#/definitions/SessionSubscribeResult"
+    errors:
+      - $ref: "#/components/errors/NotInitialized"
+      - $ref: "#/components/errors/StaleFence"
+      - $ref: "#/components/errors/CursorInvalid"
+
+  - name: turn/start
+    summary: Start a turn from a prompt.
+    params:
+      - name: params
+        required: true
+        schema:
+          $ref: "./schema/types.json#/definitions/TurnStartParams"
+    result:
+      name: result
+      required: true
+      schema:
+        $ref: "./schema/types.json#/definitions/TurnStartResult"
+    errors:
+      - $ref: "#/components/errors/NotInitialized"
+      - $ref: "#/components/errors/StaleFence"
+
+  - name: turn/steer
+    summary: Steer an in-flight turn with additional input.
+    params:
+      - name: params
+        required: true
+        schema:
+          $ref: "./schema/types.json#/definitions/TurnSteerParams"
+    result:
+      name: result
+      required: true
+      schema:
+        $ref: "./schema/types.json#/definitions/AckResult"
+    errors:
+      - $ref: "#/components/errors/NotInitialized"
+      - $ref: "#/components/errors/StaleFence"
+
+  - name: turn/interrupt
+    summary: Interrupt an in-flight turn.
+    params:
+      - name: params
+        required: true
+        schema:
+          $ref: "./schema/types.json#/definitions/TurnInterruptParams"
+    result:
+      name: result
+      required: true
+      schema:
+        $ref: "./schema/types.json#/definitions/AckResult"
+    errors:
+      - $ref: "#/components/errors/NotInitialized"
+      - $ref: "#/components/errors/StaleFence"
+
+  - name: turn/resume-wait
+    summary: Resume a durable approval wait, reusing the allocated effect_id.
+    params:
+      - name: params
+        required: true
+        schema:
+          $ref: "./schema/types.json#/definitions/TurnResumeWaitParams"
+    result:
+      name: result
+      required: true
+      schema:
+        $ref: "./schema/types.json#/definitions/AckResult"
+    errors:
+      - $ref: "#/components/errors/NotInitialized"
+      - $ref: "#/components/errors/StaleFence"
+
+  - name: session/resume
+    summary: Resume a session as a new run; never reconnects a dead process.
+    params:
+      - name: params
+        required: true
+        schema:
+          $ref: "./schema/types.json#/definitions/SessionResumeParams"
+    result:
+      name: result
+      required: true
+      schema:
+        $ref: "./schema/types.json#/definitions/AckResult"
+    errors:
+      - $ref: "#/components/errors/NotInitialized"
+      - $ref: "#/components/errors/StaleFence"
+
+  - name: approval/decide
+    summary: Approve or reject a pending approval wait on the effect ledger.
+    params:
+      - name: params
+        required: true
+        schema:
+          $ref: "./schema/types.json#/definitions/ApprovalDecideParams"
+    result:
+      name: result
+      required: true
+      schema:
+        $ref: "./schema/types.json#/definitions/AckResult"
+    errors:
+      - $ref: "#/components/errors/NotInitialized"
+      - $ref: "#/components/errors/StaleFence"
+
+  - name: checkpoint/restore
+    summary: >-
+      Maintenance. Restore a checkpoint, applying ADR-0075 supersession
+      without deleting runs or events.
+    tags:
+      - name: maintenance
+    params:
+      - name: params
+        required: true
+        schema:
+          $ref: "./schema/types.json#/definitions/CheckpointRestoreParams"
+    result:
+      name: result
+      required: true
+      schema:
+        $ref: "./schema/types.json#/definitions/AckResult"
+    errors:
+      - $ref: "#/components/errors/NotInitialized"
+      - $ref: "#/components/errors/StaleFence"
+
+  - name: effect/reconcile
+    summary: Maintenance. Crash-repair read/classify over the A/B effect ledger.
+    tags:
+      - name: maintenance
+    params:
+      - name: params
+        required: true
+        schema:
+          $ref: "./schema/types.json#/definitions/EffectReconcileParams"
+    result:
+      name: result
+      required: true
+      schema:
+        $ref: "./schema/types.json#/definitions/EffectReconcileResult"
+    errors:
+      - $ref: "#/components/errors/NotInitialized"
+      - $ref: "#/components/errors/StaleFence"
+
+  - name: effect/compensate
+    summary: >-
+      Maintenance. Admit a compensation effect; receipt identity
+      {generation, compensation_effect_id} is first-write-wins.
+    tags:
+      - name: maintenance
+    params:
+      - name: params
+        required: true
+        schema:
+          $ref: "./schema/types.json#/definitions/EffectCompensateParams"
+    result:
+      name: result
+      required: true
+      schema:
+        $ref: "./schema/types.json#/definitions/EffectCompensateResult"
+    errors:
+      - $ref: "#/components/errors/NotInitialized"
+      - $ref: "#/components/errors/StaleFence"
+      - $ref: "#/components/errors/QuiescentGate"
+
+components:
+  schemas:
+    U64:
+      $ref: "./schema/types.json#/definitions/U64"
+    SessionFence:
+      $ref: "./schema/types.json#/definitions/SessionFence"
+    EffectRef:
+      $ref: "./schema/types.json#/definitions/EffectRef"
+    UnixSocketStatus:
+      $ref: "./schema/types.json#/definitions/UnixSocketStatus"
+  errors:
+    StaleFence:
+      code: -32001
+      message: Stale fence
+      x-data-schema:
+        $ref: "./schema/errors.json#/definitions/StaleFenceData"
+    NotInitialized:
+      code: -32002
+      message: Not initialized
+      x-data-schema:
+        $ref: "./schema/errors.json#/definitions/NotInitializedData"
+    QuiescentGate:
+      code: -32003
+      message: Quiescent gate
+      x-data-schema:
+        $ref: "./schema/errors.json#/definitions/QuiescentGateData"
+    CursorInvalid:
+      code: -32004
+      message: Cursor invalid
+      x-data-schema:
+        $ref: "./schema/errors.json#/definitions/CursorInvalidData"
