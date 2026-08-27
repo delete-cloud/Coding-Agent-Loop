@@ -7382,6 +7382,30 @@ class TestGetSession:
 
         assert first.status_code == 200
         assert second.status_code == 200
+        titles = {
+            first.json()["session_id"]: "User session",
+            second.json()["session_id"]: "Admin session",
+        }
+
+        async def snapshot_chat_events(
+            session_id: str, *, cursor: str | None, limit: int
+        ) -> SimpleNamespace:
+            assert cursor is None
+            assert limit == 1000
+            return SimpleNamespace(
+                events=(
+                    SimpleNamespace(
+                        kind="user_prompt",
+                        payload={"text": titles[session_id]},
+                    ),
+                ),
+                next_cursor=None,
+            )
+
+        monkeypatch.setattr(session_manager, "_authoritative_store", lambda: object())
+        monkeypatch.setattr(
+            session_manager, "snapshot_chat_events", snapshot_chat_events
+        )
 
         response = await client.get(
             "/sessions",
@@ -7410,6 +7434,30 @@ class TestGetSession:
             "/sessions",
             headers={"Authorization": "Bearer admin-token"},
             json={},
+        )
+        titles = {
+            first.json()["session_id"]: "User session",
+            second.json()["session_id"]: "Admin session",
+        }
+
+        async def snapshot_chat_events(
+            session_id: str, *, cursor: str | None, limit: int
+        ) -> SimpleNamespace:
+            assert cursor is None
+            assert limit == 1000
+            return SimpleNamespace(
+                events=(
+                    SimpleNamespace(
+                        kind="user_prompt",
+                        payload={"text": titles[session_id]},
+                    ),
+                ),
+                next_cursor=None,
+            )
+
+        monkeypatch.setattr(session_manager, "_authoritative_store", lambda: object())
+        monkeypatch.setattr(
+            session_manager, "snapshot_chat_events", snapshot_chat_events
         )
 
         response = await client.get(
