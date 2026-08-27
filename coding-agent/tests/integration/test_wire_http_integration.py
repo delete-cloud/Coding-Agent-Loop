@@ -482,14 +482,7 @@ class TestSessionCatalogLiveHTTP:
             assert response.status_code == 200
             payload = response.json()
             assert payload["contract_version"] == "1.0.0"
-            assert len(payload["sessions"]) == 1
-            summary = payload["sessions"][0]
-            assert summary["session_id"] == "catalog-session"
-            assert summary["id"] == "catalog-session"
-            assert summary["title"] is None
-            assert summary["status"] == "created"
-            assert "created_at" in summary
-            assert "default_run_target" in summary
+            assert payload["sessions"] == []
 
             assert openapi_response.status_code == 200
             schemas = openapi_response.json()["components"]["schemas"]

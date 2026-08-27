@@ -69,6 +69,158 @@ def _fixture_event(index: int = 0) -> ChatEvent:
     )
 
 
+async def test_session_catalog_title_uses_trimmed_single_line_first_prompt(
+    client: AsyncClient,
+    isolated_http_session_manager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(UTC)
+    session = Session(id="session-titled", created_at=now, last_activity=now)
+    isolated_http_session_manager.register_session(session)
+    first_prompt = "  Build\n" + ("x" * 100) + "  "
+    events = (
+        ChatEvent(
+            source_event_id="event-first-prompt",
+            session_seq="1",
+            session_id=session.id,
+            run_id=None,
+            kind="user_prompt",
+            created_at=now,
+            payload={"text": first_prompt},
+        ),
+        ChatEvent(
+            source_event_id="event-second-prompt",
+            session_seq="2",
+            session_id=session.id,
+            run_id=None,
+            kind="user_prompt",
+            created_at=now,
+            payload={"text": "This later prompt must not become the title"},
+        ),
+    )
+
+    async def snapshot_chat_events(
+        session_id: str, *, cursor: str | None, limit: int
+    ) -> SimpleNamespace:
+        assert session_id == session.id
+        assert cursor is None
+        assert limit == 1000
+        return SimpleNamespace(events=events, next_cursor=None)
+
+    monkeypatch.setattr(
+        isolated_http_session_manager,
+        "_authoritative_store",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        isolated_http_session_manager,
+        "snapshot_chat_events",
+        snapshot_chat_events,
+    )
+
+    response = await client.get("/sessions")
+
+    assert response.status_code == 200
+    sessions = response.json()["sessions"]
+    assert len(sessions) == 1
+    assert sessions[0]["session_id"] == session.id
+    assert sessions[0]["title"] == "Build " + ("x" * 74)
+
+
+async def test_session_catalog_omits_whitespace_only_first_user_prompt(
+    client: AsyncClient,
+    isolated_http_session_manager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(UTC)
+    session = Session(id="session-whitespace-title", created_at=now, last_activity=now)
+    isolated_http_session_manager.register_session(session)
+    whitespace_prompt = ChatEvent(
+        source_event_id="event-whitespace-prompt",
+        session_seq="1",
+        session_id=session.id,
+        run_id=None,
+        kind="user_prompt",
+        created_at=now,
+        payload={"text": " \n\t "},
+    )
+
+    async def snapshot_chat_events(
+        session_id: str, *, cursor: str | None, limit: int
+    ) -> SimpleNamespace:
+        assert session_id == session.id
+        assert cursor is None
+        assert limit == 1000
+        return SimpleNamespace(events=(whitespace_prompt,), next_cursor=None)
+
+    monkeypatch.setattr(
+        isolated_http_session_manager,
+        "_authoritative_store",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        isolated_http_session_manager,
+        "snapshot_chat_events",
+        snapshot_chat_events,
+    )
+
+    list_response = await client.get("/sessions")
+    get_response = await client.get(f"/sessions/{session.id}")
+
+    assert list_response.status_code == 200
+    assert list_response.json()["sessions"] == []
+    assert get_response.status_code == 200
+    assert get_response.json()["session_id"] == session.id
+    assert get_response.json()["title"] is None
+
+
+async def test_session_catalog_omits_session_without_user_prompt_but_get_keeps_it(
+    client: AsyncClient,
+    isolated_http_session_manager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(UTC)
+    session = Session(id="session-empty", created_at=now, last_activity=now)
+    isolated_http_session_manager.register_session(session)
+    non_prompt_event = ChatEvent(
+        source_event_id="event-assistant-only",
+        session_seq="1",
+        session_id=session.id,
+        run_id=None,
+        kind="assistant_message",
+        created_at=now,
+        payload={"text": "No user prompt exists"},
+    )
+
+    async def snapshot_chat_events(
+        session_id: str, *, cursor: str | None, limit: int
+    ) -> SimpleNamespace:
+        assert session_id == session.id
+        assert cursor is None
+        assert limit == 1000
+        return SimpleNamespace(events=(non_prompt_event,), next_cursor=None)
+
+    monkeypatch.setattr(
+        isolated_http_session_manager,
+        "_authoritative_store",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        isolated_http_session_manager,
+        "snapshot_chat_events",
+        snapshot_chat_events,
+    )
+
+    list_response = await client.get("/sessions")
+    get_response = await client.get(f"/sessions/{session.id}")
+
+    assert list_response.status_code == 200
+    assert list_response.json()["sessions"] == []
+    assert get_response.status_code == 200
+    assert get_response.json()["session_id"] == session.id
+    assert get_response.json()["title"] is None
+
+
 async def test_snapshot_and_cursor_errors_match_fixture(
     client: AsyncClient, registered_session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:

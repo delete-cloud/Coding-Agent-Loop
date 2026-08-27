@@ -5507,9 +5507,7 @@ class TestPromptStreaming:
         assert payload["latest_checkpoint_id"] == "cp-latest"
         assert payload["latest_checkpoint_label"] == "resume-point"
         assert listed.status_code == 200
-        listed_payload = listed.json()["sessions"][0]
-        assert listed_payload["resumable"] is True
-        assert listed_payload["latest_checkpoint_id"] == "cp-latest"
+        assert listed.json()["sessions"] == []
 
     async def test_prompt_returns_parent_turn_end_when_agent_bootstrap_fails(
         self, client

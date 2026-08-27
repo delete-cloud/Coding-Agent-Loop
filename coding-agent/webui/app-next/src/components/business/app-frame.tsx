@@ -30,6 +30,8 @@ import type { RuntimeConfigPatch } from "@/lib/connected-chat/client";
 import type { ConnectedChatStatus } from "@/lib/connected-chat/controller";
 import type { ChatSessionSummary } from "@/lib/connected-chat/wire";
 import {
+  DEFAULT_SESSION_DEFAULTS,
+  SETTINGS_LS_KEY,
   formatProviderAccountLabel,
   formatProviderModel,
   errorMessageOf,
@@ -44,13 +46,28 @@ import { applyTheme, readStoredTheme, toggleTheme, type Theme } from "@/lib/them
  *  Dual-bounded on purpose: <768px is out of scope and must stay untouched. */
 const MID_TIER_QUERY = "(min-width: 768px) and (max-width: 1143px)";
 
-/** Catalog summary → sidebar row. `title` is nullable by contract: a session
- *  without one is identified by its stable id (absence is a valid state). */
-function toSessionItem(summary: ChatSessionSummary): SessionItem {
+function isBuiltInSessionDefault(defaults: typeof DEFAULT_SESSION_DEFAULTS): boolean {
+  return (
+    defaults.provider === DEFAULT_SESSION_DEFAULTS.provider &&
+    defaults.model === DEFAULT_SESSION_DEFAULTS.model &&
+    defaults.base_url === DEFAULT_SESSION_DEFAULTS.base_url
+  );
+}
+
+/** Titled catalog summary → sidebar row. Untitled sessions are empty/unsent
+ *  drafts; a first send may supply a separate local stand-in while the live
+ *  catalog omits them. The meta line is the provider · model pair, never the
+ *  raw session id. */
+function toSidebarSession(summary: ChatSessionSummary): SessionItem | null {
+  const title = summary.title;
+  if (typeof title !== "string" || title.trim().length === 0) return null;
   return {
     id: summary.session_id,
-    title: summary.title ?? summary.session_id,
-    meta: summary.session_id,
+    title,
+    meta: formatProviderModel(
+      sessionField(summary, "provider_name"),
+      sessionField(summary, "model_name"),
+    ),
   };
 }
 
@@ -120,13 +137,14 @@ export function AppFrame({ services }: AppFrameProps) {
  * values became data-driven.
  *
  * Selection contract:
- *  - the URL (`?session=`) is the ONLY selection authority: row clicks and
+ *  - the URL (`?session=`) is the durable selection authority: row clicks and
  *    session creation navigate, browser back/forward lands here as a search
- *    param change, and an effect forwards the normalized id to the
- *    controller (stale generations are owned and discarded by the controller
- *    itself — the frame never reconciles them);
+ *    param change, and an effect forwards the normalized id to the controller
+ *    (stale generations are owned and discarded by the controller itself);
+ *  - a newly created session is selected locally during the router/catalog
+ *    gap, then yields to URL-led selection once its titled summary arrives;
  *  - normalization: a valid catalog id wins, otherwise the first session; no
- *    catalog sessions → no selection (empty states, inert static composer);
+ *    catalog or pending sessions → no selection (empty states, inert composer);
  *  - no services (static prerender) renders a safe loading shell: sidebar and
  *    timeline loading notes, static composer, neutral rail dot.
  *
@@ -154,16 +172,65 @@ export function AppFrameView() {
 
   const sessionParam = searchParams.get("session");
 
-  const sessions = useMemo(() => catalog.sessions.map(toSessionItem), [catalog.sessions]);
+  // A live catalog omits a new session until its first prompt supplies a title.
+  // Keep the complete local row so both visibility and provider/model metadata
+  // survive that gap.
+  const [pendingSessions, setPendingSessions] = useState<
+    Readonly<Record<string, SessionItem>>
+  >({});
+  const [pendingSelectionId, setPendingSelectionId] = useState<string | null>(null);
+  const sessions = useMemo(() => {
+    const catalogIds = new Set(catalog.sessions.map((summary) => summary.session_id));
+    const catalogRows = catalog.sessions
+      .map(
+        (summary) =>
+          toSidebarSession(summary) ?? pendingSessions[summary.session_id] ?? null,
+      )
+      .filter((item): item is SessionItem => item !== null);
+    const omittedRows = Object.values(pendingSessions).filter(
+      (pending) => !catalogIds.has(pending.id),
+    );
+    return [...omittedRows, ...catalogRows];
+  }, [catalog.sessions, pendingSessions]);
 
-  // URL-led selection with valid-id normalization: a valid param wins, an
-  // absent/invalid one falls back to the first catalog session, and an empty
-  // catalog means no selection at all.
+  // The local first-send id wins only until the router applies its pushed URL.
+  // The pending row itself can outlive that optimistic selection.
   const selection = useMemo(() => {
     if (sessions.length === 0) return null;
-    return sessions.find((s) => s.id === sessionParam) ?? sessions[0];
-  }, [sessions, sessionParam]);
+    if (pendingSelectionId !== null && pendingSessions[pendingSelectionId] !== undefined) {
+      return sessions.find((session) => session.id === pendingSelectionId) ?? sessions[0];
+    }
+    return sessions.find((session) => session.id === sessionParam) ?? sessions[0];
+  }, [pendingSelectionId, pendingSessions, sessions, sessionParam]);
   const selectedId = selection === null ? null : selection.id;
+
+  useEffect(() => {
+    if (pendingSelectionId !== null && sessionParam === pendingSelectionId) {
+      setPendingSelectionId(null);
+    }
+  }, [pendingSelectionId, sessionParam]);
+
+  useEffect(() => {
+    const titledPendingIds = new Set(
+      catalog.sessions
+        .filter(
+          (summary) =>
+            pendingSessions[summary.session_id] !== undefined &&
+            typeof summary.title === "string" &&
+            summary.title.trim().length > 0,
+        )
+        .map((summary) => summary.session_id),
+    );
+    if (titledPendingIds.size === 0) return;
+    setPendingSessions((previous) =>
+      Object.fromEntries(
+        Object.entries(previous).filter(([id]) => !titledPendingIds.has(id)),
+      ),
+    );
+    setPendingSelectionId((previous) =>
+      previous !== null && titledPendingIds.has(previous) ? null : previous,
+    );
+  }, [catalog.sessions, pendingSessions]);
 
   // Forward the normalized selection to the controller. Fires on every
   // selectedId change — catalog load, back/forward param changes, and
@@ -180,6 +247,10 @@ export function AppFrameView() {
   const [conversationView, setConversationView] = useState<"chat" | "trajectory">("chat");
   const [theme, setTheme] = useState<Theme>("dark");
   const [defaults, setDefaults] = useState(loadSessionDefaults);
+  // Snapshot storage before account discovery. A later built-in fallback write
+  // must not block OAuth, while an explicit non-default choice still must.
+  const defaultsPersistedAtDiscoveryRef = useRef(true);
+  const nonDefaultDefaultsChosenRef = useRef(false);
   const [apiKey, setApiKey] = useState("");
   const [oauthAccounts, setOauthAccounts] = useState<Array<{ provider: string; label: string }>>([]);
   const [composerModels, setComposerModels] = useState<string[]>([]);
@@ -191,8 +262,14 @@ export function AppFrameView() {
     baseUrl: string;
   } | null>(null);
   const [createError, setCreateError] = useState("");
+  // New Session stays local until its first prompt is sent.
+  const [draftActive, setDraftActive] = useState(false);
+  const [draftPrompt, setDraftPrompt] = useState("");
+  const [draftBusy, setDraftBusy] = useState(false);
   const openRef = useRef(detailsOpen);
   openRef.current = detailsOpen;
+  // Invalidating this generation abandons an in-flight create continuation.
+  const draftGenerationRef = useRef(0);
 
   const timelineScrollRef = useRef<HTMLDivElement>(null);
   const composerSlotRef = useRef<HTMLDivElement>(null);
@@ -210,24 +287,59 @@ export function AppFrameView() {
     setDetailsOpen(false);
     setSettingsOpen(false);
     setConversationView("chat");
+    setDraftActive(false);
   }, [sessionParam]);
 
   useEffect(() => {
     if (services === null || !isSettingsClient(services.catalog)) return;
+    try {
+      defaultsPersistedAtDiscoveryRef.current =
+        localStorage.getItem(SETTINGS_LS_KEY) !== null;
+    } catch {
+      defaultsPersistedAtDiscoveryRef.current = true;
+    }
     let alive = true;
-    services.catalog
-      .listOAuthAccounts()
-      .then((accounts) => {
-        if (alive) {
-          setOauthAccounts(accounts.map((account) => ({
-            provider: account.provider,
-            label: account.label,
-          })));
+    const client = services.catalog;
+    client.listOAuthAccounts().then(
+      (accounts) => {
+        if (!alive) return;
+        const nextAccounts = accounts.map((account) => ({
+          provider: account.provider,
+          label: account.label,
+        }));
+        setOauthAccounts(nextAccounts);
+        if (
+          defaultsPersistedAtDiscoveryRef.current ||
+          nonDefaultDefaultsChosenRef.current ||
+          nextAccounts.length === 0
+        ) {
+          return;
         }
-      })
-      .catch(() => {
+
+        const providers = nextAccounts.map((account) => account.provider);
+        const provider = resolveProviderAccount("codex", providers);
+        void client.listProviderModels(provider).then(
+          (listed) => {
+            if (
+              !alive ||
+              defaultsPersistedAtDiscoveryRef.current ||
+              nonDefaultDefaultsChosenRef.current ||
+              listed.source !== "live"
+            ) {
+              return;
+            }
+            const model = listed.models[0];
+            if (model === undefined) return;
+            // Account discovery chooses an in-memory first-run default only.
+            setDefaults((previous) => ({ ...previous, provider, model }));
+          },
+          () => {},
+        );
+      },
+      () => {
         if (alive) setOauthAccounts([]);
-      });
+      },
+    );
     return () => {
       alive = false;
     };
@@ -270,40 +382,82 @@ export function AppFrameView() {
     return () => document.removeEventListener("keydown", onKeyDown);
   }, []);
 
-  const navigateToSession = (id: string) => {
-    if (id === selectedId) return;
+  const navigateToSession = (id: string, keepPendingSelection = false) => {
+    setDraftActive(false);
+    const pendingPushHasNotLanded =
+      pendingSelectionId === id && sessionParam !== pendingSelectionId;
+    const keepOptimisticSelection = keepPendingSelection || pendingPushHasNotLanded;
+    setPendingSelectionId(keepOptimisticSelection ? id : null);
+    if (id === selectedId && !pendingPushHasNotLanded) return;
     const params = new URLSearchParams(searchParams.toString());
     params.set("session", id);
     router.push(`${pathname}?${params.toString()}`);
   };
 
-  const createSession = () => {
+  /** New Session opens a local draft: no POST, no catalog row, live composer. */
+  const startDraft = () => {
+    setCreateError("");
+    setDraftPrompt("");
+    setDraftActive(true);
+  };
+
+  const cancelDraft = () => {
+    draftGenerationRef.current += 1;
+    setDraftBusy(false);
+  };
+
+  /** First send creates and selects the session before starting its prompt. */
+  const sendDraft = () => {
+    if (services === null || draftBusy) return;
+    const prompt = draftPrompt;
+    if (prompt.trim().length === 0) return;
     const request = {
       provider: resolveProviderAccount(defaults.provider, oauthProviders),
       model: defaults.model,
       ...(defaults.base_url ? { base_url: defaults.base_url } : {}),
       ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}),
     };
+    const generation = ++draftGenerationRef.current;
     setCreateError("");
-    void catalog.createSession(request).then(
-      (id) => {
+    setDraftBusy(true);
+    void (async () => {
+      try {
+        const id = await catalog.createSession(request);
+        if (generation !== draftGenerationRef.current) return;
         setRuntimeOverlay({
           sessionId: id,
           provider: request.provider,
           model: request.model,
           baseUrl: request.base_url ?? "",
         });
-        navigateToSession(id);
-      },
-      (error: unknown) => {
+        setPendingSessions((previous) => ({
+          ...previous,
+          [id]: {
+            id,
+            title: prompt.trim().split("\n")[0] ?? "",
+            meta: formatProviderModel(request.provider, request.model),
+          },
+        }));
+        setDraftActive(false);
+        setDraftPrompt("");
+        navigateToSession(id, true);
+        await services.controller.selectSession(id);
+        if (generation !== draftGenerationRef.current) return;
+        await services.controller.send(prompt, crypto.randomUUID());
+        if (generation !== draftGenerationRef.current) return;
+        catalog.refresh();
+      } catch (error) {
+        if (generation !== draftGenerationRef.current) return;
         setCreateError(errorMessageOf(error));
-      },
-    );
+      } finally {
+        if (generation === draftGenerationRef.current) setDraftBusy(false);
+      }
+    })();
   };
 
   const applyRuntime = async (patch: RuntimeConfigPatch) => {
     const summary =
-      selectedId === null
+      draftActive || selectedId === null
         ? null
         : (catalog.sessions.find((session) => session.session_id === selectedId) ?? null);
     const sessionProvider =
@@ -339,7 +493,7 @@ export function AppFrameView() {
       resolvedPatch.provider = resolveProviderAccount(patch.provider, oauthProviders);
     }
     try {
-      if (selectedId !== null && services !== null && isSettingsClient(services.catalog)) {
+      if (!draftActive && selectedId !== null && services !== null && isSettingsClient(services.catalog)) {
         const updated = await services.catalog.updateRuntimeConfig(selectedId, resolvedPatch);
         const persisted = {
           provider: updated.provider_name ?? nextDefaults.provider,
@@ -352,16 +506,19 @@ export function AppFrameView() {
           model: persisted.model,
           baseUrl: persisted.base_url,
         });
+        nonDefaultDefaultsChosenRef.current = !isBuiltInSessionDefault(persisted);
         persistSessionDefaults(persisted);
         setDefaults(persisted);
         setApiKey(patch.api_key ?? "");
         return;
       }
+      nonDefaultDefaultsChosenRef.current = !isBuiltInSessionDefault(nextDefaults);
       persistSessionDefaults(nextDefaults);
       setDefaults(nextDefaults);
       setApiKey(patch.api_key ?? "");
     } catch (error) {
       if (isTapeReboundError(error)) {
+        nonDefaultDefaultsChosenRef.current = !isBuiltInSessionDefault(nextDefaults);
         persistSessionDefaults(nextDefaults);
         setDefaults(nextDefaults);
         setApiKey(patch.api_key ?? "");
@@ -396,7 +553,7 @@ export function AppFrameView() {
         : defaults.base_url;
 
   useEffect(() => {
-    const provider = (liveProvider || defaults.provider).trim();
+    const provider = (draftActive ? defaults.provider : liveProvider || defaults.provider).trim();
     if (!provider || services === null || !isSettingsClient(services.catalog)) {
       setComposerModels([]);
       setComposerModelStatus("ready");
@@ -415,13 +572,20 @@ export function AppFrameView() {
       },
     );
     return () => controller.abort();
-  }, [liveProvider, defaults.provider, services]);
+  }, [draftActive, liveProvider, defaults.provider, services]);
 
   const chatForSelection =
     chat !== null && selectedId !== null && chat.state.sessionId === selectedId ? chat : null;
 
+  // A local draft displays the defaults that its first send will create with.
+  const shownProvider = draftActive ? defaults.provider : liveProvider;
+  const shownModel = draftActive ? defaults.model : liveModel;
+  const shownBaseUrl = draftActive ? defaults.base_url : liveBaseUrl;
+
   let timelineProps: TimelineProps;
-  if (chatForSelection !== null) {
+  if (draftActive) {
+    timelineProps = { messages: [], status: "ready" };
+  } else if (chatForSelection !== null) {
     timelineProps = {
       messages: chatForSelection.messages,
       status: timelineStatusFor(chatForSelection.state.status),
@@ -447,23 +611,25 @@ export function AppFrameView() {
       <Rail health={chat === null ? undefined : healthForStatus(chat.state.status)} />
       <Sidebar
         sessions={sessions}
-        selectedId={selectedId ?? ""}
+        selectedId={draftActive ? "" : (selectedId ?? "")}
         onSelect={navigateToSession}
-        onCreateSession={services === null ? undefined : createSession}
+        onCreateSession={services === null ? undefined : startDraft}
         createPending={catalog.createPending}
         createError={createError}
         {...catalogState}
       />
       <main className="conversation">
         <SessionBar
-          title={selection === null ? "" : selection.title}
+          title={draftActive || selection === null ? "" : selection.title}
           detailsOpen={detailsOpen}
           onToggleDetails={() => setDetailsOpen((open) => !open)}
           toggleRef={toggleRef}
-          chatStatus={chatForSelection === null ? undefined : chatForSelection.state.status}
+          chatStatus={
+            draftActive || chatForSelection === null ? undefined : chatForSelection.state.status
+          }
           providerModel={formatProviderModel(
-            formatProviderAccountLabel(liveProvider, oauthAccounts),
-            liveModel,
+            formatProviderAccountLabel(shownProvider, oauthAccounts),
+            shownModel,
           )}
           theme={theme}
           onOpenSettings={() => setSettingsOpen((open) => !open)}
@@ -476,10 +642,10 @@ export function AppFrameView() {
         {settingsOpen && services !== null && isSettingsClient(services.catalog) ? (
           <SettingsPanel
             open
-            sessionId={selectedId}
-            providerName={liveProvider || defaults.provider}
-            modelName={liveModel || defaults.model}
-            currentBaseUrl={liveBaseUrl}
+            sessionId={draftActive ? null : selectedId}
+            providerName={shownProvider || defaults.provider}
+            modelName={shownModel || defaults.model}
+            currentBaseUrl={shownBaseUrl}
             accounts={oauthAccounts}
             onAccountsChange={(next) => {
               setOauthAccounts(next.map((account) => ({
@@ -521,7 +687,30 @@ export function AppFrameView() {
           )}
         </div>
         <div className="composer-slot" ref={composerSlotRef}>
-          {chatForSelection === null ? (
+          {draftActive ? (
+            <Composer
+              draft={draftPrompt}
+              onDraftChange={setDraftPrompt}
+              onSend={sendDraft}
+              onCancel={cancelDraft}
+              onResume={() => {}}
+              onReload={() => {}}
+              status={draftBusy ? "sending" : "idle"}
+              canResume={false}
+              model={defaults.model}
+              onModelChange={(model) => {
+                void applyRuntime({ model });
+              }}
+              provider={resolveProviderAccount(defaults.provider, oauthProviders)}
+              onProviderChange={(nextProvider) => {
+                void applyRuntime({ provider: nextProvider });
+              }}
+              oauthProviders={oauthProviders}
+              accounts={oauthAccounts}
+              modelOptions={composerModels}
+              modelStatus={composerModelStatus}
+            />
+          ) : chatForSelection === null ? (
             <Composer />
           ) : (
             <Composer
@@ -552,8 +741,8 @@ export function AppFrameView() {
       <DetailsPane
         open={detailsOpen}
         paneRef={detailsRef}
-        provider={liveProvider}
-        model={liveModel}
+        provider={shownProvider}
+        model={shownModel}
       />
     </div>
   );

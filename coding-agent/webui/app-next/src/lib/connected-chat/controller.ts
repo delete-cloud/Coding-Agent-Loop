@@ -55,6 +55,13 @@ export interface ConnectedChatControllerClient {
 type Listener = () => void;
 type StreamKind = "passive" | "owning";
 
+interface PassiveFollowRequest {
+  sessionId: string;
+  cursor: string;
+  generation: number;
+  abort: AbortController;
+}
+
 interface ConsumeOutcome {
   observedEvent: boolean;
   replayControl: boolean;
@@ -123,9 +130,7 @@ export class ConnectedChatController {
   private cancelAbort: AbortController | null = null;
   private passiveFollowRunning = false;
   private owningAdmitted = false;
-  private pendingPassiveFollow:
-    | { sessionId: string; cursor: string; generation: number; abort: AbortController }
-    | null = null;
+  private pendingPassiveFollow: PassiveFollowRequest | null = null;
   private readonly reconnectDelayMs: (attempt: number) => number;
   private readonly sleep: (delayMs: number, signal: AbortSignal) => Promise<boolean>;
   private readonly finalizeTimeoutMs: number;
@@ -427,7 +432,7 @@ export class ConnectedChatController {
       }
     } finally {
       this.passiveFollowRunning = false;
-      const pending = this.pendingPassiveFollow;
+      const pending = this.pendingPassiveFollow as PassiveFollowRequest | null;
       this.pendingPassiveFollow = null;
       if (
         pending !== null
