@@ -323,22 +323,13 @@ async def test_sse_disconnect_finalize_commits_turn_settled(
             del kwargs
             self.body_iterator = body_iterator
 
-    async def fake_run_agent(_session_id: str, _prompt: str) -> None:
+    async def fake_run_agent(_session_id: str, _prompt: str, **_kwargs: object) -> None:
         nonlocal turn_id
         session = await manager.get_session_async(_session_id)
-        authority = manager._owner_authorities[_session_id]
-        session_state = cast(dict[str, object], session.to_store_data())
-        session_state["turn_id"] = None
-        session_state["turn_in_progress"] = False
-        admission = await store.admit_chat_command(
-            authority,
-            prompt=_prompt,
-            command_id="disconnect-command",
-            parent_run_id=None,
-            session_state=session_state,
-        )
-        turn_id = admission.run_id
-        session.current_turn_id = turn_id
+        if session.current_turn_id is not None:
+            turn_id = session.current_turn_id
+        else:
+            session.current_turn_id = turn_id
         session.turn_in_progress = True
         session.turn_status = "running"
         await manager._persist_turn_started(session)

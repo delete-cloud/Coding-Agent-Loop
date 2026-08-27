@@ -289,8 +289,6 @@ def build_root_settlement(
         merged_result.update(
             {key: value for key, value in result_payload.items() if key != "text"}
         )
-    if result is not None:
-        merged_result["text"] = result
     metadata = dict(run.metadata)
     if extra_metadata:
         metadata.update(extra_metadata)

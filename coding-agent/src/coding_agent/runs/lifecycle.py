@@ -502,6 +502,7 @@ class RuntimeRunLifecycle:
         resume_context: RuntimeRunResumeContext | None = None,
         extra_metadata: JSONObject | None = None,
     ) -> None:
+        persistable = {key: value for key, value in result.items() if key != "text"}
         if self.settle_root_run is not None:
             result_text = result.get("text")
             if result_text is not None and not isinstance(result_text, str):
@@ -512,7 +513,7 @@ class RuntimeRunLifecycle:
                 outcome=status,
                 result=result_text,
                 error=error,
-                result_payload=result,
+                result_payload=persistable,
                 extra_metadata=extra_metadata,
             )
             return
@@ -521,7 +522,7 @@ class RuntimeRunLifecycle:
             run_id=run_id,
             status=status,
             ended_at=self.now(),
-            result=result,
+            result=persistable,
             error=error,
             resume_context=resume_context,
             extra_metadata=extra_metadata,

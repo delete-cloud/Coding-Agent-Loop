@@ -112,6 +112,8 @@ async def _settle_stream_disconnect(
     except asyncio.CancelledError:
         await settlement
         raise
+    except KeyError:
+        return
 
 
 @router.post(

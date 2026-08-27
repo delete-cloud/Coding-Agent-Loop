@@ -1323,6 +1323,7 @@ class TestReplInitialization:
             provider_name="openai",
             model_name="gpt-4o-test",
             base_url=None,
+            api_key=None,
             max_steps=10,
             tape_id="current-tape",
             task=None,

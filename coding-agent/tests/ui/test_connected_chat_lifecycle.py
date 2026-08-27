@@ -57,7 +57,7 @@ async def _assert_terminal_atomic(kind: str, tmp_path: Path) -> None:
     assert run is not None
     assert run.status == "completed"
     assert run.ended_at is not None
-    assert run.result == {"text": "done"}
+    assert "text" not in run.result
     session = (
         store.load_session(SESSION_ID)
         if kind == "sqlite"

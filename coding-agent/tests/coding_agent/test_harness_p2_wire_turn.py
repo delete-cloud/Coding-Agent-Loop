@@ -23,11 +23,14 @@ from coding_agent.server.stores.session_owner_store import SQLiteSessionOwnerSto
 from coding_agent.stores.local import local_sqlite_path, local_sqlite_storage_config
 from coding_agent.wire.protocol import StreamDelta
 
+from coding_agent.events.connected_chat import CHAT_EVENT_KINDS
+
 _TURN_STARTED = "harness.TurnStarted"
 _TURN_SETTLED = "harness.TurnSettled"
 _SESSION_PERSISTED = "harness.SessionPersisted"
 _TURN_MIDFLIGHT = "harness.TurnMidFlight"
 _APPROVAL_KINDS = frozenset({"harness.ApprovalRequested", "harness.ApprovalDecided"})
+_CHAT_KINDS = frozenset(CHAT_EVENT_KINDS)
 _SOURCE_PATH = (
     Path(__file__).resolve().parents[2]
     / "src"
@@ -185,9 +188,10 @@ async def test_successful_turn_authoritative_events_are_bounded_and_readable(
     assert kinds.count(_TURN_STARTED) == 1
     assert kinds.count(_TURN_SETTLED) == 1
     approval_count = sum(1 for kind in kinds if kind in _APPROVAL_KINDS)
-    assert 2 <= len(kinds) <= 2 + approval_count
+    chat_count = sum(1 for kind in kinds if kind in _CHAT_KINDS)
+    assert 2 <= len(kinds) <= 2 + approval_count + chat_count
     assert len(kinds) != 24
-    assert set(kinds) <= {_TURN_STARTED, _TURN_SETTLED, *_APPROVAL_KINDS}
+    assert set(kinds) <= {_TURN_STARTED, _TURN_SETTLED, *_APPROVAL_KINDS, *_CHAT_KINDS}
 
 
 @pytest.mark.asyncio
@@ -204,6 +208,8 @@ async def test_successful_turn_event_ids_are_deterministic(tmp_path: Path) -> No
     replay = await store.replay_from_retention_floor(session_id)
     assert replay.events
     for event in replay.events:
+        if event.event_kind in _CHAT_KINDS:
+            continue
         expected = f"{session_id}:{event.event_kind}:{session.current_turn_id}"
         if event.event_kind in _APPROVAL_KINDS:
             assert event.event_id.startswith(f"{expected}:")
@@ -288,7 +294,11 @@ async def test_successful_turn_persist_does_not_upsert_run_state(
     store.commit_authoritative_uow = spy  # type: ignore[method-assign]
     await _run_successful_turn(manager, session_id)
     assert units
-    assert all(getattr(unit, "run_state") is None for unit in units)
+    assert all(
+        getattr(unit, "run_state") is None
+        or getattr(getattr(unit, "event", None), "event_kind", None) == "root_terminal"
+        for unit in units
+    )
 
 
 @pytest.mark.asyncio

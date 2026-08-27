@@ -328,7 +328,7 @@ class LifecycleOps:
                 else None
             )
 
-            if interrupted_run_id is not None:
+            if interrupted_run_id is not None and self.can_settle_root_run_authoritatively():
                 from coding_agent.events.connected_chat import (
                     RootRunAlreadySettledError,
                 )
@@ -348,6 +348,11 @@ class LifecycleOps:
                 session_id=session_id,
                 task=session.task,
             )
+            if (
+                interrupted_run_id is not None
+                and not self.can_settle_root_run_authoritatively()
+            ):
+                await self._mark_graceful_shutdown_interrupted_run(interrupted_run_id)
 
             await self._runtime_closer.close(session)
             session.task = None
@@ -366,6 +371,31 @@ class LifecycleOps:
             except asyncio.CancelledError:
                 pass
         self._chat_runs_by_session.pop(session_id, None)
+
+    async def _mark_graceful_shutdown_interrupted_run(self, run_id: str) -> None:
+        store = self._runtime_store
+        if store is None:
+            return
+        run = await store.load_agent_run(run_id)
+        if run is None:
+            return
+        if run.status not in GRACEFUL_SHUTDOWN_INTERRUPTABLE_RUN_STATUSES:
+            return
+        interrupted_at = datetime.now(UTC)
+        metadata = dict(run.metadata)
+        metadata["reclaimable"] = True
+        metadata["recovered_at"] = interrupted_at.isoformat()
+        metadata["recovery_reason"] = GRACEFUL_SHUTDOWN_RECOVERY_REASON
+        if self._owner_id is not None:
+            metadata["recovered_by_owner_id"] = self._owner_id
+        await store.update_agent_run(
+            run_id,
+            status="interrupted",
+            ended_at=interrupted_at,
+            metadata=cast(JSONObject, metadata),
+            result=run.result,
+            error=GRACEFUL_SHUTDOWN_INTERRUPTED_RUN_ERROR,
+        )
 
     async def close(self) -> None:
         await self._close_resource_async(self._store)
