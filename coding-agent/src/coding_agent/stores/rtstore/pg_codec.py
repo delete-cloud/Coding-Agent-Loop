@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agentkit.runtime.messages import CommitRef, OperationStateVersion
+from agentkit.runtime.contracts import CommitRef, OperationStateVersion
 
 from coding_agent.stores.rtstore.records import (
     AgentInteractionRecord,

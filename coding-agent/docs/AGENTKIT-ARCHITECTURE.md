@@ -28,7 +28,7 @@ Coding Agent product policies layered over AgentKit tape/checkpoint mechanisms.
 │  (coding_agent, custom agents, etc.)    │
 ├─────────────────────────────────────────┤
 │              AgentKit API               │
-│  Pipeline · Plugins · Tape · Tools      │
+│ AgentEngine · SegmentCoordinator · Ports│
 ├─────────────────────────────────────────┤
 │           Hook Runtime Layer            │
 │  HookRuntime · HookSpec · Registry      │
@@ -106,9 +106,12 @@ src/agentkit/
 
 ## 3. Core Abstractions
 
-### 3.1 Pipeline & PipelineContext
+### 3.1 Legacy internal Pipeline and PipelineContext
 
-The `Pipeline` is the central execution engine. It runs one agent **turn** through 7 sequential stages, threading a mutable `PipelineContext` through each.
+`Pipeline` and `PipelineContext` remain directly importable from
+`agentkit.runtime.pipeline` for the coding-agent compatibility path. They are
+not public `agentkit` or `agentkit.runtime` exports. This legacy runner executes
+one agent **turn** through seven sequential stages with a mutable context.
 
 ```python
 @dataclass

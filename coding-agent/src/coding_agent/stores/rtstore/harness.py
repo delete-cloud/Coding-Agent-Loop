@@ -11,7 +11,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Final, cast
 
-from agentkit.runtime.messages import (
+from agentkit.runtime.contracts import (
     AppliedCommandDisposition,
     CommandDisposition,
     CommitRef,

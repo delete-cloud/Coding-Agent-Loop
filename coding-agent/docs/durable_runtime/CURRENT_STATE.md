@@ -58,8 +58,9 @@ queued/completed/cancelled/interrupted run lifecycle table.
 
 ## PipelineAdapter
 
-`PipelineAdapter` is the bridge from `agentkit.runtime.Pipeline` provider events
-to `coding_agent.wire` messages.
+`PipelineAdapter` is the bridge from the internal legacy
+`agentkit.runtime.pipeline.Pipeline` provider events to `coding_agent.wire`
+messages.
 
 Key behavior:
 
@@ -243,8 +244,8 @@ surface, and PG tape rows do not expose indexed fields for `kind`, `run_id`,
 - Keep AgentKit core generic. App-specific durable runtime tables should start
   in `coding_agent`.
 - Preserve JSONL/file defaults unless PG is explicitly configured.
-- Do not rewrite `agentkit.runtime.Pipeline`; add wrappers/adapters around
-  existing extension points where possible.
+- Do not rewrite the internal legacy `agentkit.runtime.pipeline.Pipeline`;
+  add wrappers/adapters around existing extension points where possible.
 - Avoid destructive migrations. New tables/indexes should be additive and
   idempotent.
 - Do not put raw prompt, content, message, result, secret, or text values into

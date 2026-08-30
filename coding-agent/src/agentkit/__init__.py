@@ -1,7 +1,7 @@
 """agentkit — A hook-driven agent framework.
 
 Core API:
-    HookRuntime, Pipeline, PipelineContext — Runtime and execution
+    AgentEngine, SegmentCoordinator, HookRuntime — Runtime and execution
     Plugin, PluginRegistry — Plugin system
     Directive, Approve, Reject, AskUser, Checkpoint, MemoryRecord — Effect descriptions
     Entry, Tape, ForkTapeStore — Conversation history
@@ -47,7 +47,7 @@ from agentkit.providers import (
     ToolCallEvent,
     ToolResultEvent,
 )
-from agentkit.runtime import HookRuntime, Lifecycle, Pipeline, PipelineContext
+from agentkit.runtime import AgentEngine, HookRuntime, Lifecycle, SegmentCoordinator
 from agentkit.checkpoint import CheckpointMeta, CheckpointService, CheckpointSnapshot
 from agentkit.result import (
     ArtifactRef,
@@ -73,10 +73,10 @@ from agentkit.tools import ToolRegistry, ToolSchema, tool
 
 __all__ = [
     # Runtime
+    "AgentEngine",
+    "SegmentCoordinator",
     "HookRuntime",
     "Lifecycle",
-    "Pipeline",
-    "PipelineContext",
     # Plugins
     "Plugin",
     "PluginRegistry",

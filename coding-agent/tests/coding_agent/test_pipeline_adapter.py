@@ -5,6 +5,12 @@ import pytest
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
+from agentkit.runtime.contracts import (
+    CommittedFactNotice,
+    ModelGenerationAction,
+    ModelRequest,
+    TransitionProposal,
+)
 from agentkit.directive.executor import DirectiveExecutor
 from agentkit.errors import PipelineError
 from agentkit.providers.models import (
@@ -21,6 +27,7 @@ from agentkit.tape.tape import Tape
 from agentkit.tape.models import Entry
 
 from coding_agent.adapter import PipelineAdapter
+from coding_agent.adapter.pipeline import committed_fact_notice_to_wire
 from coding_agent.adapter.types import StopReason, TurnOutcome
 from coding_agent.plugins.metrics import SessionMetricsPlugin
 from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictError
@@ -1251,3 +1258,100 @@ class TestThinkingAndUsageEventHandling:
         assert msgs_before_end[2].text == "second thought"
         assert isinstance(msgs_before_end[3], StreamDelta)
         assert msgs_before_end[3].content == "done"
+
+
+def test_phase_c_adapter_maps_notices_to_tool_call_and_tool_result_deltas() -> None:
+    tool_call = committed_fact_notice_to_wire(
+        CommittedFactNotice(
+            fact_id="fact-tool-call",
+            fact_kind="tool_call",
+            payload={
+                "tool_call_id": "call-1",
+                "tool_name": "read",
+                "arguments": {"path": "README.md"},
+            },
+            event_record_id="event-1",
+        ),
+        session_id="session-1",
+        agent_id="agent-1",
+    )
+    tool_result = committed_fact_notice_to_wire(
+        CommittedFactNotice(
+            fact_id="fact-tool-result",
+            fact_kind="tool_result",
+            payload={
+                "tool_call_id": "call-1",
+                "tool_name": "read",
+                "result": {"content": "ok"},
+                "is_error": False,
+            },
+            event_record_id="event-2",
+        ),
+        session_id="session-1",
+        agent_id="agent-1",
+    )
+
+    assert isinstance(tool_call, ToolCallDelta)
+    assert tool_call.call_id == "call-1"
+    assert tool_call.tool_name == "read"
+    assert tool_call.arguments == {"path": "README.md"}
+    assert isinstance(tool_result, ToolResultDelta)
+    assert tool_result.call_id == "call-1"
+    assert tool_result.result == {"content": "ok"}
+    assert tool_result.display_result == '{"content": "ok"}'
+    assert tool_result.is_error is False
+
+
+def test_phase_c_adapter_preserves_wire_events_and_stop_reasons() -> None:
+    notice = CommittedFactNotice(
+        fact_id="fact-tool-call",
+        fact_kind="tool_call",
+        payload={
+            "tool_call_id": "call-1",
+            "tool_name": "shell",
+            "arguments": {"command": "pwd"},
+        },
+        event_record_id="event-1",
+    )
+
+    wire = committed_fact_notice_to_wire(
+        notice,
+        session_id="session-1",
+        agent_id="agent-1",
+    )
+
+    assert wire == ToolCallDelta(
+        tool_name="shell",
+        arguments={"command": "pwd"},
+        call_id="call-1",
+        session_id="session-1",
+        agent_id="agent-1",
+        timestamp=wire.timestamp,
+    )
+    assert StopReason.NO_TOOL_CALLS.value == "no_tool_calls"
+    assert StopReason.MAX_STEPS_REACHED.value == "max_steps_reached"
+    assert StopReason.ERROR.value == "error"
+    assert StopReason.INTERRUPTED.value == "interrupted"
+
+
+def test_uncommitted_proposal_never_projects_tool_wire_events() -> None:
+    proposal = TransitionProposal(
+        transition_id="transition-uncommitted",
+        state_value={},
+        next_action=ModelGenerationAction(
+            request=ModelRequest(
+                request_id="request-1",
+                run_id="run-1",
+                round_index=1,
+                commands=(),
+                context={},
+            )
+        ),
+    )
+
+    with pytest.raises(TypeError, match="CommittedFactNotice"):
+        committed_fact_notice_to_wire(  # type: ignore[arg-type]
+            proposal,
+            session_id="session-1",
+            agent_id="agent-1",
+        )

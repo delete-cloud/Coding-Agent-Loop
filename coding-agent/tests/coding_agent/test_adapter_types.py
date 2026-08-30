@@ -1,10 +1,23 @@
 """Tests for adapter_types module."""
 
 import httpx
+from agentkit.runtime import (
+    AppliedCommandDisposition,
+    BlockedOutcome,
+    CancelledOutcome,
+    CommitRef,
+    CompletedOutcome,
+    FailedOutcome,
+    FailureReport,
+    OperationStateVersion,
+    RoundLimitOutcome,
+    SafeYieldOutcome,
+)
 from coding_agent.adapter.types import (
     StopReason,
     TurnOutcome,
     exception_error_message,
+    turn_outcome_from_segment_outcome,
 )
 
 
@@ -119,3 +132,102 @@ class TestExceptionErrorMessage:
             response=response,
         )
         assert "403 Forbidden" in exception_error_message(exc)
+
+
+def _committed_state() -> OperationStateVersion:
+    return OperationStateVersion(
+        run_id="run-1",
+        revision=2,
+        projection_epoch=1,
+        commit_ref=CommitRef(transition_id="transition-2"),
+        value={},
+    )
+
+
+def test_segment_outcome_maps_to_compatibility_stop_reasons() -> None:
+    state = _committed_state()
+    completed = turn_outcome_from_segment_outcome(
+        CompletedOutcome(
+            state_version=state,
+            final_message="done",
+            steps_taken=1,
+            stop_reason="no_tool_calls",
+        )
+    )
+    limited = turn_outcome_from_segment_outcome(
+        RoundLimitOutcome(state_version=state, steps_taken=4)
+    )
+    failed = turn_outcome_from_segment_outcome(
+        FailedOutcome(
+            state_version=state,
+            error=FailureReport(code="provider_error", message="provider failed"),
+            steps_taken=2,
+        )
+    )
+    cancelled = turn_outcome_from_segment_outcome(
+        CancelledOutcome(
+            state_version=state,
+            command_disposition=AppliedCommandDisposition(command_id="cancel-1"),
+            steps_taken=2,
+        )
+    )
+    interrupted = turn_outcome_from_segment_outcome(
+        SafeYieldOutcome(
+            state_version=state,
+            reason="interrupt",
+            steps_taken=2,
+        )
+    )
+
+    assert completed is not None
+    assert completed.stop_reason is StopReason.NO_TOOL_CALLS
+    assert completed.final_message == "done"
+    assert limited is not None
+    assert limited.stop_reason is StopReason.MAX_STEPS_REACHED
+    assert failed is not None
+    assert failed.stop_reason is StopReason.ERROR
+    assert failed.error == "provider failed"
+    assert cancelled is not None
+    assert cancelled.stop_reason is StopReason.INTERRUPTED
+    assert interrupted is not None
+    assert interrupted.stop_reason is StopReason.INTERRUPTED
+
+
+def test_blocked_and_undispositioned_safe_yield_do_not_settle_turn() -> None:
+    state = _committed_state()
+    assert (
+        turn_outcome_from_segment_outcome(
+            BlockedOutcome(
+                state_version=state,
+                reason="approval_required",
+                effect=None,
+                steps_taken=1,
+            )
+        )
+        is None
+    )
+    assert (
+        turn_outcome_from_segment_outcome(
+            SafeYieldOutcome(
+                state_version=state,
+                reason="stale_mailbox_cut",
+                steps_taken=1,
+            )
+        )
+        is None
+    )
+
+
+def test_completed_doom_loop_override_remains_adapter_side() -> None:
+    mapped = turn_outcome_from_segment_outcome(
+        CompletedOutcome(
+            state_version=_committed_state(),
+            final_message="repeated",
+            steps_taken=3,
+            stop_reason="no_tool_calls",
+        ),
+        doom_loop=True,
+    )
+
+    assert mapped is not None
+    assert mapped.stop_reason is StopReason.DOOM_LOOP

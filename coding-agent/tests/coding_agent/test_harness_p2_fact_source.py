@@ -10,7 +10,7 @@ from typing import Any, cast
 import pytest
 
 from agentkit.checkpoint.models import CheckpointMeta, CheckpointSnapshot
-from agentkit.runtime.messages import (
+from agentkit.runtime.contracts import (
     AppliedCommandDisposition,
     EffectMutation,
     EffectPlan,
