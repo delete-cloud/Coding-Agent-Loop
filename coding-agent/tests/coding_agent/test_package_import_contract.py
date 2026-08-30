@@ -14,7 +14,8 @@ def test_agentkit_public_imports_do_not_load_coding_agent_modules() -> None:
 import sys
 import agentkit
 
-assert agentkit.Pipeline.__module__.startswith("agentkit.")
+assert agentkit.AgentEngine.__module__.startswith("agentkit.")
+assert agentkit.SegmentCoordinator.__module__.startswith("agentkit.")
 assert agentkit.PluginRegistry.__module__.startswith("agentkit.")
 assert agentkit.ToolRegistry.__module__.startswith("agentkit.")
 assert agentkit.Tape.__module__.startswith("agentkit.")
