@@ -6,6 +6,8 @@ import json
 import sqlite3
 from datetime import datetime
 from typing import cast
+
+from agentkit.runtime.messages import CommitRef, OperationStateVersion
 from coding_agent.stores.rtstore.records import (
     AgentInteractionRecord,
     AgentRunRecord,
@@ -100,6 +102,54 @@ def _sqlite_optional_datetime(
     if value is None:
         return None
     return datetime.fromisoformat(value)
+
+
+def _operation_state_from_sqlite_row(row: sqlite3.Row) -> OperationStateVersion:
+    fact_seq_start = _sqlite_optional_int(
+        row,
+        "fact_seq_start",
+        context="operation state",
+    )
+    fact_seq_end = _sqlite_optional_int(
+        row,
+        "fact_seq_end",
+        context="operation state",
+    )
+    return OperationStateVersion(
+        run_id=_sqlite_required_str(row, "run_id", context="operation state"),
+        revision=_sqlite_required_int(row, "revision", context="operation state"),
+        projection_epoch=_sqlite_required_int(
+            row,
+            "projection_epoch",
+            context="operation state",
+        ),
+        commit_ref=CommitRef(
+            transition_id=_sqlite_required_str(
+                row,
+                "transition_id",
+                context="operation state",
+            ),
+            fact_seq_start=(None if fact_seq_start is None else str(fact_seq_start)),
+            fact_seq_end=None if fact_seq_end is None else str(fact_seq_end),
+        ),
+        value=_json_object_from_sql(row["value"], context="operation state value"),
+    )
+
+
+def _transition_receipt_from_sqlite_row(
+    row: sqlite3.Row,
+) -> tuple[str, JSONObject]:
+    return (
+        _sqlite_required_str(
+            row,
+            "mutation_fingerprint",
+            context="transition receipt",
+        ),
+        _json_object_from_sql(
+            row["result"],
+            context="transition receipt result",
+        ),
+    )
 
 
 def _agent_run_sqlite_values(record: AgentRunRecord) -> tuple[object, ...]:

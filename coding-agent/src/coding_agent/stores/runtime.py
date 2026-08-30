@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
+    from agentkit.runtime.messages import OperationStateVersion, TransitionReceipt
     from coding_agent.events.connected_chat import (
         ChatCommandAdmission,
         ChatSnapshot,
@@ -170,6 +171,19 @@ class HarnessFactSourceStore(Protocol):
         authority: OwnerAuthority,
         unit: AuthoritativeUnitOfWork,
     ) -> AuthoritativeCommit: ...
+
+    async def load_operation_state(
+        self,
+        session_id: str,
+        run_id: str,
+    ) -> OperationStateVersion | None: ...
+
+    async def load_transition_receipt(
+        self,
+        session_id: str,
+        projection_epoch: int,
+        transition_id: str,
+    ) -> TransitionReceipt | None: ...
 
     async def load_session_fact_source(
         self,
