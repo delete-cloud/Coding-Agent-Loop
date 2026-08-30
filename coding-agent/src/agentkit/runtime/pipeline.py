@@ -40,7 +40,12 @@ from agentkit.runtime.messages import (
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
 from agentkit.tools import FatalToolExecutionError
-from agentkit.tools.toolset import ToolCallRequest, ToolExecutionOptions, Toolset
+from agentkit.tools.toolset import (
+    ToolCallRequest,
+    ToolExecutionOptions,
+    ToolExecutor,
+    Toolset,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -333,10 +338,13 @@ class Pipeline:
         runtime: HookRuntime,
         registry: PluginRegistry,
         directive_executor: Any = None,
+        *,
+        tool_executor: ToolExecutor | None = None,
     ) -> None:
         self._runtime = runtime
         self._registry = registry
         self._directive_executor = directive_executor
+        self._tool_executor = tool_executor
 
     @property
     def stage_names(self) -> list[str]:
@@ -347,6 +355,7 @@ class Pipeline:
             ctx.toolset = Toolset(
                 runtime=self._runtime,
                 directive_executor=self._directive_executor,
+                host_executor=self._tool_executor,
             )
         return ctx.toolset
 
@@ -896,7 +905,6 @@ class Pipeline:
                             ctx=ctx,
                             options=ToolExecutionOptions(
                                 timeout_seconds=ctx.config.get("tool_timeout_seconds"),
-                                max_retries=int(ctx.config.get("tool_max_retries", 0)),
                             ),
                         )
 

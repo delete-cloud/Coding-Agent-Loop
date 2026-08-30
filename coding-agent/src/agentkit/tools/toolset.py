@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -68,8 +68,21 @@ def _set_tool_result_attributes(
         span.set_attribute("tool.error_type", type(result.error).__name__)
 
 
+class ToolExecutor(Protocol):
+    """Host-owned execution contract used by the compatibility Toolset."""
+
+    def execute_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any] | None,
+        **kwargs: Any,
+    ) -> Any:
+        """Return a tool result, or UNHANDLED_TOOL_RESULT before side effects."""
+        ...
+
+
 class ToolProvider(Protocol):
-    """Provider contract for components that expose executable tools."""
+    """Legacy plugin contract for components that expose executable tools."""
 
     def get_tools(self, **kwargs: Any) -> list[ToolSchema]: ...
 
@@ -79,13 +92,7 @@ class ToolProvider(Protocol):
         arguments: dict[str, Any] | None,
         **kwargs: Any,
     ) -> Any:
-        """Return a tool result, or UNHANDLED_TOOL_RESULT before side effects.
-
-        Returning UNHANDLED_TOOL_RESULT means the provider does not own this tool
-        call and must not perform I/O or mutate state. Toolset retries are scoped
-        to the provider hook that raised, so earlier unhandled providers are not
-        called again for the same retry cycle.
-        """
+        """Return a tool result, or UNHANDLED_TOOL_RESULT before side effects."""
         ...
 
 
@@ -148,16 +155,13 @@ class ToolApprovalResult:
 
 @dataclass(frozen=True, slots=True)
 class ToolExecutionOptions:
-    """Execution wrapper knobs; defaults preserve legacy behavior."""
+    """Execution wrapper timeout applied to a single dispatch attempt."""
 
     timeout_seconds: float | None = None
-    max_retries: int = 0
 
     def __post_init__(self) -> None:
         if self.timeout_seconds is not None and self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
-        if self.max_retries < 0:
-            raise ValueError("max_retries must be non-negative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,9 +199,11 @@ class Toolset:
         *,
         runtime: HookRuntime,
         directive_executor: Any = None,
+        host_executor: ToolExecutor | None = None,
     ) -> None:
         self._runtime = runtime
         self._directive_executor = directive_executor
+        self._host_executor = host_executor
 
     def collect_schemas(self) -> list[ToolSchema]:
         """Collect tool schemas from registered tool providers."""
@@ -590,20 +596,16 @@ class Toolset:
 
         raw_payload = [call.to_hook_payload() for call in calls]
         for hook in hooks:
-            raw_results: Any = None
-            for attempt in range(options.max_retries + 1):
-                try:
-                    raw_results = hook(tool_calls=raw_payload, ctx=ctx)
-                    raw_results = await self._await_if_needed(
-                        raw_results,
-                        timeout_seconds=options.timeout_seconds,
-                    )
-                    break
-                except FatalToolExecutionError:
-                    raise
-                except Exception as exc:
-                    if attempt == options.max_retries:
-                        return self._error_results(calls, exc)
+            try:
+                raw_results = hook(tool_calls=raw_payload, ctx=ctx)
+                raw_results = await self._await_if_needed(
+                    raw_results,
+                    timeout_seconds=options.timeout_seconds,
+                )
+            except FatalToolExecutionError:
+                raise
+            except Exception as exc:
+                return self._error_results(calls, exc)
 
             if raw_results is None:
                 continue
@@ -661,34 +663,64 @@ class Toolset:
         ctx: Any,
         options: ToolExecutionOptions,
     ) -> ToolExecutionResult:
+        if hook_name == "execute_tool" and self._host_executor is not None:
+            error, result = await self._invoke_executor(
+                self._host_executor.execute_tool,
+                call,
+                ctx=ctx,
+                options=options,
+            )
+            if error is not None:
+                return ToolExecutionResult(
+                    tool_call_id=call.tool_call_id,
+                    name=call.name,
+                    error=error,
+                )
+            if result is not UNHANDLED_TOOL_RESULT:
+                return self._envelope_raw_result(call, result)
+
         for hook in self._runtime.get_hooks(hook_name):
-            result: Any = UNHANDLED_TOOL_RESULT
-            for attempt in range(options.max_retries + 1):
-                try:
-                    result = hook(
-                        name=call.name,
-                        arguments=call.arguments,
-                        ctx=ctx,
-                    )
-                    result = await self._await_if_needed(
-                        result,
-                        timeout_seconds=options.timeout_seconds,
-                    )
-                    break
-                except FatalToolExecutionError:
-                    raise
-                except Exception as exc:
-                    if attempt == options.max_retries:
-                        return ToolExecutionResult(
-                            tool_call_id=call.tool_call_id,
-                            name=call.name,
-                            error=exc,
-                        )
+            error, result = await self._invoke_executor(
+                hook,
+                call,
+                ctx=ctx,
+                options=options,
+            )
+            if error is not None:
+                return ToolExecutionResult(
+                    tool_call_id=call.tool_call_id,
+                    name=call.name,
+                    error=error,
+                )
             if result is UNHANDLED_TOOL_RESULT:
                 continue
             return self._envelope_raw_result(call, result)
 
         return self._envelope_raw_result(call, UNHANDLED_TOOL_RESULT)
+
+    async def _invoke_executor(
+        self,
+        execute: Callable[..., Any],
+        call: ToolCallRequest,
+        *,
+        ctx: Any,
+        options: ToolExecutionOptions,
+    ) -> tuple[Exception | None, Any]:
+        try:
+            result = execute(
+                name=call.name,
+                arguments=call.arguments,
+                ctx=ctx,
+            )
+            result = await self._await_if_needed(
+                result,
+                timeout_seconds=options.timeout_seconds,
+            )
+            return None, result
+        except FatalToolExecutionError:
+            raise
+        except Exception as exc:
+            return exc, UNHANDLED_TOOL_RESULT
 
     def _execute_search_tools(self, call: ToolCallRequest) -> ToolExecutionResult:
         query_value = call.arguments.get("query", "")

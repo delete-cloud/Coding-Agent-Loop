@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from coding_agent.environment import CloudCommandResult, CloudEnvironment
-from coding_agent.plugins.core_tools import CoreToolsPlugin
+from coding_agent.plugins.core_tools import CoreToolExecutor
 
 
 @dataclass
@@ -71,7 +71,7 @@ def test_action_tools_route_from_selected_binding_to_workspace_client() -> None:
     selected_client = RecordingCloudClient()
 
     environment = CloudEnvironment(selected_client)
-    plugin = CoreToolsPlugin(environment=environment)
+    executor = CoreToolExecutor(environment=environment)
 
     calls: list[tuple[str, dict[str, Any]]] = [
         ("file_read", {"path": "src/app.py"}),
@@ -84,7 +84,7 @@ def test_action_tools_route_from_selected_binding_to_workspace_client() -> None:
     ]
 
     for name, arguments in calls:
-        _ = plugin.execute_tool(name=name, arguments=arguments)
+        _ = executor.execute_tool(name=name, arguments=arguments)
 
     assert [name for name, _ in selected_client.calls] == [name for name, _ in calls]
     assert selected_client.calls[-1] == (

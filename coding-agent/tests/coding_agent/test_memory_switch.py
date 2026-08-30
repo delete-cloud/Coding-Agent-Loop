@@ -11,6 +11,7 @@ from agentkit.tape.tape import Tape
 from coding_agent.core import app as app_module
 from coding_agent.core.app import create_agent
 from coding_agent.kb import DocumentChunk, KBSearchResult
+from coding_agent.plugins.core_tools import CoreToolExecutor
 from coding_agent.plugins.memory import MemoryPlugin
 from coding_agent.plugins.semantic_memory import SemanticMemoryPlugin
 from coding_agent.topics.lifecycle import TOPIC_FINALIZED, TOPIC_INITIAL, TopicLifecycle
@@ -1147,9 +1148,10 @@ backend = "fake"
         semantic_topic_store=topic_store,
         semantic_topic_index=topic_index,
     )
-    core_tools = pipeline._registry.get("core_tools")
+    executor = pipeline._tool_executor
+    assert isinstance(executor, CoreToolExecutor)
 
-    child_pipeline, _child_ctx = core_tools._child_pipeline_builder(
+    child_pipeline, _child_ctx = executor._child_pipeline_builder(
         parent_provider=None,
         tape_fork=Tape(tape_id="child-tape"),
         config_path=config_path,
