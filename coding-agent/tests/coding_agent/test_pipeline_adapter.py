@@ -1302,6 +1302,62 @@ def test_phase_c_adapter_maps_notices_to_tool_call_and_tool_result_deltas() -> N
     assert tool_result.is_error is False
 
 
+def test_committed_tool_result_recursively_thaws_and_redacts_nested_payload() -> None:
+    wire = committed_fact_notice_to_wire(
+        CommittedFactNotice(
+            fact_id="fact-tool-result-nested",
+            fact_kind="tool_result",
+            payload={
+                "tool_call_id": "call-nested",
+                "tool_name": "read",
+                "result": {
+                    "items": [
+                        {
+                            "api_token": "secret-value",
+                            "content": "ok",
+                        }
+                    ]
+                },
+                "is_error": False,
+            },
+            event_record_id="event-nested-result",
+        ),
+        session_id="session-1",
+        agent_id="agent-1",
+    )
+
+    assert isinstance(wire, ToolResultDelta)
+    assert wire.result == {"items": [{"api_token": "secret-value", "content": "ok"}]}
+    assert json.loads(json.dumps(wire.result)) == wire.result
+    assert "secret-value" not in wire.display_result
+    assert "***" in wire.display_result
+
+
+def test_committed_tool_call_recursively_thaws_nested_arguments() -> None:
+    wire = committed_fact_notice_to_wire(
+        CommittedFactNotice(
+            fact_id="fact-tool-call-nested",
+            fact_kind="tool_call",
+            payload={
+                "tool_call_id": "call-nested",
+                "tool_name": "write",
+                "arguments": {
+                    "files": [{"path": "README.md", "lines": [1, 2]}],
+                },
+            },
+            event_record_id="event-nested-call",
+        ),
+        session_id="session-1",
+        agent_id="agent-1",
+    )
+
+    assert isinstance(wire, ToolCallDelta)
+    assert wire.arguments == {
+        "files": [{"path": "README.md", "lines": [1, 2]}],
+    }
+    assert json.loads(json.dumps(wire.arguments)) == wire.arguments
+
+
 def test_phase_c_adapter_preserves_wire_events_and_stop_reasons() -> None:
     notice = CommittedFactNotice(
         fact_id="fact-tool-call",

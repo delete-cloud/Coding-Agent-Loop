@@ -39,6 +39,7 @@ from agentkit.runtime.contracts import (
     FailedOutcome,
     FailureReport,
     Initial,
+    JSONValue,
     InvalidTransitionCommitResult,
     ModelGenerationAction,
     ModelGenerationCompleted,
@@ -56,6 +57,7 @@ from agentkit.runtime.contracts import (
     PendingFact,
     RejectedCommandDisposition,
     RoundLimitOutcome,
+    RunSegmentRequest,
     RuntimeCommand,
     SafeYieldAction,
     SafeYieldOutcome,
@@ -554,3 +556,55 @@ def test_absent_command_disposition_remains_pending_and_no_deferred_exists() -> 
             superseded_by_command_id="replacement",
         ).kind.value,
     } == {"applied", "rejected", "superseded"}
+
+
+def test_run_segment_rejects_model_completion_for_inactive_request() -> None:
+    state = OperationStateVersion(
+        run_id="run-1",
+        revision=1,
+        projection_epoch=3,
+        commit_ref=CommitRef(transition_id="model-request-transition"),
+        value={
+            "_agentkit_runtime": {
+                "active_model_request_id": "model-request-active",
+            }
+        },
+    )
+    result = ModelGenerationResult(
+        result_id="model-result-wrong-request",
+        request_id="model-request-other",
+        assistant_content="must not commit",
+        finalized_thinking=None,
+        tool_calls=(),
+        usage=ModelUsage(input_tokens=1, output_tokens=1),
+        provider_stop=ProviderStopMetadata(reason="stop"),
+    )
+
+    with pytest.raises(ValueError, match="active model request"):
+        RunSegmentRequest(
+            session_id="session-1",
+            owner_id="owner-1",
+            owner_epoch=4,
+            state_version=state,
+            step_input=ModelGenerationCompleted(result=result),
+            max_rounds=3,
+        )
+
+
+@pytest.mark.parametrize("value", ["stdout", None, True, 7, 1.5, ["nested"]])
+def test_effect_results_accept_host_neutral_json_values(value: JSONValue) -> None:
+    completed = EffectCompletedResult(result=value)
+    settlement = EffectSettlement.completed(
+        input_id="effect-input-json",
+        tool_call_id="call-json",
+        tool_name="shell",
+        effect_id="effect-json",
+        attempt_id="attempt-json",
+        authorization_transition_id="dispatch-json",
+        owner_epoch=4,
+        result=completed.result,
+    )
+
+    expected = ("nested",) if value == ["nested"] else value
+    assert completed.result == expected
+    assert settlement.result == expected

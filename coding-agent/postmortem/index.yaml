@@ -697,3 +697,23 @@ patterns:
   - timeline
   - replay
   - audit
+- id: PM-0028
+  title: Settle post-dispatch outcomes before exit
+  path: patterns/PM-0028-settle-post-dispatch-outcomes-before-exit.md
+  severity: high
+  confidence: high
+  subsystems:
+  - agentkit
+  - runtime
+  related_files:
+  - src/agentkit/runtime/coordinator.py
+  - src/agentkit/runtime/contracts.py
+  - tests/agentkit/runtime/test_coordinator.py
+  related_commits: []
+  keywords:
+  - dispatch
+  - settlement
+  - cancellation
+  - safe-yield
+  - indeterminate
+  - duplicate-effect

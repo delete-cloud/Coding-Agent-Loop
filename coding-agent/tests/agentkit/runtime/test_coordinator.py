@@ -23,11 +23,14 @@ from agentkit.runtime import (
     DispatchAuthorizedResult,
     DispatchPermit,
     EffectCompletedResult,
+    EffectFailedResult,
     EffectMutation,
     EffectSettled,
     EffectSettlement,
+    EffectSettlementOutcome,
     EffectStatus,
     EngineStepRequest,
+    FailureReport,
     FailedOutcome,
     Initial,
     ModelGenerationResult,
@@ -1148,3 +1151,149 @@ async def test_frame_sink_and_fact_sink_delivery_failure_does_not_roll_back_dura
         "frame",
         "committed_fact",
     }
+
+
+@pytest.mark.asyncio
+async def test_completed_effect_settlement_commits_before_probe_safe_yield() -> None:
+    timeline: list[str] = []
+
+    class RaiseAfterExecutionProbe(QuietControlProbe):
+        def observe(self) -> ControlSnapshot:
+            self.timeline.append("control_observe")
+            self.observe_count += 1
+            executed = "effect_execute" in self.timeline
+            return ControlSnapshot(
+                generation=ControlGeneration(self.observe_count),
+                raised=executed,
+                reason="interrupt" if executed else None,
+            )
+
+    commits = RecordingCommitPort(timeline)
+    coordinator = _coordinator(
+        SequenceModelAdapter(
+            [_model_result("result-tool", content="", tool_calls=(_tool_call(),))],
+            timeline,
+        ),
+        commits,
+        RecordingEffectExecutor(timeline),
+    )
+
+    outcome = await coordinator.run(
+        _initial_request(),
+        control_probe=RaiseAfterExecutionProbe(timeline),
+        frame_sink=RecordingFrameSink(timeline),
+        committed_fact_sink=RecordingFactSink(timeline),
+    )
+
+    assert isinstance(outcome, SafeYieldOutcome)
+    assert len(commits.settlement_requests) == 1
+    assert timeline.index("effect_execute") < timeline.index("commit_settlement")
+
+
+@pytest.mark.asyncio
+async def test_executor_exception_commits_indeterminate_settlement() -> None:
+    timeline: list[str] = []
+
+    class RaisingExecutor(RecordingEffectExecutor):
+        async def execute(self, permit, cancellation):
+            self.timeline.append("effect_execute")
+            self.calls.append((permit, cancellation))
+            raise RuntimeError()
+
+    commits = RecordingCommitPort(timeline)
+    coordinator = _coordinator(
+        SequenceModelAdapter(
+            [_model_result("result-tool", content="", tool_calls=(_tool_call(),))],
+            timeline,
+        ),
+        commits,
+        RaisingExecutor(timeline),
+    )
+
+    outcome = await coordinator.run(
+        _initial_request(),
+        control_probe=QuietControlProbe(timeline),
+        frame_sink=RecordingFrameSink(timeline),
+        committed_fact_sink=RecordingFactSink(timeline),
+    )
+
+    assert isinstance(outcome, BlockedOutcome)
+    assert len(commits.settlement_requests) == 1
+    settlement = commits.settlement_requests[0].settlement
+    assert settlement.outcome is EffectSettlementOutcome.INDETERMINATE
+    assert settlement.reason_code == "effect_executor_error"
+    assert settlement.reason_message == "RuntimeError"
+
+
+@pytest.mark.asyncio
+async def test_executor_task_cancellation_commits_indeterminate_before_propagating() -> (
+    None
+):
+    class CancelledExecutor(RecordingEffectExecutor):
+        async def execute(self, permit, cancellation):
+            self.calls.append((permit, cancellation))
+            raise asyncio.CancelledError
+
+    commits = RecordingCommitPort()
+    coordinator = _coordinator(
+        SequenceModelAdapter(
+            [_model_result("result-tool", content="", tool_calls=(_tool_call(),))]
+        ),
+        commits,
+        CancelledExecutor(),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await coordinator.run(
+            _initial_request(),
+            control_probe=QuietControlProbe(),
+            frame_sink=RecordingFrameSink(),
+            committed_fact_sink=RecordingFactSink(),
+        )
+
+    assert len(commits.settlement_requests) == 1
+    settlement = commits.settlement_requests[0].settlement
+    assert settlement.outcome is EffectSettlementOutcome.INDETERMINATE
+    assert settlement.reason_code == "effect_executor_cancelled"
+
+
+@pytest.mark.asyncio
+async def test_failed_effect_message_reaches_committed_tool_result_notice() -> None:
+    class FailedExecutor(RecordingEffectExecutor):
+        async def execute(self, permit, cancellation):
+            self.calls.append((permit, cancellation))
+            return EffectFailedResult(
+                error=FailureReport(
+                    code="tool_failed",
+                    message="tool execution failed",
+                )
+            )
+
+    commits = RecordingCommitPort()
+    facts = RecordingFactSink()
+    coordinator = _coordinator(
+        SequenceModelAdapter(
+            [
+                _model_result("result-tool", content="", tool_calls=(_tool_call(),)),
+                _model_result("result-done", content="continued"),
+            ]
+        ),
+        commits,
+        FailedExecutor(),
+    )
+
+    outcome = await coordinator.run(
+        _initial_request(),
+        control_probe=QuietControlProbe(),
+        frame_sink=RecordingFrameSink(),
+        committed_fact_sink=facts,
+    )
+
+    assert isinstance(outcome, CompletedOutcome)
+    settlement = commits.settlement_requests[0].settlement
+    assert settlement.result == "tool execution failed"
+    tool_result = next(
+        notice for notice in facts.notices if notice.fact_kind == "tool_result"
+    )
+    assert tool_result.payload["result"] == "tool execution failed"
+    assert tool_result.payload["is_error"] is True

@@ -17,6 +17,7 @@ from .contracts import (
     Initial,
     ModelGenerationAction,
     ModelGenerationCompleted,
+    ModelGenerationResult,
     ModelRequest,
     PendingFact,
     PreparedEffectAction,
@@ -65,12 +66,14 @@ class AgentEngine:
             "pending_effect_plans": (),
         }
         state_value = _with_runtime_state(request.state_version.value, runtime_state)
+        state_value, model_request = _activate_model_request(
+            request.state_version.run_id,
+            state_value,
+        )
         return TransitionProposal(
             transition_id=transition_id,
             state_value=state_value,
-            next_action=ModelGenerationAction(
-                request=_model_request(request.state_version.run_id, state_value)
-            ),
+            next_action=ModelGenerationAction(request=model_request),
         )
 
     def _propose_model_completion(
@@ -81,6 +84,7 @@ class AgentEngine:
         result = step_input.result
         transition_id = _transition_id(request)
         runtime_state = _runtime_state(request.state_version.value)
+        _require_active_model_request(runtime_state, result.request_id)
         round_index = _runtime_int(runtime_state, "round_index") + 1
         facts = [
             PendingFact(
@@ -144,12 +148,17 @@ class AgentEngine:
                 )
 
         updated_runtime = dict(runtime_state)
+        del updated_runtime["active_model_request_id"]
         updated_runtime["round_index"] = round_index
         updated_runtime["pending_effect_plans"] = tuple(
             _effect_plan_value(plan) for plan in plans
         )
         updated_runtime["last_assistant_content"] = result.assistant_content
         state_value = _with_runtime_state(request.state_version.value, updated_runtime)
+        state_value = _append_conversation_messages(
+            state_value,
+            (_assistant_message(result),),
+        )
         if plans:
             next_action = _prepared_action(plans[0])
         else:
@@ -210,6 +219,18 @@ class AgentEngine:
             _effect_plan_value(plan) for plan in remaining
         )
         state_value = _with_runtime_state(request.state_version.value, updated_runtime)
+        state_value = _append_conversation_messages(
+            state_value,
+            (
+                {
+                    "role": "tool",
+                    "tool_call_id": settlement.tool_call_id,
+                    "name": settlement.tool_name,
+                    "content": settlement.result,
+                    "is_error": is_error,
+                },
+            ),
+        )
         if settlement.outcome is EffectSettlementOutcome.INDETERMINATE:
             next_action = BlockedAction(
                 reason="indeterminate_dispatch",
@@ -218,9 +239,11 @@ class AgentEngine:
         elif remaining:
             next_action = _prepared_action(remaining[0])
         else:
-            next_action = ModelGenerationAction(
-                request=_model_request(request.state_version.run_id, state_value)
+            state_value, model_request = _activate_model_request(
+                request.state_version.run_id,
+                state_value,
             )
+            next_action = ModelGenerationAction(request=model_request)
         return TransitionProposal(
             transition_id=transition_id,
             state_value=state_value,
@@ -282,12 +305,29 @@ class AgentEngine:
             _effect_plan_value(item) for item in remaining
         )
         state_value = _with_runtime_state(request.state_version.value, updated_runtime)
+        state_value = _append_conversation_messages(
+            state_value,
+            (
+                {
+                    "role": "tool",
+                    "tool_call_id": settlement.tool_call_id,
+                    "name": settlement.tool_name,
+                    "content": {
+                        "reason_code": settlement.rejection_reason_code,
+                        "message": settlement.rejection_message,
+                    },
+                    "is_error": True,
+                },
+            ),
+        )
         if remaining:
             next_action = _prepared_action(remaining[0])
         else:
-            next_action = ModelGenerationAction(
-                request=_model_request(request.state_version.run_id, state_value)
+            state_value, model_request = _activate_model_request(
+                request.state_version.run_id,
+                state_value,
             )
+            next_action = ModelGenerationAction(request=model_request)
         return TransitionProposal(
             transition_id=transition_id,
             state_value=state_value,
@@ -320,9 +360,10 @@ class AgentEngine:
 
 
 def _transition_id(request: EngineStepRequest) -> str:
+    step_input = request.step_input
     return (
         f"{request.state_version.run_id}:transition:"
-        f"{request.state_version.revision + 1}:{request.step_input.input_id}"
+        f"{type(step_input).__name__}:{step_input.input_id}"
     )
 
 
@@ -387,6 +428,63 @@ def _commands(runtime_state: Mapping[str, Any]) -> tuple[RuntimeCommand, ...]:
             )
         )
     return tuple(commands)
+
+
+def _assistant_message(result: ModelGenerationResult) -> dict[str, Any]:
+    return {
+        "role": "assistant",
+        "content": result.assistant_content,
+        "tool_calls": tuple(
+            {
+                "tool_call_id": call.tool_call_id,
+                "name": call.name,
+                "arguments": call.arguments,
+            }
+            for call in result.tool_calls
+        ),
+    }
+
+
+def _append_conversation_messages(
+    state_value: Mapping[str, Any],
+    appended: tuple[Mapping[str, Any], ...],
+) -> dict[str, Any]:
+    context = state_value.get("context", {})
+    if not isinstance(context, Mapping):
+        raise TypeError("state context must be a mapping")
+    messages = context.get("messages", ())
+    if not isinstance(messages, tuple | list):
+        raise TypeError("state context messages must be a sequence")
+    if any(not isinstance(message, Mapping) for message in messages):
+        raise TypeError("state context messages must contain mappings")
+    updated_context = dict(context)
+    updated_context["messages"] = (*messages, *appended)
+    updated_state = dict(state_value)
+    updated_state["context"] = updated_context
+    return updated_state
+
+
+def _require_active_model_request(
+    runtime_state: Mapping[str, Any],
+    request_id: str,
+) -> None:
+    active_request_id = runtime_state.get("active_model_request_id")
+    if not isinstance(active_request_id, str) or not active_request_id:
+        raise ValueError("model completion requires an active model request")
+    if request_id != active_request_id:
+        raise ValueError(
+            "model completion request_id must match the active model request"
+        )
+
+
+def _activate_model_request(
+    run_id: str,
+    state_value: Mapping[str, Any],
+) -> tuple[dict[str, Any], ModelRequest]:
+    model_request = _model_request(run_id, state_value)
+    runtime_state = _runtime_state(state_value)
+    runtime_state["active_model_request_id"] = model_request.request_id
+    return _with_runtime_state(state_value, runtime_state), model_request
 
 
 def _model_request(run_id: str, state_value: Mapping[str, Any]) -> ModelRequest:

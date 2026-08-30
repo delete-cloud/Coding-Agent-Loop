@@ -17,6 +17,7 @@ from coding_agent.adapter.types import (
     StopReason,
     TurnOutcome,
     exception_error_message,
+    stop_reason_from_segment_outcome,
     turn_outcome_from_segment_outcome,
 )
 
@@ -171,13 +172,13 @@ def test_segment_outcome_maps_to_compatibility_stop_reasons() -> None:
             steps_taken=2,
         )
     )
-    interrupted = turn_outcome_from_segment_outcome(
-        SafeYieldOutcome(
-            state_version=state,
-            reason="interrupt",
-            steps_taken=2,
-        )
+    interrupted_outcome = SafeYieldOutcome(
+        state_version=state,
+        reason="interrupt",
+        steps_taken=2,
     )
+    interrupted = turn_outcome_from_segment_outcome(interrupted_outcome)
+    interrupted_reason = stop_reason_from_segment_outcome(interrupted_outcome)
 
     assert completed is not None
     assert completed.stop_reason is StopReason.NO_TOOL_CALLS
@@ -189,8 +190,9 @@ def test_segment_outcome_maps_to_compatibility_stop_reasons() -> None:
     assert failed.error == "provider failed"
     assert cancelled is not None
     assert cancelled.stop_reason is StopReason.INTERRUPTED
-    assert interrupted is not None
-    assert interrupted.stop_reason is StopReason.INTERRUPTED
+    assert cancelled.durable_root_status == "cancelled"
+    assert interrupted is None
+    assert interrupted_reason is StopReason.INTERRUPTED
 
 
 def test_blocked_and_undispositioned_safe_yield_do_not_settle_turn() -> None:

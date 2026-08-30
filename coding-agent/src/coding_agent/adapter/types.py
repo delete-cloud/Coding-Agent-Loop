@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Literal
 
 from agentkit.runtime.contracts import (
     BlockedOutcome,
@@ -26,6 +27,9 @@ class StopReason(Enum):
     INTERRUPTED = "interrupted"
 
 
+type DurableRootStatus = Literal["completed", "failed", "interrupted", "cancelled"]
+
+
 @dataclass
 class TurnOutcome:
     """Result of a pipeline turn execution.
@@ -38,6 +42,17 @@ class TurnOutcome:
     final_message: str | None = None
     steps_taken: int = 0
     error: str | None = None
+    durable_root_status: DurableRootStatus | None = None
+
+    def __post_init__(self) -> None:
+        if self.durable_root_status not in {
+            None,
+            "completed",
+            "failed",
+            "interrupted",
+            "cancelled",
+        }:
+            raise ValueError("durable_root_status must be a durable root status")
 
 
 def exception_error_message(exc: BaseException) -> str:
@@ -57,6 +72,28 @@ def exception_error_message(exc: BaseException) -> str:
     if cause is not None:
         return f"{type(exc).__name__}: {exception_error_message(cause)}"
     return type(exc).__name__
+
+
+def stop_reason_from_segment_outcome(
+    outcome: SegmentOutcome,
+    *,
+    doom_loop: bool = False,
+) -> StopReason | None:
+    """Map segment control flow to the legacy stop signal without settling it."""
+
+    if isinstance(outcome, CompletedOutcome):
+        return StopReason.DOOM_LOOP if doom_loop else StopReason.NO_TOOL_CALLS
+    if isinstance(outcome, RoundLimitOutcome):
+        return StopReason.MAX_STEPS_REACHED
+    if isinstance(outcome, FailedOutcome):
+        return StopReason.ERROR
+    if isinstance(outcome, CancelledOutcome):
+        return StopReason.INTERRUPTED
+    if isinstance(outcome, SafeYieldOutcome):
+        return StopReason.INTERRUPTED if outcome.reason == "interrupt" else None
+    if isinstance(outcome, BlockedOutcome):
+        return None
+    raise TypeError("unsupported segment outcome")
 
 
 def turn_outcome_from_segment_outcome(
@@ -88,14 +125,10 @@ def turn_outcome_from_segment_outcome(
         return TurnOutcome(
             stop_reason=StopReason.INTERRUPTED,
             steps_taken=outcome.steps_taken,
+            durable_root_status="cancelled",
         )
     if isinstance(outcome, SafeYieldOutcome):
-        if outcome.reason != "interrupt":
-            return None
-        return TurnOutcome(
-            stop_reason=StopReason.INTERRUPTED,
-            steps_taken=outcome.steps_taken,
-        )
+        return None
     if isinstance(outcome, BlockedOutcome):
         return None
     raise TypeError("unsupported segment outcome")

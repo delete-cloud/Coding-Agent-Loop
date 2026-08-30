@@ -312,3 +312,78 @@ def test_engine_step_reentry_approval_denial_commits_tool_result_fact_and_contin
     assert proposal.pending_facts[0].payload["reason_code"] == "user_denied"
     assert isinstance(proposal.next_action, ModelGenerationAction)
     assert proposal.dispositions[0].command_id == "approval-command-1"
+
+
+def test_next_model_request_contains_committed_assistant_tool_and_result() -> None:
+    engine = AgentEngine()
+    initial = _initial_proposal(engine)
+    tool_call = ModelToolCall(
+        tool_call_id="call-1",
+        name="read",
+        arguments={"path": "README.md"},
+    )
+    prepared = engine.propose(
+        EngineStepRequest(
+            state_version=_committed(initial, revision=1),
+            step_input=ModelGenerationCompleted(result=_model_result(tool_call)),
+        )
+    )
+    plan = prepared.effect_plans[0]
+    settled = engine.propose(
+        EngineStepRequest(
+            state_version=_committed(prepared, revision=2),
+            step_input=EffectSettled(
+                settlement=EffectSettlement.completed(
+                    input_id="settlement-conversation-1",
+                    tool_call_id="call-1",
+                    tool_name="read",
+                    effect_id=plan.effect_id,
+                    attempt_id=plan.attempt_id,
+                    authorization_transition_id="commit-2",
+                    owner_epoch=3,
+                    result={"content": "file contents"},
+                )
+            ),
+        )
+    )
+
+    assert isinstance(settled.next_action, ModelGenerationAction)
+    messages = settled.next_action.request.context["messages"]
+    assert messages == (
+        {
+            "role": "assistant",
+            "content": "assistant answer",
+            "tool_calls": (
+                {
+                    "tool_call_id": "call-1",
+                    "name": "read",
+                    "arguments": {"path": "README.md"},
+                },
+            ),
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "name": "read",
+            "content": {"content": "file contents"},
+            "is_error": False,
+        },
+    )
+
+
+def test_transition_identity_is_stable_for_same_consume_once_input() -> None:
+    engine = AgentEngine()
+    step_input = Initial(
+        input_id="initial-stable",
+        command_batch=(),
+        mailbox_cut=0,
+    )
+
+    first = engine.propose(
+        EngineStepRequest(state_version=_state(revision=0), step_input=step_input)
+    )
+    replay_after_other_commits = engine.propose(
+        EngineStepRequest(state_version=_state(revision=8), step_input=step_input)
+    )
+
+    assert first.transition_id == replay_after_other_commits.transition_id
