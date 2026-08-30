@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from agentkit.runtime.messages import CommitRef, OperationStateVersion
+
 from coding_agent.stores.rtstore.records import (
     AgentInteractionRecord,
     AgentRunRecord,
+    JSONObject,
     RunMessageSnapshotRecord,
     RuntimeEventRecord,
 )
@@ -26,6 +29,73 @@ def _required_row(
     if row is None:
         raise RuntimeError(f"postgres {context} returned no row")
     return row
+
+
+def _optional_non_negative_int(
+    row: dict[str, object],
+    key: str,
+    *,
+    context: str,
+) -> int | None:
+    value = row.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise TypeError(f"{context} must include non-negative integer or NULL {key}")
+    return value
+
+
+def _operation_state_from_row(row: dict[str, object]) -> OperationStateVersion:
+    fact_seq_start = _optional_non_negative_int(
+        row,
+        "fact_seq_start",
+        context="operation state row",
+    )
+    fact_seq_end = _optional_non_negative_int(
+        row,
+        "fact_seq_end",
+        context="operation state row",
+    )
+    return OperationStateVersion(
+        run_id=_required_str(row, "run_id", context="operation state row"),
+        revision=_required_int(row, "revision", context="operation state row"),
+        projection_epoch=_required_int(
+            row,
+            "projection_epoch",
+            context="operation state row",
+        ),
+        commit_ref=CommitRef(
+            transition_id=_required_str(
+                row,
+                "transition_id",
+                context="operation state row",
+            ),
+            fact_seq_start=(None if fact_seq_start is None else str(fact_seq_start)),
+            fact_seq_end=None if fact_seq_end is None else str(fact_seq_end),
+        ),
+        value=_required_json_object(
+            row,
+            "value",
+            context="operation state row",
+        ),
+    )
+
+
+def _transition_receipt_from_row(
+    row: dict[str, object],
+) -> tuple[str, JSONObject]:
+    return (
+        _required_str(
+            row,
+            "mutation_fingerprint",
+            context="transition receipt row",
+        ),
+        _required_json_object(
+            row,
+            "result",
+            context="transition receipt row",
+        ),
+    )
 
 
 def _agent_run_from_row(row: dict[str, object]) -> AgentRunRecord:

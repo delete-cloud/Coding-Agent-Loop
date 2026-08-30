@@ -2,9 +2,27 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import hashlib
+import json
+import math
+
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import Final
+from typing import Any, Final, cast
+
+from agentkit.runtime.messages import (
+    AppliedCommandDisposition,
+    CommandDisposition,
+    CommitRef,
+    CommittedFactNotice,
+    EffectMutation,
+    OperationStateCAS,
+    OperationStateVersion,
+    RejectedCommandDisposition,
+    SupersededCommandDisposition,
+    TransitionReceipt,
+)
 from coding_agent.stores.rtstore.records import (
     AgentRunRecord,
     JSONObject,
@@ -24,6 +42,22 @@ class AuthoritativeWriteRefusedError(RuntimeError):
 
 class CursorEpochMismatchError(ValueError):
     """Raised when a delta/settled cursor is bound to the wrong projection or epoch."""
+
+
+class StateVersionConflictError(RuntimeError):
+    """Raised when the logical operation-state CAS precondition is stale."""
+
+
+class TransitionFingerprintMismatchError(RuntimeError):
+    """Raised when a transition receipt key is reused for a different mutation."""
+
+
+class CommandDispositionConflictError(RuntimeError):
+    """Raised when a transition dispositions a command that is not admitted."""
+
+
+class EffectMutationConflictError(RuntimeError):
+    """Raised when an explicit effect mutation does not match durable state."""
 
 
 class KeyExpiredError(LookupError):
@@ -241,7 +275,7 @@ class OperationReceiptSlot:
 
 @dataclass(frozen=True)
 class AuthoritativeUnitOfWork:
-    event: EventRecord
+    event: EventRecord | None
     session_state: JSONObject
     mailbox: MailboxDispositionSlot | None = None
     effect: EffectLedgerSlot | None = None
@@ -249,10 +283,16 @@ class AuthoritativeUnitOfWork:
     run_state: AgentRunRecord | None = None
     require_settled_parent_run_id: str | None = None
     require_unsettled_root_run_id: str | None = None
+    transition_id: str | None = None
+    state_cas: OperationStateCAS | None = None
+    state_value: Mapping[str, Any] | None = None
+    facts: tuple[EventRecord, ...] = ()
+    dispositions: tuple[CommandDisposition, ...] = ()
+    effect_mutation: EffectMutation | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.event, EventRecord):
-            raise TypeError("event must be an EventRecord")
+        if self.event is not None and not isinstance(self.event, EventRecord):
+            raise TypeError("event must be an EventRecord or None")
         _require_json_object("session_state", self.session_state)
         if self.mailbox is not None and not isinstance(
             self.mailbox, MailboxDispositionSlot
@@ -285,10 +325,480 @@ class AuthoritativeUnitOfWork:
                 raise ValueError(
                     "root settlement run_state does not match required run"
                 )
-        if self.event.session_seq is not None:
-            raise ValueError("event.session_seq is allocated by the store")
-        if self.event.projection_epoch is not None:
-            raise ValueError("event.projection_epoch is allocated by the store")
+        facts = tuple(self.facts)
+        if any(not isinstance(fact, EventRecord) for fact in facts):
+            raise TypeError("facts must contain EventRecord values")
+        object.__setattr__(self, "facts", facts)
+        dispositions = tuple(self.dispositions)
+        disposition_types = (
+            AppliedCommandDisposition,
+            RejectedCommandDisposition,
+            SupersededCommandDisposition,
+        )
+        if any(
+            not isinstance(disposition, disposition_types)
+            for disposition in dispositions
+        ):
+            raise TypeError("dispositions must contain typed command dispositions")
+        command_ids = [disposition.command_id for disposition in dispositions]
+        if len(command_ids) != len(set(command_ids)):
+            raise ValueError("a transition may disposition each command at most once")
+        object.__setattr__(self, "dispositions", dispositions)
+        if self.effect_mutation is not None and not isinstance(
+            self.effect_mutation,
+            EffectMutation,
+        ):
+            raise TypeError("effect_mutation must be an EffectMutation")
+
+        if self.transition_id is None:
+            if self.event is None:
+                raise ValueError("legacy unit of work requires an event")
+            if (
+                self.state_cas is not None
+                or self.state_value is not None
+                or facts
+                or dispositions
+                or self.effect_mutation is not None
+            ):
+                raise ValueError(
+                    "transition fields require transition_id, state_cas, and state_value"
+                )
+        else:
+            _require_non_empty("transition_id", self.transition_id)
+            if not isinstance(self.state_cas, OperationStateCAS):
+                raise TypeError("transition state_cas must be an OperationStateCAS")
+            if self.state_value is None or not isinstance(self.state_value, Mapping):
+                raise TypeError("transition state_value must be a mapping")
+            if any(not isinstance(key, str) for key in self.state_value):
+                raise TypeError("transition state_value keys must be strings")
+            if self.event is not None:
+                raise ValueError("transition facts must use facts, not legacy event")
+            if (
+                self.mailbox is not None
+                or self.effect is not None
+                or self.receipt is not None
+                or self.run_state is not None
+                or self.require_settled_parent_run_id is not None
+                or self.require_unsettled_root_run_id is not None
+            ):
+                raise ValueError(
+                    "typed transitions cannot mix legacy unit-of-work mutations"
+                )
+            if (
+                self.effect_mutation is not None
+                and self.effect_mutation.reconciliation is not None
+                and self.effect_mutation.reconciliation.transition_id
+                != self.transition_id
+            ):
+                raise ValueError(
+                    "reconciliation transition_id must match the unit of work"
+                )
+
+        for event in ((self.event,) if self.event is not None else ()) + facts:
+            if event.session_seq is not None:
+                raise ValueError("event.session_seq is allocated by the store")
+            if event.projection_epoch is not None:
+                raise ValueError("event.projection_epoch is allocated by the store")
+
+    @property
+    def is_transition(self) -> bool:
+        return self.transition_id is not None
+
+
+def _plain_json(value: object) -> object:
+    if isinstance(value, Mapping):
+        if any(not isinstance(key, str) for key in value):
+            raise TypeError("transition mutation mapping keys must be strings")
+        return {key: _plain_json(item) for key, item in value.items()}
+    if isinstance(value, tuple | list):
+        return [_plain_json(item) for item in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("transition mutation contains a non-finite float")
+    if value is None or isinstance(value, bool | int | float | str):
+        return value
+    raise TypeError("transition mutation contains a non-JSON value")
+
+
+def snapshot_transition_unit(
+    unit: AuthoritativeUnitOfWork,
+) -> AuthoritativeUnitOfWork:
+    """Detach every typed-transition JSON value from caller-owned objects."""
+
+    if not unit.is_transition:
+        return unit
+    if unit.state_value is None:
+        raise ValueError("typed transition is incomplete")
+    facts = tuple(
+        replace(
+            fact,
+            payload=cast(JSONObject, _plain_json(fact.payload)),
+        )
+        for fact in unit.facts
+    )
+    effect_mutation = (
+        None
+        if unit.effect_mutation is None
+        else replace(
+            unit.effect_mutation,
+            payload=cast(
+                Mapping[str, Any],
+                _plain_json(unit.effect_mutation.payload),
+            ),
+        )
+    )
+    return AuthoritativeUnitOfWork(
+        event=None,
+        session_state=cast(JSONObject, _plain_json(unit.session_state)),
+        transition_id=unit.transition_id,
+        state_cas=unit.state_cas,
+        state_value=cast(Mapping[str, Any], _plain_json(unit.state_value)),
+        facts=facts,
+        dispositions=unit.dispositions,
+        effect_mutation=effect_mutation,
+    )
+
+
+def mailbox_slot_from_disposition(
+    disposition: CommandDisposition,
+) -> MailboxDispositionSlot:
+    if isinstance(disposition, AppliedCommandDisposition):
+        payload: JSONObject = {}
+    elif isinstance(disposition, RejectedCommandDisposition):
+        payload = {"reason_code": disposition.reason_code}
+    elif isinstance(disposition, SupersededCommandDisposition):
+        payload = {
+            "superseded_by_command_id": disposition.superseded_by_command_id,
+        }
+    else:
+        raise TypeError("disposition must be a typed command disposition")
+    return MailboxDispositionSlot(
+        slot_id=disposition.command_id,
+        lane="runtime",
+        disposition=disposition.kind.value,
+        payload=payload,
+    )
+
+
+def effect_slot_from_mutation(mutation: EffectMutation) -> EffectLedgerSlot:
+    mutation_payload = cast(JSONObject, _plain_json(mutation.payload))
+    payload: JSONObject = {
+        **mutation_payload,
+        "attempt_id": mutation.attempt_id,
+    }
+    if mutation.reconciliation is not None:
+        payload["reconciliation"] = {
+            "effect_id": mutation.reconciliation.effect_id,
+            "attempt_id": mutation.reconciliation.attempt_id,
+            "observed_outcome": mutation.reconciliation.observed_outcome.value,
+            "evidence_ref": mutation.reconciliation.evidence_ref,
+            "actor_id": mutation.reconciliation.actor_id,
+            "owner_epoch": mutation.reconciliation.owner_epoch,
+            "transition_id": mutation.reconciliation.transition_id,
+        }
+    return EffectLedgerSlot(
+        effect_id=mutation.effect_id,
+        status=mutation.status.value,
+        payload=payload,
+    )
+
+
+def _disposition_fingerprint_value(
+    disposition: CommandDisposition,
+) -> dict[str, object]:
+    slot = mailbox_slot_from_disposition(disposition)
+    return {
+        "command_id": disposition.command_id,
+        "kind": disposition.kind.value,
+        "payload": slot.payload,
+    }
+
+
+def _effect_fingerprint_value(mutation: EffectMutation | None) -> object:
+    if mutation is None:
+        return None
+    reconciliation = mutation.reconciliation
+    return {
+        "effect_id": mutation.effect_id,
+        "attempt_id": mutation.attempt_id,
+        "expected_status": (
+            None if mutation.expected_status is None else mutation.expected_status.value
+        ),
+        "status": mutation.status.value,
+        "payload": _plain_json(mutation.payload),
+        "reconciliation": (
+            None
+            if reconciliation is None
+            else {
+                "effect_id": reconciliation.effect_id,
+                "attempt_id": reconciliation.attempt_id,
+                "observed_outcome": reconciliation.observed_outcome.value,
+                "evidence_ref": reconciliation.evidence_ref,
+                "actor_id": reconciliation.actor_id,
+                "owner_epoch": reconciliation.owner_epoch,
+                "transition_id": reconciliation.transition_id,
+            }
+        ),
+    }
+
+
+def transition_mutation_fingerprint(unit: AuthoritativeUnitOfWork) -> str:
+    if not unit.is_transition or unit.state_cas is None or unit.state_value is None:
+        raise ValueError("mutation fingerprint requires a typed transition")
+    mutation = {
+        "state": {
+            "run_id": unit.state_cas.run_id,
+            "revision": unit.state_cas.revision + 1,
+            "projection_epoch": unit.state_cas.projection_epoch,
+            "value": _plain_json(unit.state_value),
+        },
+        "facts": [
+            {
+                "event_id": fact.event_id,
+                "session_id": fact.session_id,
+                "event_kind": fact.event_kind,
+                "payload": _plain_json(fact.payload),
+                "created_at": fact.created_at.isoformat(),
+            }
+            for fact in unit.facts
+        ],
+        "dispositions": [
+            _disposition_fingerprint_value(disposition)
+            for disposition in unit.dispositions
+        ],
+        "effect_mutation": _effect_fingerprint_value(unit.effect_mutation),
+    }
+    canonical = json.dumps(
+        mutation,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def transition_commit_payload(
+    *,
+    state_version: OperationStateVersion,
+    facts: tuple[EventRecord, ...],
+    raw_cursor: RawCursor,
+) -> JSONObject:
+    return {
+        "state_version": {
+            "run_id": state_version.run_id,
+            "revision": state_version.revision,
+            "projection_epoch": state_version.projection_epoch,
+            "commit_ref": {
+                "transition_id": state_version.commit_ref.transition_id,
+                "fact_seq_start": state_version.commit_ref.fact_seq_start,
+                "fact_seq_end": state_version.commit_ref.fact_seq_end,
+            },
+            "value": cast(JSONObject, _plain_json(state_version.value)),
+        },
+        "facts": [
+            {
+                "event_id": fact.event_id,
+                "session_id": fact.session_id,
+                "event_kind": fact.event_kind,
+                "payload": fact.payload,
+                "created_at": fact.created_at.isoformat(),
+                "session_seq": fact.session_seq,
+                "projection_epoch": fact.projection_epoch,
+            }
+            for fact in facts
+        ],
+        "raw_cursor": {
+            "session_id": raw_cursor.session_id,
+            "session_seq": raw_cursor.session_seq,
+        },
+    }
+
+
+def _required_mapping(
+    payload: Mapping[str, object],
+    key: str,
+    *,
+    context: str,
+) -> Mapping[str, object]:
+    value = payload.get(key)
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{context} must include object {key}")
+    if any(not isinstance(item_key, str) for item_key in value):
+        raise TypeError(f"{context}.{key} keys must be strings")
+    return cast(Mapping[str, object], value)
+
+
+def _required_payload_str(
+    payload: Mapping[str, object],
+    key: str,
+    *,
+    context: str,
+) -> str:
+    value = payload.get(key)
+    if not isinstance(value, str) or not value:
+        raise TypeError(f"{context} must include non-empty string {key}")
+    return value
+
+
+def _required_payload_int(
+    payload: Mapping[str, object],
+    key: str,
+    *,
+    context: str,
+) -> int:
+    value = payload.get(key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{context} must include integer {key}")
+    return value
+
+
+def transition_commit_from_payload(
+    *,
+    session_id: str,
+    transition_id: str,
+    projection_epoch: int,
+    mutation_fingerprint: str,
+    payload: Mapping[str, object],
+) -> tuple[
+    OperationStateVersion,
+    tuple[EventRecord, ...],
+    TransitionReceipt,
+    RawCursor,
+]:
+    state_payload = _required_mapping(payload, "state_version", context="transition")
+    commit_payload = _required_mapping(
+        state_payload,
+        "commit_ref",
+        context="transition state",
+    )
+    commit_ref = CommitRef(
+        transition_id=_required_payload_str(
+            commit_payload,
+            "transition_id",
+            context="transition commit_ref",
+        ),
+        fact_seq_start=cast(str | None, commit_payload.get("fact_seq_start")),
+        fact_seq_end=cast(str | None, commit_payload.get("fact_seq_end")),
+    )
+    if commit_ref.transition_id != transition_id:
+        raise ValueError("stored transition result has the wrong transition_id")
+    value = _required_mapping(state_payload, "value", context="transition state")
+    state_version = OperationStateVersion(
+        run_id=_required_payload_str(
+            state_payload,
+            "run_id",
+            context="transition state",
+        ),
+        revision=_required_payload_int(
+            state_payload,
+            "revision",
+            context="transition state",
+        ),
+        projection_epoch=_required_payload_int(
+            state_payload,
+            "projection_epoch",
+            context="transition state",
+        ),
+        commit_ref=commit_ref,
+        value=value,
+    )
+    if state_version.projection_epoch != projection_epoch:
+        raise ValueError("stored transition result has the wrong projection_epoch")
+    raw_facts = payload.get("facts")
+    if not isinstance(raw_facts, list):
+        raise TypeError("transition result must include facts list")
+    facts: list[EventRecord] = []
+    for raw_fact in raw_facts:
+        if not isinstance(raw_fact, Mapping):
+            raise TypeError("transition result facts must contain objects")
+        fact_payload = _required_mapping(
+            raw_fact,
+            "payload",
+            context="transition fact",
+        )
+        fact = EventRecord(
+            event_id=_required_payload_str(
+                raw_fact,
+                "event_id",
+                context="transition fact",
+            ),
+            session_id=_required_payload_str(
+                raw_fact,
+                "session_id",
+                context="transition fact",
+            ),
+            event_kind=_required_payload_str(
+                raw_fact,
+                "event_kind",
+                context="transition fact",
+            ),
+            payload=cast(JSONObject, dict(fact_payload)),
+            created_at=datetime.fromisoformat(
+                _required_payload_str(
+                    raw_fact,
+                    "created_at",
+                    context="transition fact",
+                )
+            ),
+            session_seq=_required_payload_str(
+                raw_fact,
+                "session_seq",
+                context="transition fact",
+            ),
+            projection_epoch=_required_payload_str(
+                raw_fact,
+                "projection_epoch",
+                context="transition fact",
+            ),
+        )
+        if fact.session_id != session_id:
+            raise ValueError("stored transition fact belongs to another session")
+        facts.append(fact)
+    raw_cursor_payload = _required_mapping(
+        payload,
+        "raw_cursor",
+        context="transition",
+    )
+    raw_cursor = RawCursor(
+        session_id=_required_payload_str(
+            raw_cursor_payload,
+            "session_id",
+            context="transition raw_cursor",
+        ),
+        session_seq=_required_payload_str(
+            raw_cursor_payload,
+            "session_seq",
+            context="transition raw_cursor",
+        ),
+    )
+    if raw_cursor.session_id != session_id:
+        raise ValueError("stored transition cursor belongs to another session")
+    notices = tuple(
+        CommittedFactNotice(
+            fact_id=fact.event_id,
+            fact_kind=fact.event_kind,
+            payload=fact.payload,
+            session_seq=fact.session_seq,
+            projection_epoch=(
+                None
+                if fact.projection_epoch is None
+                else parse_u64(
+                    fact.projection_epoch,
+                    field_name="projection_epoch",
+                )
+            ),
+        )
+        for fact in facts
+    )
+    receipt = TransitionReceipt(
+        session_id=session_id,
+        projection_epoch=projection_epoch,
+        transition_id=transition_id,
+        mutation_fingerprint=mutation_fingerprint,
+        state_version=state_version,
+        facts=notices,
+    )
+    return state_version, tuple(facts), receipt, raw_cursor
 
 
 @dataclass(frozen=True)
@@ -404,24 +914,75 @@ class RetentionFloorReplay:
 
 @dataclass(frozen=True)
 class AuthoritativeCommit:
-    event: EventRecord
+    event: EventRecord | None
     projection: str
     projection_epoch: str
     raw_cursor: RawCursor
     idempotent: bool = False
+    state_version: OperationStateVersion | None = None
+    facts: tuple[EventRecord, ...] = ()
+    transition_receipt: TransitionReceipt | None = None
 
     def __post_init__(self) -> None:
-        if self.event.session_seq is None:
-            raise ValueError("committed event must include session_seq")
-        if self.event.projection_epoch is None:
-            raise ValueError("committed event must include projection_epoch")
         _require_non_empty("projection", self.projection)
-        parse_u64(self.projection_epoch, field_name="projection_epoch")
-        if self.raw_cursor.session_id != self.event.session_id:
-            raise ValueError("raw cursor session_id must match the event")
-        if self.raw_cursor.session_seq != self.event.session_seq:
-            raise ValueError("raw cursor must land on the committed session_seq")
-        if self.event.projection_epoch != self.projection_epoch:
-            raise ValueError(
-                "committed event.projection_epoch must match commit.projection_epoch"
-            )
+        commit_epoch = parse_u64(
+            self.projection_epoch,
+            field_name="projection_epoch",
+        )
+        facts = tuple(self.facts)
+        if any(not isinstance(fact, EventRecord) for fact in facts):
+            raise TypeError("facts must contain EventRecord values")
+        object.__setattr__(self, "facts", facts)
+        if self.event is not None:
+            if self.event.session_seq is None:
+                raise ValueError("committed event must include session_seq")
+            if self.event.projection_epoch is None:
+                raise ValueError("committed event must include projection_epoch")
+            if self.raw_cursor.session_id != self.event.session_id:
+                raise ValueError("raw cursor session_id must match the event")
+            if self.raw_cursor.session_seq != self.event.session_seq:
+                raise ValueError("raw cursor must land on the committed session_seq")
+            if self.event.projection_epoch != self.projection_epoch:
+                raise ValueError(
+                    "committed event.projection_epoch must match commit.projection_epoch"
+                )
+            if (
+                self.state_version is not None
+                or facts
+                or self.transition_receipt is not None
+            ):
+                raise ValueError(
+                    "legacy commit cannot include transition result fields"
+                )
+            return
+        if self.state_version is None or self.transition_receipt is None:
+            raise ValueError("transition commit requires state version and receipt")
+        if self.state_version.projection_epoch != commit_epoch:
+            raise ValueError("state version projection_epoch must match commit")
+        if self.transition_receipt.state_version != self.state_version:
+            raise ValueError("transition receipt state version must match commit")
+        if self.transition_receipt.session_id != self.raw_cursor.session_id:
+            raise ValueError("transition receipt session_id must match raw cursor")
+        if self.transition_receipt.projection_epoch != commit_epoch:
+            raise ValueError("transition receipt projection_epoch must match commit")
+        for fact in facts:
+            if fact.session_id != self.raw_cursor.session_id:
+                raise ValueError("committed fact belongs to another session")
+            if fact.session_seq is None or fact.projection_epoch is None:
+                raise ValueError(
+                    "committed facts must include store sequence and epoch"
+                )
+            if fact.projection_epoch != self.projection_epoch:
+                raise ValueError("committed fact projection_epoch must match commit")
+        commit_ref = self.state_version.commit_ref
+        if facts:
+            if commit_ref.fact_seq_start != facts[0].session_seq:
+                raise ValueError("commit_ref start must match first committed fact")
+            if commit_ref.fact_seq_end != facts[-1].session_seq:
+                raise ValueError("commit_ref end must match last committed fact")
+            if self.raw_cursor.session_seq != facts[-1].session_seq:
+                raise ValueError("raw cursor must land on the last committed fact")
+        elif (
+            commit_ref.fact_seq_start is not None or commit_ref.fact_seq_end is not None
+        ):
+            raise ValueError("fact-free transition must have empty commit_ref bounds")

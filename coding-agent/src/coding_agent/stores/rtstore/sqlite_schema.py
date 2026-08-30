@@ -59,4 +59,33 @@ CREATE_SCHEMA_SQL = """
 
     CREATE INDEX IF NOT EXISTS agent_interactions_run_id_created_idx
         ON agent_interactions (run_id, created_at, interaction_id);
+
+    CREATE TABLE IF NOT EXISTS session_operation_states (
+        session_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        projection_epoch INTEGER NOT NULL,
+        transition_id TEXT NOT NULL,
+        fact_seq_start INTEGER,
+        fact_seq_end INTEGER,
+        value TEXT NOT NULL,
+        PRIMARY KEY (session_id, run_id),
+        CHECK (
+            (fact_seq_start IS NULL AND fact_seq_end IS NULL)
+            OR (
+                fact_seq_start IS NOT NULL
+                AND fact_seq_end IS NOT NULL
+                AND fact_seq_start <= fact_seq_end
+            )
+        )
+    );
+
+    CREATE TABLE IF NOT EXISTS session_transition_receipts (
+        session_id TEXT NOT NULL,
+        projection_epoch INTEGER NOT NULL,
+        transition_id TEXT NOT NULL,
+        mutation_fingerprint TEXT NOT NULL,
+        result TEXT NOT NULL,
+        PRIMARY KEY (session_id, projection_epoch, transition_id)
+    );
     """

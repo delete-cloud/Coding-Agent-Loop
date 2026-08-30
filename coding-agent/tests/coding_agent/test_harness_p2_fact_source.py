@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -9,6 +10,13 @@ from typing import Any, cast
 import pytest
 
 from agentkit.checkpoint.models import CheckpointMeta, CheckpointSnapshot
+from agentkit.runtime.messages import (
+    AppliedCommandDisposition,
+    EffectMutation,
+    EffectPlan,
+    OperationStateCAS,
+    RejectedCommandDisposition,
+)
 
 from coding_agent.server.stores.session_owner_store import (
     OwnerAuthority,
@@ -19,6 +27,7 @@ from coding_agent.stores.durable_pg import PGDurableStore
 from coding_agent.stores.runtime_store import (
     AgentRunRecord,
     AuthoritativeUnitOfWork,
+    CommandDispositionConflictError,
     AuthoritativeWriteRefusedError,
     CursorEpochMismatchError,
     DEFAULT_HARNESS_PROJECTION,
@@ -31,6 +40,8 @@ from coding_agent.stores.runtime_store import (
     ProjectionCursor,
     RawCursor,
     TrustedHandoff,
+    StateVersionConflictError,
+    TransitionFingerprintMismatchError,
 )
 
 
@@ -112,9 +123,12 @@ class HarnessFakePGConnection:
         self.mailbox: dict[tuple[str, str], dict[str, object]] = {}
         self.effects: dict[tuple[str, str], dict[str, object]] = {}
         self.receipts: dict[tuple[str, str], dict[str, object]] = {}
+        self.operation_states: dict[tuple[str, str], dict[str, object]] = {}
+        self.transition_receipts: dict[tuple[str, int, str], dict[str, object]] = {}
         self.agent_runs: dict[str, dict[str, object]] = {}
         self.checkpoints: dict[str, dict[str, object]] = {}
         self.in_txn = False
+        self.fail_on_operation_state_write = False
         self.fail_on_agent_run_write = False
         self._transaction_snapshot: dict[str, object] | None = None
 
@@ -131,6 +145,8 @@ class HarnessFakePGConnection:
                 "receipts": self.receipts,
                 "agent_runs": self.agent_runs,
                 "checkpoints": self.checkpoints,
+                "operation_states": self.operation_states,
+                "transition_receipts": self.transition_receipts,
             }
         )
 
@@ -263,6 +279,33 @@ class HarnessFakePGConnection:
                 "compensation_effect_id": args[4],
             }
             return "INSERT"
+        if "INSERT INTO session_operation_states" in query:
+            if self.fail_on_operation_state_write:
+                self.fail_on_operation_state_write = False
+                raise RuntimeError("injected transition crash")
+            key = (cast(str, args[0]), cast(str, args[1]))
+            self.operation_states[key] = {
+                "session_id": args[0],
+                "run_id": args[1],
+                "revision": args[2],
+                "projection_epoch": args[3],
+                "transition_id": args[4],
+                "fact_seq_start": args[5],
+                "fact_seq_end": args[6],
+                "value": args[7],
+            }
+            return "INSERT"
+        if "INSERT INTO session_transition_receipts" in query:
+            key = (cast(str, args[0]), cast(int, args[1]), cast(str, args[2]))
+            if key not in self.transition_receipts:
+                self.transition_receipts[key] = {
+                    "session_id": args[0],
+                    "projection_epoch": args[1],
+                    "transition_id": args[2],
+                    "mutation_fingerprint": args[3],
+                    "result": args[4],
+                }
+            return "INSERT"
         if "INSERT INTO agent_runs" in query:
             if self.fail_on_agent_run_write:
                 self.fail_on_agent_run_write = False
@@ -338,6 +381,12 @@ class HarnessFakePGConnection:
             return self.effects.get((cast(str, args[0]), cast(str, args[1])))
         if "FROM session_receipt_slots" in query:
             return self.receipts.get((cast(str, args[0]), cast(str, args[1])))
+        if "FROM session_operation_states" in query:
+            return self.operation_states.get((cast(str, args[0]), cast(str, args[1])))
+        if "FROM session_transition_receipts" in query:
+            return self.transition_receipts.get(
+                (cast(str, args[0]), cast(int, args[1]), cast(str, args[2]))
+            )
         if (
             "FROM agent_runs" in query
             and "superseded_by_checkpoint_id IS NULL" in query
@@ -391,6 +440,14 @@ class HarnessFakePGConnection:
         if "INSERT INTO session_receipt_slots" in query:
             await self.execute(query, *args)
             return self.receipts[(cast(str, args[0]), cast(str, args[1]))]
+        if "INSERT INTO session_operation_states" in query:
+            await self.execute(query, *args)
+            return self.operation_states[(cast(str, args[0]), cast(str, args[1]))]
+        if "INSERT INTO session_transition_receipts" in query:
+            await self.execute(query, *args)
+            return self.transition_receipts[
+                (cast(str, args[0]), cast(int, args[1]), cast(str, args[2]))
+            ]
         if "INSERT INTO agent_runs" in query:
             await self.execute(query, *args)
             return self.agent_runs[cast(str, args[0])]
@@ -1065,3 +1122,357 @@ def test_bee_modules_are_marked_legacy_only() -> None:
     for path in sorted(bee_root.glob("*.py")):
         text = path.read_text()
         assert "legacy" in text.lower(), f"{path.name} must mark Bee as legacy"
+
+
+def _phase_b_pg_unit(
+    transition_id: str,
+    *,
+    revision: int,
+    state_value: dict[str, object] | None = None,
+) -> AuthoritativeUnitOfWork:
+    return AuthoritativeUnitOfWork(
+        event=None,
+        session_state={**SESSION_PAYLOAD, "transition": transition_id},
+        transition_id=transition_id,
+        state_cas=OperationStateCAS(
+            run_id="run-phase-b-pg",
+            revision=revision,
+            projection_epoch=0,
+        ),
+        state_value=(
+            {"transition": transition_id} if state_value is None else state_value
+        ),
+        facts=(
+            EventRecord(
+                event_id=f"fact-{transition_id}",
+                session_id=SESSION_ID,
+                event_kind="finalized_thinking",
+                payload={"text": transition_id},
+                created_at=datetime(2026, 8, 30, 12, 0, tzinfo=UTC),
+            ),
+        ),
+        dispositions=(
+            AppliedCommandDisposition(command_id=f"applied-{transition_id}"),
+            RejectedCommandDisposition(
+                command_id=f"rejected-{transition_id}",
+                reason_code="not_applicable",
+            ),
+        ),
+        effect_mutation=EffectMutation.prepare(
+            EffectPlan(
+                effect_id=f"effect-{transition_id}",
+                attempt_id=f"attempt-{transition_id}",
+                effect_kind="tool",
+                payload={"name": "read"},
+            )
+        ),
+    )
+
+
+def _seed_phase_b_pg_commands(
+    store: PGDurableStore,
+    transition_id: str,
+    *,
+    disposition: str = "pending",
+) -> None:
+    pool = cast(HarnessFakePGPool, store._harness_pool)
+    for prefix in ("applied", "rejected"):
+        command_id = f"{prefix}-{transition_id}"
+        pool.connection.mailbox[(SESSION_ID, command_id)] = {
+            "session_id": SESSION_ID,
+            "slot_id": command_id,
+            "lane": "runtime",
+            "disposition": disposition,
+            "payload": {},
+        }
+
+
+@pytest.mark.asyncio
+async def test_uow_commits_state_facts_dispositions_and_effect_ledger_atomically_postgresql(
+    tmp_path: Path,
+) -> None:
+    store, owner = await _open_store("pg", tmp_path)
+    _seed_phase_b_pg_commands(store, "pg-atomic", disposition="admitted")
+
+    committed = await store.commit_authoritative_uow(
+        owner,
+        _phase_b_pg_unit("pg-atomic", revision=0),
+    )
+
+    assert committed.state_version is not None
+    assert (
+        await store.load_operation_state(SESSION_ID, "run-phase-b-pg")
+        == committed.state_version
+    )
+    assert (
+        await store.load_transition_receipt(SESSION_ID, 0, "pg-atomic")
+        == committed.transition_receipt
+    )
+    assert committed.state_version.revision == 1
+    assert committed.state_version.commit_ref.transition_id == "pg-atomic"
+    assert committed.state_version.commit_ref.fact_seq_start == "1"
+    assert committed.state_version.commit_ref.fact_seq_end == "1"
+    rejected = await store.load_mailbox_slot(SESSION_ID, "rejected-pg-atomic")
+    assert rejected is not None
+    assert rejected.payload == {"reason_code": "not_applicable"}
+    effect = await store.load_effect_slot(SESSION_ID, "effect-pg-atomic")
+    assert effect is not None
+    assert effect.status == "prepared"
+
+
+@pytest.mark.asyncio
+async def test_transition_receipt_same_epoch_retry_returns_stored_commit_before_cas_and_before_any_write_postgresql(
+    tmp_path: Path,
+) -> None:
+    store, owner = await _open_store("pg", tmp_path)
+    _seed_phase_b_pg_commands(store, "pg-retry")
+    _seed_phase_b_pg_commands(store, "pg-later")
+    original = _phase_b_pg_unit("pg-retry", revision=0)
+    first = await store.commit_authoritative_uow(owner, original)
+    later = await store.commit_authoritative_uow(
+        owner,
+        _phase_b_pg_unit("pg-later", revision=1),
+    )
+
+    replay = await store.commit_authoritative_uow(owner, original)
+
+    assert replay.idempotent is True
+    assert replay.state_version == first.state_version
+    assert replay.facts == first.facts
+    assert later.state_version is not None
+    assert later.state_version.revision == 2
+    assert await store.load_event_record(SESSION_ID, "3") is None
+
+
+@pytest.mark.asyncio
+async def test_postgresql_phase_b_cas_and_fingerprint_conflicts_write_nothing(
+    tmp_path: Path,
+) -> None:
+    store, owner = await _open_store("pg", tmp_path)
+    _seed_phase_b_pg_commands(store, "pg-original")
+    _seed_phase_b_pg_commands(store, "pg-stale")
+    original = _phase_b_pg_unit("pg-original", revision=0)
+    await store.commit_authoritative_uow(owner, original)
+
+    with pytest.raises(StateVersionConflictError):
+        await store.commit_authoritative_uow(
+            owner,
+            _phase_b_pg_unit("pg-stale", revision=0),
+        )
+    with pytest.raises(TransitionFingerprintMismatchError):
+        await store.commit_authoritative_uow(
+            owner,
+            _phase_b_pg_unit(
+                "pg-original",
+                revision=0,
+                state_value={"different": True},
+            ),
+        )
+
+    assert await store.load_event_record(SESSION_ID, "2") is None
+    state = await store.load_operation_state(SESSION_ID, "run-phase-b-pg")
+    assert state is not None
+    assert state.revision == 1
+
+
+@pytest.mark.asyncio
+async def test_postgresql_transition_failure_rolls_back_every_mutation(
+    tmp_path: Path,
+) -> None:
+    store, owner = await _open_store("pg", tmp_path)
+    _seed_phase_b_pg_commands(store, "pg-crash")
+    pool = cast(HarnessFakePGPool, store._harness_pool)
+    pool.connection.fail_on_operation_state_write = True
+
+    with pytest.raises(RuntimeError, match="injected transition crash"):
+        await store.commit_authoritative_uow(
+            owner,
+            _phase_b_pg_unit("pg-crash", revision=0),
+        )
+
+    assert await store.load_event_record(SESSION_ID, "1") is None
+    assert await store.load_operation_state(SESSION_ID, "run-phase-b-pg") is None
+    mailbox = await store.load_mailbox_slot(SESSION_ID, "applied-pg-crash")
+    assert mailbox is not None
+    assert mailbox.disposition == "pending"
+    assert await store.load_effect_slot(SESSION_ID, "effect-pg-crash") is None
+    assert await store.load_transition_receipt(SESSION_ID, 0, "pg-crash") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "durable_disposition",
+    [None, "applied", "rejected", "superseded"],
+)
+async def test_postgresql_disposition_requires_pending_admitted_command_and_rolls_back(
+    tmp_path: Path,
+    durable_disposition: str | None,
+) -> None:
+    store, owner = await _open_store("pg", tmp_path)
+    if durable_disposition is not None:
+        _seed_phase_b_pg_commands(
+            store,
+            "pg-invalid-disposition",
+            disposition=durable_disposition,
+        )
+    fact_source_before = await store.load_session_fact_source(SESSION_ID)
+
+    with pytest.raises(CommandDispositionConflictError):
+        await store.commit_authoritative_uow(
+            owner,
+            _phase_b_pg_unit("pg-invalid-disposition", revision=0),
+        )
+
+    assert await store.load_operation_state(SESSION_ID, "run-phase-b-pg") is None
+    assert await store.load_event_record(SESSION_ID, "1") is None
+    assert await store.load_session_fact_source(SESSION_ID) == fact_source_before
+    assert (
+        await store.load_effect_slot(
+            SESSION_ID,
+            "effect-pg-invalid-disposition",
+        )
+        is None
+    )
+    assert (
+        await store.load_transition_receipt(
+            SESSION_ID,
+            0,
+            "pg-invalid-disposition",
+        )
+        is None
+    )
+    applied = await store.load_mailbox_slot(
+        SESSION_ID,
+        "applied-pg-invalid-disposition",
+    )
+    rejected = await store.load_mailbox_slot(
+        SESSION_ID,
+        "rejected-pg-invalid-disposition",
+    )
+    if durable_disposition is None:
+        assert applied is None
+        assert rejected is None
+    else:
+        assert applied is not None
+        assert rejected is not None
+        assert applied.disposition == durable_disposition
+        assert rejected.disposition == durable_disposition
+
+
+@pytest.mark.asyncio
+async def test_postgresql_transition_snapshots_caller_json_before_waiting(
+    tmp_path: Path,
+) -> None:
+    store, owner = await _open_store("pg", tmp_path)
+    entered_transaction = asyncio.Event()
+    release_transaction = asyncio.Event()
+    original_with_transaction = store._with_transaction
+
+    async def blocked_with_transaction(body: Any) -> object:
+        entered_transaction.set()
+        await release_transaction.wait()
+        return await original_with_transaction(body)
+
+    store._with_transaction = blocked_with_transaction  # type: ignore[method-assign]
+    state_value: dict[str, object] = {"phase": "before"}
+    fact_payload: dict[str, object] = {"text": "before"}
+    unit = AuthoritativeUnitOfWork(
+        event=None,
+        session_state=SESSION_PAYLOAD,
+        transition_id="pg-snapshot",
+        state_cas=OperationStateCAS(
+            run_id="run-phase-b-pg",
+            revision=0,
+            projection_epoch=0,
+        ),
+        state_value=state_value,
+        facts=(
+            EventRecord(
+                event_id="fact-pg-snapshot",
+                session_id=SESSION_ID,
+                event_kind="finalized_thinking",
+                payload=fact_payload,
+                created_at=datetime(2026, 8, 30, 12, 0, tzinfo=UTC),
+            ),
+        ),
+    )
+
+    commit_task = asyncio.create_task(store.commit_authoritative_uow(owner, unit))
+    await entered_transaction.wait()
+    state_value["phase"] = "after"
+    fact_payload["text"] = "after"
+    release_transaction.set()
+    committed = await commit_task
+
+    assert committed.state_version is not None
+    assert committed.state_version.value == {"phase": "before"}
+    assert committed.facts[0].payload == {"text": "before"}
+    assert committed.transition_receipt is not None
+    assert committed.transition_receipt.state_version.value == {"phase": "before"}
+    assert committed.transition_receipt.facts[0].payload == {"text": "before"}
+
+    retry = await store.commit_authoritative_uow(
+        owner,
+        AuthoritativeUnitOfWork(
+            event=None,
+            session_state=SESSION_PAYLOAD,
+            transition_id="pg-snapshot",
+            state_cas=OperationStateCAS(
+                run_id="run-phase-b-pg",
+                revision=0,
+                projection_epoch=0,
+            ),
+            state_value={"phase": "before"},
+            facts=(
+                EventRecord(
+                    event_id="fact-pg-snapshot",
+                    session_id=SESSION_ID,
+                    event_kind="finalized_thinking",
+                    payload={"text": "before"},
+                    created_at=datetime(2026, 8, 30, 12, 0, tzinfo=UTC),
+                ),
+            ),
+        ),
+    )
+    assert retry.idempotent is True
+    assert retry.state_version == committed.state_version
+    assert retry.facts == committed.facts
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("store_kind", ["sqlite", "pg"])
+@pytest.mark.parametrize(
+    "non_finite",
+    [float("nan"), float("inf"), float("-inf")],
+)
+async def test_phase_b_stores_reject_non_finite_transition_json(
+    store_kind: str,
+    non_finite: float,
+    tmp_path: Path,
+) -> None:
+    store, owner = await _open_store(store_kind, tmp_path)
+    with pytest.raises(ValueError, match="non-finite float"):
+        await store.commit_authoritative_uow(
+            owner,
+            AuthoritativeUnitOfWork(
+                event=None,
+                session_state=SESSION_PAYLOAD,
+                transition_id="non-finite",
+                state_cas=OperationStateCAS(
+                    run_id="run-non-finite",
+                    revision=0,
+                    projection_epoch=0,
+                ),
+                state_value={"number": non_finite},
+            ),
+        )
+
+    assert await store.load_operation_state(SESSION_ID, "run-non-finite") is None
+    assert (
+        await store.load_transition_receipt(
+            SESSION_ID,
+            0,
+            "non-finite",
+        )
+        is None
+    )

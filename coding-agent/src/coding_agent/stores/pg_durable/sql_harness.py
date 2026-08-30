@@ -50,6 +50,33 @@ class PgHarnessSqlMixin:
         compensation_effect_id TEXT,
         PRIMARY KEY (session_id, receipt_id)
     );
+    CREATE TABLE IF NOT EXISTS session_operation_states (
+        session_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        revision BIGINT NOT NULL,
+        projection_epoch BIGINT NOT NULL,
+        transition_id TEXT NOT NULL,
+        fact_seq_start BIGINT,
+        fact_seq_end BIGINT,
+        value JSONB NOT NULL,
+        PRIMARY KEY (session_id, run_id),
+        CHECK (
+            (fact_seq_start IS NULL AND fact_seq_end IS NULL)
+            OR (
+                fact_seq_start IS NOT NULL
+                AND fact_seq_end IS NOT NULL
+                AND fact_seq_start <= fact_seq_end
+            )
+        )
+    );
+    CREATE TABLE IF NOT EXISTS session_transition_receipts (
+        session_id TEXT NOT NULL,
+        projection_epoch BIGINT NOT NULL,
+        transition_id TEXT NOT NULL,
+        mutation_fingerprint TEXT NOT NULL,
+        result JSONB NOT NULL,
+        PRIMARY KEY (session_id, projection_epoch, transition_id)
+    );
     """
 
     _MIGRATE_HARNESS_FACT_SOURCE_SQL = """
@@ -219,4 +246,45 @@ class PgHarnessSqlMixin:
     _SELECT_RECEIPT_SLOT_SQL = """
     SELECT * FROM session_receipt_slots
     WHERE session_id = $1 AND receipt_id = $2
+    """
+
+    _SELECT_OPERATION_STATE_SQL = """
+    SELECT * FROM session_operation_states
+    WHERE session_id = $1 AND run_id = $2
+    """
+
+    _SELECT_OPERATION_STATE_FOR_UPDATE_SQL = """
+    SELECT * FROM session_operation_states
+    WHERE session_id = $1 AND run_id = $2
+    FOR UPDATE
+    """
+
+    _UPSERT_OPERATION_STATE_SQL = """
+    INSERT INTO session_operation_states (
+        session_id, run_id, revision, projection_epoch, transition_id,
+        fact_seq_start, fact_seq_end, value
+    )
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+    ON CONFLICT (session_id, run_id)
+    DO UPDATE SET
+        revision = EXCLUDED.revision,
+        projection_epoch = EXCLUDED.projection_epoch,
+        transition_id = EXCLUDED.transition_id,
+        fact_seq_start = EXCLUDED.fact_seq_start,
+        fact_seq_end = EXCLUDED.fact_seq_end,
+        value = EXCLUDED.value
+    RETURNING *
+    """
+
+    _SELECT_TRANSITION_RECEIPT_SQL = """
+    SELECT * FROM session_transition_receipts
+    WHERE session_id = $1 AND projection_epoch = $2 AND transition_id = $3
+    """
+
+    _INSERT_TRANSITION_RECEIPT_SQL = """
+    INSERT INTO session_transition_receipts (
+        session_id, projection_epoch, transition_id, mutation_fingerprint, result
+    )
+    VALUES ($1, $2, $3, $4, $5::jsonb)
+    RETURNING *
     """
