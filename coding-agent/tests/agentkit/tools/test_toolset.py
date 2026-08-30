@@ -485,7 +485,6 @@ async def test_toolset_records_error_tool_call_span() -> None:
     results = await toolset.execute_tools(
         [ToolCallRequest(tool_call_id="tc-1", name="known_tool", arguments={})],
         ctx=ToolContext(sink),
-        options=ToolExecutionOptions(max_retries=0),
     )
 
     assert results[0].is_error is True
@@ -1167,47 +1166,78 @@ async def test_toolset_proxy_tools_bypass_batch_hooks() -> None:
 
 
 @pytest.mark.asyncio
-async def test_toolset_retries_transient_tool_execution_failures() -> None:
+async def test_toolset_invokes_failing_plugin_once_without_retry() -> None:
     plugin = FlakyToolPlugin()
     toolset = Toolset(runtime=_runtime(plugin))
 
     results = await toolset.execute_tools(
-        [ToolCallRequest(tool_call_id="tc-retry", name="known_tool", arguments={})],
+        [ToolCallRequest(tool_call_id="tc-once", name="known_tool", arguments={})],
         ctx=object(),
-        options=ToolExecutionOptions(max_retries=1),
     )
 
-    assert results == [
-        ToolExecutionResult(
-            tool_call_id="tc-retry",
-            name="known_tool",
-            result="retried",
-        )
-    ]
-    assert plugin.calls == 2
+    assert results[0].tool_call_id == "tc-once"
+    assert isinstance(results[0].error, RuntimeError)
+    assert str(results[0].error) == "transient"
+    assert plugin.calls == 1
 
 
 @pytest.mark.asyncio
-async def test_toolset_retries_only_the_failing_tool_provider() -> None:
-    unhandled = UnhandledSideEffectToolPlugin()
-    flaky_second = FlakySecondToolPlugin()
-    toolset = Toolset(runtime=_runtime(unhandled, flaky_second))
+async def test_toolset_invokes_failing_host_executor_once_without_plugin_fallback() -> (
+    None
+):
+    host_executor = FlakyToolPlugin()
+    legacy_plugin = SingleToolPlugin()
+    toolset = Toolset(
+        runtime=_runtime(legacy_plugin),
+        host_executor=host_executor,
+    )
 
     results = await toolset.execute_tools(
-        [ToolCallRequest(tool_call_id="tc-retry", name="known_tool", arguments={})],
+        [ToolCallRequest(tool_call_id="tc-host", name="known_tool", arguments={})],
         ctx=object(),
-        options=ToolExecutionOptions(max_retries=1),
+    )
+
+    assert results[0].tool_call_id == "tc-host"
+    assert isinstance(results[0].error, RuntimeError)
+    assert str(results[0].error) == "transient"
+    assert host_executor.calls == 1
+    assert legacy_plugin.calls == []
+
+
+@pytest.mark.asyncio
+async def test_toolset_falls_back_once_when_host_does_not_own_tool() -> None:
+    host_executor = UnhandledSideEffectToolPlugin()
+    legacy_plugin = SingleToolPlugin()
+    toolset = Toolset(
+        runtime=_runtime(legacy_plugin),
+        host_executor=host_executor,
+    )
+
+    results = await toolset.execute_tools(
+        [
+            ToolCallRequest(
+                tool_call_id="tc-legacy",
+                name="known_tool",
+                arguments={"value": "legacy"},
+            )
+        ],
+        ctx=object(),
     )
 
     assert results == [
         ToolExecutionResult(
-            tool_call_id="tc-retry",
+            tool_call_id="tc-legacy",
             name="known_tool",
-            result="retried-second",
+            result="ok:legacy",
         )
     ]
-    assert unhandled.calls == 1
-    assert flaky_second.calls == 2
+    assert host_executor.calls == 1
+    assert legacy_plugin.calls == [("known_tool", {"value": "legacy"})]
+
+
+def test_tool_execution_options_has_no_retry_count() -> None:
+    with pytest.raises(TypeError, match="max_retries"):
+        ToolExecutionOptions(max_retries=1)  # type: ignore[call-arg]
 
 
 @pytest.mark.asyncio
@@ -1268,7 +1298,7 @@ async def test_toolset_wraps_batch_hook_exceptions_for_each_tool_call() -> None:
 
 
 @pytest.mark.asyncio
-async def test_toolset_retries_transient_batch_hook_failures() -> None:
+async def test_toolset_invokes_failing_batch_hook_once_without_retry() -> None:
     plugin = FlakyBatchToolPlugin()
     toolset = Toolset(runtime=_runtime(plugin))
 
@@ -1278,22 +1308,15 @@ async def test_toolset_retries_transient_batch_hook_failures() -> None:
             ToolCallRequest(tool_call_id="tc-batch-2", name="two", arguments={}),
         ],
         ctx=object(),
-        options=ToolExecutionOptions(max_retries=1),
     )
 
-    assert results == [
-        ToolExecutionResult(
-            tool_call_id="tc-batch-1",
-            name="one",
-            result="retried-one",
-        ),
-        ToolExecutionResult(
-            tool_call_id="tc-batch-2",
-            name="two",
-            result="retried-two",
-        ),
+    assert [result.tool_call_id for result in results] == [
+        "tc-batch-1",
+        "tc-batch-2",
     ]
-    assert plugin.calls == 2
+    assert all(isinstance(result.error, RuntimeError) for result in results)
+    assert all(str(result.error) == "batch transient" for result in results)
+    assert plugin.calls == 1
 
 
 @pytest.mark.asyncio

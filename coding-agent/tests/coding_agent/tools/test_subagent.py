@@ -17,8 +17,12 @@ from agentkit.tools import FatalToolExecutionError
 from agentkit.tools import ToolCallRequest, Toolset
 from coding_agent.adapter.types import StopReason, TurnOutcome
 from coding_agent.__main__ import create_agent, create_child_pipeline
-from coding_agent.environment import CloudCommandResult, CloudEnvironment, LocalEnvironment
-from coding_agent.plugins.core_tools import CoreToolsPlugin
+from coding_agent.environment import (
+    CloudCommandResult,
+    CloudEnvironment,
+    LocalEnvironment,
+)
+from coding_agent.plugins.core_tools import CoreToolExecutor
 from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictError
 from coding_agent.wire.protocol import StreamDelta, TurnEnd, WireMessage
 from coding_agent.tools.subagent import build_subagent_tool
@@ -489,7 +493,9 @@ async def test_subagent_tool_publishes_interrupted_summary_to_parent_session(
         async def close(self) -> None:
             events.append("adapter-close")
 
-    monkeypatch.setattr("coding_agent.tools.subagent.PipelineAdapter", InterruptedAdapter)
+    monkeypatch.setattr(
+        "coding_agent.tools.subagent.PipelineAdapter", InterruptedAdapter
+    )
 
     tool_fn = build_subagent_tool(child_pipeline_builder)
     parent_ctx = PipelineContext(
@@ -1048,8 +1054,7 @@ async def test_subagent_tool_overwrites_caller_supplied_reserved_trace_keys(
 
     assert captured["trace_metadata"]["subagent.parent_agent_id"] == "parent-agent"
     assert (
-        captured["trace_metadata"]["subagent.child_agent_id"]
-        == "parent-agent.child-1"
+        captured["trace_metadata"]["subagent.child_agent_id"] == "parent-agent.child-1"
     )
 
 
@@ -1118,10 +1123,12 @@ async def test_subagent_tool_stale_owner_publish_escapes_toolset_execution(
         "coding_agent.tools.subagent.PipelineAdapter", _make_immediate_adapter()
     )
 
-    core_tools = CoreToolsPlugin(child_pipeline_builder=child_pipeline_builder)
+    executor = CoreToolExecutor(child_pipeline_builder=child_pipeline_builder)
     registry = PluginRegistry()
-    registry.register(core_tools)
-    toolset = Toolset(runtime=HookRuntime(registry))
+    toolset = Toolset(
+        runtime=HookRuntime(registry),
+        host_executor=executor,
+    )
     parent_ctx = PipelineContext(
         tape=Tape(),
         session_id="parent-session",
@@ -1214,10 +1221,12 @@ async def test_subagent_tool_fatal_summary_publish_escapes_toolset_execution(
         "coding_agent.tools.subagent.PipelineAdapter", _make_immediate_adapter()
     )
 
-    core_tools = CoreToolsPlugin(child_pipeline_builder=child_pipeline_builder)
+    executor = CoreToolExecutor(child_pipeline_builder=child_pipeline_builder)
     registry = PluginRegistry()
-    registry.register(core_tools)
-    toolset = Toolset(runtime=HookRuntime(registry))
+    toolset = Toolset(
+        runtime=HookRuntime(registry),
+        host_executor=executor,
+    )
     parent_ctx = PipelineContext(
         tape=Tape(),
         session_id="parent-session",
@@ -1378,7 +1387,9 @@ async def test_subagent_tool_fails_fast_when_child_builder_omits_run_identity_kw
 
     class ImmediateAdapter:
         def __init__(self, **_kwargs: Any) -> None:
-            raise AssertionError("builder TypeError should stop before adapter creation")
+            raise AssertionError(
+                "builder TypeError should stop before adapter creation"
+            )
 
     monkeypatch.setattr("coding_agent.tools.subagent.PipelineAdapter", ImmediateAdapter)
 
@@ -1859,7 +1870,9 @@ async def test_subagent_tool_closes_adapter_when_consumer_close_is_cancelled(
         events.append("consumer-close")
         raise asyncio.CancelledError()
 
-    monkeypatch.setattr("coding_agent.tools.subagent.PipelineAdapter", SuccessfulAdapter)
+    monkeypatch.setattr(
+        "coding_agent.tools.subagent.PipelineAdapter", SuccessfulAdapter
+    )
     monkeypatch.setattr(
         "coding_agent.tools.subagent._ChildWriteLeaseConsumer.close",
         cancelled_close,

@@ -19,6 +19,8 @@ from coding_agent.observability import (
     CompositeObservationSink,
     PrometheusMetricsObservationSink,
 )
+from coding_agent.plugins.core_tools import CoreToolExecutor, CoreToolsPlugin
+from coding_agent.plugins.parallel_executor import ParallelExecutorPlugin
 from coding_agent.topics.memory import MemoryReviewStore
 
 
@@ -76,6 +78,17 @@ class NonLocalEnvironment:
             return f"shell:{cwd}:{command}:{env or {}}"
 
         return bash_run
+
+
+class NoToolEnvironment(NonLocalEnvironment):
+    def build_file_tools(self):
+        raise AssertionError("disabled core tools must not be constructed")
+
+    def build_file_patch_tool(self):
+        raise AssertionError("disabled core tools must not be constructed")
+
+    def build_shell_tool(self):
+        raise AssertionError("disabled core tools must not be constructed")
 
 
 class CloudTraceClient:
@@ -157,6 +170,12 @@ class TestBootstrap:
         assert "topic" not in plugin_ids
         assert "session_metrics" in plugin_ids
         assert "kb" not in plugin_ids
+        parallel_executor = pipeline._registry.get("parallel_executor")
+        assert isinstance(parallel_executor, ParallelExecutorPlugin)
+        assert isinstance(pipeline._tool_executor, CoreToolExecutor)
+        assert (
+            parallel_executor.execute_fn == pipeline._tool_executor.execute_tool_async
+        )
 
     def test_default_plugin_set_excludes_legacy_topic_plugin(self, tmp_path):
         config_path = tmp_path / "agent.toml"
@@ -449,6 +468,55 @@ enabled = ["storage", "core_tools"]
 
         assert pipeline._registry.plugin_ids() == ["storage", "core_tools"]
 
+    def test_disabled_core_tools_do_not_construct_host_executor(self, tmp_path):
+        config_path = tmp_path / "agent.toml"
+        config_path.write_text(
+            """
+[agent]
+name = "test-agent"
+model = "claude-sonnet-4-20250514"
+provider = "anthropic"
+
+[agent.plugins]
+enabled = ["storage"]
+""".strip()
+        )
+
+        pipeline, ctx = create_agent(
+            config_path=config_path,
+            data_dir=tmp_path / "data",
+            api_key="sk-test",
+            environment=NoToolEnvironment(),
+        )
+
+        assert pipeline._registry.plugin_ids() == ["storage"]
+        assert not hasattr(ctx, "_tool_executor")
+
+    def test_parallel_executor_requires_core_tools_before_construction(self, tmp_path):
+        config_path = tmp_path / "agent.toml"
+        config_path.write_text(
+            """
+[agent]
+name = "test-agent"
+model = "claude-sonnet-4-20250514"
+provider = "anthropic"
+
+[agent.plugins]
+enabled = ["parallel_executor"]
+""".strip()
+        )
+
+        with pytest.raises(
+            ValueError,
+            match="parallel_executor requires core_tools",
+        ):
+            create_agent(
+                config_path=config_path,
+                data_dir=tmp_path / "data",
+                api_key="sk-test",
+                environment=NoToolEnvironment(),
+            )
+
     def test_create_agent_rejects_kb_defer_before_semantic_memory(self, tmp_path):
         config_path = tmp_path / "agent.toml"
         config_path.write_text(
@@ -547,7 +615,11 @@ enabled = ["storage", "core_tools"]
 
         assert ctx.config["additional_workspace_roots"] == [str(extra.resolve())]
         core_tools = pipeline._registry.get("core_tools")
-        result = core_tools.execute_tool(
+        assert isinstance(core_tools, CoreToolsPlugin)
+        assert "execute_tool" not in core_tools.hooks()
+        executor = pipeline._tool_executor
+        assert isinstance(executor, CoreToolExecutor)
+        result = executor.execute_tool(
             name="file_read",
             arguments={"path": str(extra / "note.txt")},
             ctx=ctx,
@@ -585,8 +657,9 @@ enabled = ["storage", "core_tools"]
         assert llm_plugin._model == "gpt-test"
         assert llm_plugin._base_url == "http://localhost:1234/v1"
 
-        core_tools = pipeline._registry.get("core_tools")
-        assert core_tools._workspace_root == workspace_root.resolve()
+        executor = pipeline._tool_executor
+        assert isinstance(executor, CoreToolExecutor)
+        assert executor._workspace_root == workspace_root.resolve()
 
         approval_plugin = pipeline._registry.get("approval")
         assert approval_plugin._policy.name == "INTERACTIVE"
@@ -636,9 +709,10 @@ enabled = ["storage", "core_tools"]
 
         assert ctx.config["environment"] is environment
         assert ctx.config["workspace_root"] == str(workspace_root.resolve())
-        core_tools = pipeline._registry.get("core_tools")
-        assert core_tools._environment is environment
-        assert core_tools._workspace_root == workspace_root.resolve()
+        executor = pipeline._tool_executor
+        assert isinstance(executor, CoreToolExecutor)
+        assert executor._environment is environment
+        assert executor._workspace_root == workspace_root.resolve()
 
     def test_create_agent_accepts_non_local_environment_without_workspace_root(
         self, tmp_path
@@ -667,9 +741,10 @@ enabled = ["storage", "core_tools", "shell_session"]
         assert ctx.config["environment"] is environment
         assert "workspace_root" not in ctx.config
         assert ctx.run_context.environment is environment
-        core_tools = pipeline._registry.get("core_tools")
-        assert core_tools._environment is environment
-        assert core_tools._workspace_root is None
+        executor = pipeline._tool_executor
+        assert isinstance(executor, CoreToolExecutor)
+        assert executor._environment is environment
+        assert executor._workspace_root is None
 
     def test_create_agent_builds_agent_run_context(self, tmp_path):
         config_path = (

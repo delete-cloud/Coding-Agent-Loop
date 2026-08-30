@@ -24,7 +24,7 @@ from coding_agent.environment import LocalEnvironment
 from coding_agent.environment.additional_roots import with_additional_workspace_roots
 from coding_agent.observability import build_observation_sink
 from coding_agent.plugins.approval import ApprovalPlugin
-from coding_agent.plugins.core_tools import CoreToolsPlugin
+from coding_agent.plugins.core_tools import CoreToolExecutor, CoreToolsPlugin
 from coding_agent.plugins.doom_detector import DoomDetectorPlugin
 from coding_agent.plugins.kb import KBPlugin
 from coding_agent.plugins.llm_provider import LLMProviderPlugin
@@ -385,14 +385,14 @@ def _should_include_tool(tool_filter: ToolFilter, tool_name: str) -> bool:
     raise TypeError("tool_filter must be callable")
 
 
-def _filter_core_tools_plugin(
-    core_tools_plugin: CoreToolsPlugin,
+def _filter_core_tool_executor(
+    core_tool_executor: CoreToolExecutor,
     tool_filter: ToolFilter,
 ) -> None:
     if tool_filter is None:
         return
 
-    registry = core_tools_plugin.registry
+    registry = core_tool_executor.registry
     allowed_names = [
         name for name in registry.names() if _should_include_tool(tool_filter, name)
     ]
@@ -605,6 +605,20 @@ def create_child_pipeline(
         kwargs.setdefault("semantic_topic_index", semantic_topic_index)
         return create_child_pipeline(**kwargs)
 
+    core_tool_executor: CoreToolExecutor | None = None
+
+    def _core_tool_executor() -> CoreToolExecutor:
+        nonlocal core_tool_executor
+        if core_tool_executor is None:
+            core_tool_executor = CoreToolExecutor(
+                environment=environment,
+                shell_session=shell_session,
+                web_search_backend=web_search_backend,
+                child_pipeline_builder=_create_child_with_environment,
+            )
+            _filter_core_tool_executor(core_tool_executor, tool_filter)
+        return core_tool_executor
+
     plugin_factories: dict[str, Any] = {
         "llm_provider": lambda: _build_llm_provider_plugin(
             provider=cfg.provider,
@@ -614,12 +628,7 @@ def create_child_pipeline(
             parent_provider=parent_provider,
         ),
         "storage": lambda: StoragePlugin(data_dir=data_dir, config=storage_cfg),
-        "core_tools": lambda: CoreToolsPlugin(
-            environment=environment,
-            shell_session=shell_session,
-            web_search_backend=web_search_backend,
-            child_pipeline_builder=_create_child_with_environment,
-        ),
+        "core_tools": lambda: CoreToolsPlugin(_core_tool_executor().schemas()),
         "approval": lambda: ApprovalPlugin(
             policy=policy,
             blocked_tools=set(approval_cfg.get("blocked_tools", [])),
@@ -648,36 +657,13 @@ def create_child_pipeline(
             recall_min_overlap=memory_cfg.semantic.recall_min_overlap,
         )
 
-    async def _execute_tool_async(
-        name: str,
-        arguments: dict[str, Any],
-        *,
-        ctx: PipelineContext | None = None,
-    ) -> Any:
-        core_tools = registry.get("core_tools")
-        if not isinstance(core_tools, CoreToolsPlugin):
-            raise TypeError("core_tools plugin must be CoreToolsPlugin")
-        execute_tool_async = core_tools.execute_tool_async
-        signature = inspect.signature(execute_tool_async)
-        accepts_ctx = any(
-            parameter.kind is inspect.Parameter.VAR_KEYWORD or parameter.name == "ctx"
-            for parameter in signature.parameters.values()
-        )
-        if accepts_ctx:
-            return await execute_tool_async(
-                name=name,
-                arguments=arguments,
-                ctx=ctx,
-            )
-        return await execute_tool_async(name=name, arguments=arguments)
-
     plugin_factories.update(
         {
             "doom_detector": lambda: DoomDetectorPlugin(
                 threshold=int(doom_cfg.get("threshold", 3))
             ),
             "parallel_executor": lambda: ParallelExecutorPlugin(
-                execute_fn=_execute_tool_async,
+                execute_fn=_core_tool_executor().execute_tool_async,
                 max_concurrency=int(parallel_cfg.get("max_concurrency", 5)),
             ),
             "session_metrics": lambda: SessionMetricsPlugin(),
@@ -713,6 +699,8 @@ def create_child_pipeline(
     )
 
     enabled_plugins = cfg.plugins or list(plugin_factories.keys())
+    if "parallel_executor" in enabled_plugins and "core_tools" not in enabled_plugins:
+        raise ValueError("parallel_executor requires core_tools")
     _validate_kb_semantic_plugin_order(
         enabled_plugins,
         kb_defer_when_semantic_memory_hits=kb_defer_when_semantic_memory_hits,
@@ -722,8 +710,6 @@ def create_child_pipeline(
         if factory is None:
             raise ValueError(f"unsupported plugin in config: {plugin_name}")
         plugin = factory()
-        if isinstance(plugin, CoreToolsPlugin):
-            _filter_core_tools_plugin(plugin, tool_filter)
         registry.register(plugin)
 
     runtime = HookRuntime(registry, specs=HOOK_SPECS)
@@ -750,6 +736,9 @@ def create_child_pipeline(
         runtime=runtime,
         registry=registry,
         directive_executor=directive_executor,
+        tool_executor=(
+            core_tool_executor if "core_tools" in registry.plugin_ids() else None
+        ),
     )
 
     if session_id_override is None:
@@ -827,7 +816,7 @@ def create_child_pipeline(
         core_tools_plugin = registry.get("core_tools")
         if not isinstance(core_tools_plugin, CoreToolsPlugin):
             raise TypeError("core_tools plugin must be CoreToolsPlugin")
-        ctx.config["tool_registry"] = core_tools_plugin.registry
+        ctx.config["tool_registry"] = core_tools_plugin
     if "skills" in registry.plugin_ids():
         ctx.config["skills_plugin"] = registry.get("skills")
     if "mcp" in registry.plugin_ids():

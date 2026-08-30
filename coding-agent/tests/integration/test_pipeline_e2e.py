@@ -18,6 +18,7 @@ from coding_agent.__main__ import create_agent
 from coding_agent.adapter import PipelineAdapter
 from coding_agent.adapter.types import StopReason, TurnOutcome
 from coding_agent.evaluation import build_test_cases, load_tape_entries
+from coding_agent.plugins.core_tools import CoreToolExecutor
 from coding_agent.wire.protocol import (
     StreamDelta,
     ToolCallDelta,
@@ -762,15 +763,16 @@ class TestPipelineE2E:
 
         _mock_provider(pipeline, mock_stream)
 
-        core_tools = pipeline._registry.get("core_tools")
-        original_execute = core_tools.registry.execute
+        executor = pipeline._tool_executor
+        assert isinstance(executor, CoreToolExecutor)
+        original_execute = executor.registry.execute
 
         def fake_execute(name, **kwargs):
             if name == "bash_run":
                 return large_result
             return original_execute(name, **kwargs)
 
-        monkeypatch.setattr(core_tools.registry, "execute", fake_execute)
+        monkeypatch.setattr(executor.registry, "execute", fake_execute)
 
         await pipeline.mount(ctx)
 
@@ -857,16 +859,20 @@ class TestPipelineE2E:
         pipeline, ctx = _setup_agent(tmp_path, approval_mode="yolo")
         ctx.config["structured_results"] = True
 
-        core_tools = pipeline._registry.get("core_tools")
+        parallel_executor = pipeline._registry.get("parallel_executor")
         execute_calls: list[tuple[str, dict[str, object]]] = []
 
         async def fake_execute_tool_async(
-            name: str, arguments: dict[str, object]
+            name: str,
+            arguments: dict[str, object],
+            *,
+            ctx: object | None = None,
         ) -> dict[str, object]:
+            del ctx
             execute_calls.append((name, arguments))
             return {"tool": name, "arguments": arguments, "kind": "structured"}
 
-        core_tools.execute_tool_async = fake_execute_tool_async
+        parallel_executor.execute_fn = fake_execute_tool_async
 
         call_count = 0
 

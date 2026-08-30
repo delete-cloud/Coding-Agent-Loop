@@ -16,13 +16,18 @@ from agentkit.runtime import (
 )
 from agentkit.runtime.pipeline import Pipeline, PipelineContext
 from agentkit.runtime.hook_runtime import HookRuntime
+from agentkit.plugin import PluginCapability
 from agentkit.plugin.registry import PluginRegistry
 from agentkit.tape.tape import Tape
 from agentkit.tape.models import Entry
 from agentkit.tape.anchor import Anchor
 from agentkit.errors import HookError, HookTypeError, PipelineError
-from agentkit.tools import FatalToolExecutionError
-from agentkit.tools import UNHANDLED_TOOL_RESULT
+from agentkit.tools import (
+    FatalToolExecutionError,
+    ToolCallRequest,
+    ToolExecutionResult,
+    UNHANDLED_TOOL_RESULT,
+)
 from agentkit.tools.schema import ToolSchema
 
 
@@ -364,6 +369,78 @@ class TestPipeline:
         await pipeline.run_turn(ctx)
 
         assert ctx.toolset is mounted_toolset
+
+    @pytest.mark.asyncio
+    async def test_mount_injects_pipeline_host_executor_into_toolset(self):
+        class HostExecutor:
+            def __init__(self):
+                self.calls = []
+
+            def execute_tool(self, name, arguments, **kwargs):
+                self.calls.append((name, arguments, kwargs["ctx"]))
+                return "host-result"
+
+        executor = HostExecutor()
+        registry = PluginRegistry()
+        registry.register(MinimalPlugin())
+        pipeline = Pipeline(
+            runtime=HookRuntime(registry),
+            registry=registry,
+            tool_executor=executor,
+        )
+        ctx = PipelineContext(tape=Tape(), session_id="s1")
+
+        await pipeline.mount(ctx)
+        assert ctx.toolset is not None
+        results = await ctx.toolset.execute_tools(
+            [ToolCallRequest(tool_call_id="tc-host", name="host_tool", arguments={})],
+            ctx=ctx,
+        )
+
+        assert results == [
+            ToolExecutionResult(
+                tool_call_id="tc-host",
+                name="host_tool",
+                result="host-result",
+            )
+        ]
+        assert executor.calls == [("host_tool", {}, ctx)]
+
+    @pytest.mark.asyncio
+    async def test_classified_plugin_context_cannot_reach_host_executor(self):
+        class ClassifiedContextPlugin:
+            state_key = "classified_context"
+            capabilities = frozenset({PluginCapability.PENDING_FACT})
+
+            def __init__(self):
+                self.context_exposed_executor = False
+
+            def hooks(self):
+                return {"build_context": self.build_context}
+
+            def build_context(self, *, ctx, **kwargs):
+                del kwargs
+                self.context_exposed_executor = hasattr(ctx, "_tool_executor")
+                return []
+
+        class HostExecutor:
+            def execute_tool(self, name, arguments, **kwargs):
+                raise AssertionError((name, arguments, kwargs))
+
+        plugin = ClassifiedContextPlugin()
+        registry = PluginRegistry()
+        registry.register(plugin)
+        pipeline = Pipeline(
+            runtime=HookRuntime(registry),
+            registry=registry,
+            tool_executor=HostExecutor(),
+        )
+
+        await pipeline._stage_build_context(
+            PipelineContext(tape=Tape(), session_id="s1")
+        )
+
+        assert plugin.context_exposed_executor is False
 
     @pytest.mark.asyncio
     async def test_run_turn_records_runtime_stage_spans(self, setup):

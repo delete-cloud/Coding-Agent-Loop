@@ -11,7 +11,7 @@ from httpx import ASGITransport, AsyncClient
 
 from coding_agent.environment import CloudCommandResult, WorkspaceProviderCapabilities
 from coding_agent.observability import prometheus_metrics_text, reset_prometheus_metrics
-from coding_agent.plugins.core_tools import CoreToolsPlugin
+from coding_agent.plugins.core_tools import CoreToolExecutor
 from coding_agent.stores.runtime_store import (
     AgentInteractionRecord,
     AgentRunRecord,
@@ -496,12 +496,12 @@ async def test_workspace_provider_dogfood_demo_path_records_sanitized_evidence(
     assert run.result["stop_reason"] == "no_tool_calls"
 
     environment = manager._resolve_environment(session)
-    plugin = CoreToolsPlugin(environment=environment)
-    assert "sanitized fixture file" == plugin.execute_tool(
+    executor = CoreToolExecutor(environment=environment)
+    assert "sanitized fixture file" == executor.execute_tool(
         name="file_read",
         arguments={"path": "README.md"},
     )
-    command_result = plugin.execute_tool(
+    command_result = executor.execute_tool(
         name="bash_run",
         arguments={"command": "pytest", "timeout": 5},
     )

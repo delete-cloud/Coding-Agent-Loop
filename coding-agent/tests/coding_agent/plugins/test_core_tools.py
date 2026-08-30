@@ -1,14 +1,19 @@
 # pyright: reportMissingTypeStubs=false, reportUnknownParameterType=false, reportMissingParameterType=false, reportUnknownArgumentType=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportAny=false, reportUnannotatedClassAttribute=false, reportPrivateUsage=false, reportUnusedCallResult=false
 
+import json
 from typing import Any
 
 import pytest
 from agentkit.environment import WorkspaceSummary
+from agentkit.plugin.registry import PluginRegistry
 from agentkit.runtime.pipeline import PipelineContext
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
 from agentkit.tools import ToolRegistry, tool
-from coding_agent.plugins.core_tools import CoreToolsPlugin
+from agentkit.tools.schema import ToolSchema
+from coding_agent.core.planner import PlanManager
+from coding_agent.environment import LocalEnvironment
+from coding_agent.plugins.core_tools import CoreToolExecutor, CoreToolsPlugin
 from coding_agent.plugins.shell_session import ShellSessionPlugin
 from coding_agent.tools.file_ops import (
     structured_results_scope as file_ops_structured_results_scope,
@@ -16,10 +21,6 @@ from coding_agent.tools.file_ops import (
 from coding_agent.tools.shell import (
     structured_results_scope as shell_structured_results_scope,
 )
-from agentkit.tools.schema import ToolSchema
-from coding_agent.core.planner import PlanManager
-from coding_agent.environment import LocalEnvironment
-import json
 
 
 class NonLocalEnvironment:
@@ -83,29 +84,44 @@ class NonLocalEnvironment:
 
 
 class TestCoreToolsPlugin:
+    @staticmethod
+    def _plugin() -> CoreToolsPlugin:
+        executor = CoreToolExecutor()
+        return CoreToolsPlugin(executor.schemas())
+
     def test_state_key(self):
-        plugin = CoreToolsPlugin()
+        plugin = self._plugin()
         assert plugin.state_key == "core_tools"
 
-    def test_hooks_include_get_tools(self):
-        plugin = CoreToolsPlugin()
-        hooks = plugin.hooks()
-        assert "get_tools" in hooks
+    def test_hooks_expose_schemas_without_execution(self):
+        plugin = self._plugin()
 
-    def test_hooks_include_execute_tool(self):
-        plugin = CoreToolsPlugin()
-        hooks = plugin.hooks()
-        assert "execute_tool" in hooks
+        assert plugin.hooks() == {"get_tools": plugin.get_tools}
+        assert not hasattr(plugin, "execute_tool")
+        assert not hasattr(plugin, "registry")
+        assert not hasattr(plugin, "_environment")
+        registry = PluginRegistry()
+        registry.register(plugin)
+        assert registry.get_hooks("get_tools") == [plugin.get_tools]
 
     def test_get_tools_returns_schemas(self):
-        plugin = CoreToolsPlugin()
+        plugin = self._plugin()
         schemas = plugin.get_tools()
         assert isinstance(schemas, list)
         assert len(schemas) > 0
-        assert all(isinstance(s, ToolSchema) for s in schemas)
+        assert all(isinstance(schema, ToolSchema) for schema in schemas)
+
+    def test_get_tools_returns_copy_of_immutable_schema_sequence(self):
+        plugin = self._plugin()
+        first = plugin.get_tools()
+        expected_names = [schema.name for schema in first]
+
+        first.clear()
+
+        assert [schema.name for schema in plugin.get_tools()] == expected_names
 
     def test_execute_tool_runs_tool(self, tmp_path):
-        plugin = CoreToolsPlugin(workspace_root=tmp_path)
+        plugin = CoreToolExecutor(workspace_root=tmp_path)
         f = tmp_path / "test.txt"
         f.write_text("test content")
         result = plugin.execute_tool(name="file_read", arguments={"path": "test.txt"})
@@ -113,7 +129,7 @@ class TestCoreToolsPlugin:
 
     def test_execute_tool_uses_injected_environment(self, tmp_path):
         env = LocalEnvironment(workspace_root=tmp_path)
-        plugin = CoreToolsPlugin(environment=env)
+        plugin = CoreToolExecutor(environment=env)
         target = tmp_path / "env.txt"
         target.write_text("environment content")
 
@@ -123,7 +139,7 @@ class TestCoreToolsPlugin:
 
     def test_bash_run_uses_injected_environment_workspace(self, tmp_path):
         env = LocalEnvironment(workspace_root=tmp_path)
-        plugin = CoreToolsPlugin(environment=env)
+        plugin = CoreToolExecutor(environment=env)
 
         result = plugin.execute_tool(name="bash_run", arguments={"command": "pwd"})
 
@@ -137,12 +153,14 @@ class TestCoreToolsPlugin:
             "env_vars": {"A": "B"},
             "active": True,
         }
-        plugin = CoreToolsPlugin(environment=env, shell_session=shell_session)
+        plugin = CoreToolExecutor(environment=env, shell_session=shell_session)
 
         read_result = plugin.execute_tool(
             name="file_read", arguments={"path": "README.md"}
         )
-        shell_result = plugin.execute_tool(name="bash_run", arguments={"command": "pwd"})
+        shell_result = plugin.execute_tool(
+            name="bash_run", arguments={"command": "pwd"}
+        )
 
         assert plugin._workspace_root is None
         assert read_result == "cloud-read:README.md"
@@ -152,7 +170,7 @@ class TestCoreToolsPlugin:
         ]
 
     def test_execute_tool_blocks_paths_outside_workspace(self, tmp_path):
-        plugin = CoreToolsPlugin(workspace_root=tmp_path)
+        plugin = CoreToolExecutor(workspace_root=tmp_path)
         outside = tmp_path.parent / "secret.txt"
         outside.write_text("secret")
 
@@ -161,7 +179,7 @@ class TestCoreToolsPlugin:
         assert "outside workspace" in result.lower()
 
     def test_file_read_returns_structured_payload_when_enabled(self, tmp_path):
-        plugin = CoreToolsPlugin(workspace_root=tmp_path)
+        plugin = CoreToolExecutor(workspace_root=tmp_path)
         target = tmp_path / "test.txt"
         target.write_text("line one\nline two\n")
 
@@ -177,7 +195,7 @@ class TestCoreToolsPlugin:
         }
 
     def test_grep_search_returns_structured_payload_when_enabled(self, tmp_path):
-        plugin = CoreToolsPlugin(workspace_root=tmp_path)
+        plugin = CoreToolExecutor(workspace_root=tmp_path)
         target = tmp_path / "notes.txt"
         target.write_text("TODO first\nignore\nTODO second\n")
 
@@ -193,7 +211,7 @@ class TestCoreToolsPlugin:
         assert result["matches"][1].endswith("notes.txt:3:TODO second")
 
     def test_bash_run_returns_structured_payload_when_enabled(self, tmp_path):
-        plugin = CoreToolsPlugin(workspace_root=tmp_path)
+        plugin = CoreToolExecutor(workspace_root=tmp_path)
 
         with shell_structured_results_scope(True):
             result = plugin.execute_tool(
@@ -208,8 +226,8 @@ class TestCoreToolsPlugin:
         assert result["exit_code"] == 0
 
     def test_planner_state_is_instance_scoped(self, tmp_path):
-        plugin_one = CoreToolsPlugin(workspace_root=tmp_path, planner=PlanManager())
-        plugin_two = CoreToolsPlugin(workspace_root=tmp_path, planner=PlanManager())
+        plugin_one = CoreToolExecutor(workspace_root=tmp_path, planner=PlanManager())
+        plugin_two = CoreToolExecutor(workspace_root=tmp_path, planner=PlanManager())
 
         result = plugin_one.execute_tool(
             name="todo_write",
@@ -221,30 +239,30 @@ class TestCoreToolsPlugin:
         assert "no tasks" in plugin_two_read.lower()
 
     def test_includes_file_tools(self):
-        plugin = CoreToolsPlugin()
-        names = {s.name for s in plugin.get_tools()}
+        executor = CoreToolExecutor()
+        names = {schema.name for schema in executor.schemas()}
         assert "file_read" in names
         assert "file_write" in names
 
     def test_includes_shell_tool(self):
-        plugin = CoreToolsPlugin()
-        names = {s.name for s in plugin.get_tools()}
+        executor = CoreToolExecutor()
+        names = {schema.name for schema in executor.schemas()}
         assert "bash_run" in names
 
     def test_includes_search_tools(self):
-        plugin = CoreToolsPlugin()
-        names = {s.name for s in plugin.get_tools()}
+        executor = CoreToolExecutor()
+        names = {schema.name for schema in executor.schemas()}
         assert "grep_search" in names
         assert "glob_files" in names
 
     def test_includes_web_search_tool(self):
-        plugin = CoreToolsPlugin()
-        names = {s.name for s in plugin.get_tools()}
+        executor = CoreToolExecutor()
+        names = {schema.name for schema in executor.schemas()}
         assert "web_search" in names
 
     def test_includes_subagent_tool(self):
-        plugin = CoreToolsPlugin()
-        names = {s.name for s in plugin.get_tools()}
+        executor = CoreToolExecutor()
+        names = {schema.name for schema in executor.schemas()}
         assert "subagent" in names
 
     def test_execute_web_search_uses_backend(self, tmp_path):
@@ -263,7 +281,7 @@ class TestCoreToolsPlugin:
                 ]
 
         backend = RecordingBackend()
-        plugin = CoreToolsPlugin(workspace_root=tmp_path, web_search_backend=backend)
+        plugin = CoreToolExecutor(workspace_root=tmp_path, web_search_backend=backend)
 
         result = plugin.execute_tool(
             name="web_search",
@@ -275,7 +293,7 @@ class TestCoreToolsPlugin:
         assert payload["results"][0]["url"] == "https://example.com"
 
     def test_execute_web_search_without_backend_uses_default_backend(self, tmp_path):
-        plugin = CoreToolsPlugin(workspace_root=tmp_path)
+        plugin = CoreToolExecutor(workspace_root=tmp_path)
 
         result = plugin.execute_tool(
             name="web_search",
@@ -293,7 +311,7 @@ class TestCoreToolsPlugin:
         subdir = tmp_path / "subdir"
         subdir.mkdir()
 
-        plugin = CoreToolsPlugin(workspace_root=tmp_path, shell_session=shell_session)
+        plugin = CoreToolExecutor(workspace_root=tmp_path, shell_session=shell_session)
 
         cd_result = plugin.execute_tool(
             name="bash_run",
@@ -320,7 +338,7 @@ class TestCoreToolsPlugin:
     def test_bash_run_with_shell_session_missing_cwd_uses_workspace(self, tmp_path):
         shell_session = ShellSessionPlugin()
         shell_session._state = {"cwd": None, "env_vars": {}, "active": True}
-        plugin = CoreToolsPlugin(workspace_root=tmp_path, shell_session=shell_session)
+        plugin = CoreToolExecutor(workspace_root=tmp_path, shell_session=shell_session)
 
         result = plugin.execute_tool(name="bash_run", arguments={"command": "pwd"})
 
@@ -329,7 +347,7 @@ class TestCoreToolsPlugin:
     def test_export_with_spaces_updates_shell_session_from_result(self, tmp_path):
         shell_session = ShellSessionPlugin()
         shell_session.do_mount()
-        plugin = CoreToolsPlugin(workspace_root=tmp_path, shell_session=shell_session)
+        plugin = CoreToolExecutor(workspace_root=tmp_path, shell_session=shell_session)
 
         result = plugin.execute_tool(
             name="bash_run",
@@ -344,7 +362,7 @@ class TestCoreToolsPlugin:
     def test_failed_export_does_not_update_shell_session(self, tmp_path):
         shell_session = ShellSessionPlugin()
         shell_session.do_mount()
-        plugin = CoreToolsPlugin(workspace_root=tmp_path, shell_session=shell_session)
+        plugin = CoreToolExecutor(workspace_root=tmp_path, shell_session=shell_session)
 
         result = plugin.execute_tool(
             name="bash_run",
@@ -441,12 +459,12 @@ class TestCoreToolsPlugin:
             captured["trace_metadata"] = trace_metadata
             return FakeChildPipeline(), child_ctx
 
-        plugin = CoreToolsPlugin(
+        executor = CoreToolExecutor(
             workspace_root=tmp_path,
             child_pipeline_builder=build_child_pipeline,
         )
 
-        result = await plugin.execute_tool_async(
+        result = await executor.execute_tool_async(
             name="subagent",
             arguments={"goal": "Investigate child task"},
             ctx=parent_ctx,

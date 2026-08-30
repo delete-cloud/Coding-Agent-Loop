@@ -3,9 +3,8 @@ from __future__ import annotations
 import json
 import textwrap
 
-import pytest
 
-from coding_agent.plugins.core_tools import CoreToolsPlugin
+from coding_agent.plugins.core_tools import CoreToolExecutor
 
 
 EXPECTED_TOOLS = {
@@ -25,26 +24,26 @@ EXPECTED_TOOLS = {
 
 class TestToolRegistration:
     def test_registers_all_expected_tools(self):
-        plugin = CoreToolsPlugin()
-        names = {s.name for s in plugin.get_tools()}
+        executor = CoreToolExecutor()
+        names = {schema.name for schema in executor.schemas()}
         assert EXPECTED_TOOLS.issubset(names), (
             f"Missing tools: {EXPECTED_TOOLS - names}"
         )
 
     def test_total_tool_count_is_at_least_10(self):
-        plugin = CoreToolsPlugin()
-        schemas = plugin.get_tools()
+        executor = CoreToolExecutor()
+        schemas = executor.schemas()
         assert len(schemas) >= 9
 
     def test_file_patch_registered(self):
-        plugin = CoreToolsPlugin()
-        names = {s.name for s in plugin.get_tools()}
+        executor = CoreToolExecutor()
+        names = {schema.name for schema in executor.schemas()}
         assert "file_patch" in names
 
 
 class TestFilePatchTool:
     def test_applies_simple_patch(self, tmp_path):
-        plugin = CoreToolsPlugin(workspace_root=tmp_path)
+        plugin = CoreToolExecutor(workspace_root=tmp_path)
 
         # given: a file with known content
         target = tmp_path / "hello.py"
@@ -70,7 +69,7 @@ class TestFilePatchTool:
         assert "hello world" in target.read_text()
 
     def test_patch_nonexistent_file_returns_error(self, tmp_path):
-        plugin = CoreToolsPlugin(workspace_root=tmp_path)
+        plugin = CoreToolExecutor(workspace_root=tmp_path)
 
         patch = "@@ -1,1 +1,1 @@\n-old\n+new\n"
         result = plugin.execute_tool(
@@ -82,7 +81,7 @@ class TestFilePatchTool:
         assert "not found" in data["error"].lower()
 
     def test_patch_bad_context_returns_error(self, tmp_path):
-        plugin = CoreToolsPlugin(workspace_root=tmp_path)
+        plugin = CoreToolExecutor(workspace_root=tmp_path)
 
         target = tmp_path / "x.txt"
         target.write_text("aaa\nbbb\n")
@@ -104,14 +103,14 @@ class TestFilePatchTool:
 
 class TestExistingToolsStillWork:
     def test_file_read_works(self, tmp_path):
-        plugin = CoreToolsPlugin(workspace_root=tmp_path)
+        plugin = CoreToolExecutor(workspace_root=tmp_path)
         f = tmp_path / "test.txt"
         f.write_text("existing content")
         result = plugin.execute_tool(name="file_read", arguments={"path": "test.txt"})
         assert "existing content" in result
 
     def test_bash_run_works(self):
-        plugin = CoreToolsPlugin()
+        plugin = CoreToolExecutor()
         result = plugin.execute_tool(
             name="bash_run", arguments={"command": "echo hello"}
         )

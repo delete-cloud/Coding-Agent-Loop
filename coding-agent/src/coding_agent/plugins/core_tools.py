@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Callable
 
 from agentkit.environment import Environment
+from agentkit.plugin import PluginCapability
 from agentkit.runtime.pipeline import PipelineContext
 from agentkit.tools import ToolRegistry, ToolSchema, UNHANDLED_TOOL_RESULT
 
@@ -12,7 +14,26 @@ from coding_agent.plugins.shell_session import ShellSessionPlugin
 
 
 class CoreToolsPlugin:
+    """Capability-safe producer for immutable core tool schemas."""
+
     state_key = "core_tools"
+    capabilities = frozenset({PluginCapability.EFFECT_PLAN})
+
+    def __init__(self, schemas: Iterable[ToolSchema]) -> None:
+        self._schemas = tuple(schemas)
+
+    def hooks(self) -> dict[str, Callable[..., Any]]:
+        return {"get_tools": self.get_tools}
+
+    def get_tools(self, **kwargs: Any) -> list[ToolSchema]:
+        return list(self._schemas)
+
+    def names(self) -> list[str]:
+        return [schema.name for schema in self._schemas]
+
+
+class CoreToolExecutor:
+    """Host-owned construction and execution boundary for core tools."""
 
     @staticmethod
     def _default_child_pipeline_builder(**kwargs: Any) -> tuple[Any, PipelineContext]:
@@ -52,6 +73,9 @@ class CoreToolsPlugin:
     def registry(self) -> ToolRegistry:
         return self._registry
 
+    def schemas(self) -> tuple[ToolSchema, ...]:
+        return tuple(self._registry.schemas())
+
     def _register_tools(self) -> None:
         from coding_agent.tools.planner import build_planner_tools
         from coding_agent.tools.subagent import build_subagent_tool
@@ -83,15 +107,6 @@ class CoreToolsPlugin:
         for fn in tool_fns:
             self._registry.register(fn)
 
-    def hooks(self) -> dict[str, Callable[..., Any]]:
-        return {
-            "get_tools": self.get_tools,
-            "execute_tool": self.execute_tool,
-        }
-
-    def get_tools(self, **kwargs: Any) -> list[ToolSchema]:
-        return self._registry.schemas()
-
     def execute_tool(
         self, name: str = "", arguments: dict[str, Any] | None = None, **kwargs: Any
     ) -> Any:
@@ -101,7 +116,6 @@ class CoreToolsPlugin:
         pipeline_ctx = kwargs.get("ctx")
         if isinstance(pipeline_ctx, PipelineContext):
             args.setdefault("__pipeline_ctx__", pipeline_ctx)
-        # Remove 'name' from args to avoid conflict with positional arg
         args.pop("name", None)
         result = self._registry.execute(name, **args)
         self._sync_shell_session(name, args, result)
@@ -116,7 +130,6 @@ class CoreToolsPlugin:
         pipeline_ctx = kwargs.get("ctx")
         if isinstance(pipeline_ctx, PipelineContext):
             args.setdefault("__pipeline_ctx__", pipeline_ctx)
-        # Remove 'name' from args to avoid conflict with positional arg
         args.pop("name", None)
         result = await self._registry.execute_async(name, **args)
         self._sync_shell_session(name, args, result)

@@ -10,7 +10,7 @@ from agentkit.plugin.registry import PluginRegistry
 from agentkit.runtime.hook_runtime import HookRuntime
 from agentkit.tools import ToolCallRequest, Toolset
 from coding_agent.environment import CloudCommandResult, CloudEnvironment
-from coding_agent.plugins.core_tools import CoreToolsPlugin
+from coding_agent.plugins.core_tools import CoreToolExecutor
 from coding_agent.plugins.shell_session import ShellSessionPlugin
 
 
@@ -130,28 +130,28 @@ def test_cloud_environment_shell_tool_updates_session_cwd_and_env() -> None:
     _ = shell_session.do_mount(
         ctx=type("Ctx", (), {"config": {"environment": CloudEnvironment(client)}})()
     )
-    plugin = CoreToolsPlugin(
+    executor = CoreToolExecutor(
         environment=CloudEnvironment(client),
         shell_session=shell_session,
     )
 
     cd_result = cast(
         str,
-        plugin.execute_tool(
+        executor.execute_tool(
             name="bash_run",
             arguments={"command": "cd pkg"},
         ),
     )
     export_result = cast(
         str,
-        plugin.execute_tool(
+        executor.execute_tool(
             name="bash_run",
             arguments={"command": 'export TEST_VALUE="cloud ok"'},
         ),
     )
     command_result = cast(
         str,
-        plugin.execute_tool(
+        executor.execute_tool(
             name="bash_run",
             arguments={"command": "pytest -q", "timeout": 7},
         ),
@@ -181,21 +181,21 @@ def test_cloud_environment_rejects_invalid_session_commands_without_mutation() -
     _ = shell_session.do_mount(
         ctx=type("Ctx", (), {"config": {"environment": CloudEnvironment(client)}})()
     )
-    plugin = CoreToolsPlugin(
+    executor = CoreToolExecutor(
         environment=CloudEnvironment(client),
         shell_session=shell_session,
     )
 
     cd_result = cast(
         str,
-        plugin.execute_tool(
+        executor.execute_tool(
             name="bash_run",
             arguments={"command": "cd one two"},
         ),
     )
     export_result = cast(
         str,
-        plugin.execute_tool(
+        executor.execute_tool(
             name="bash_run",
             arguments={"command": "export MISSING_VALUE"},
         ),
@@ -265,10 +265,12 @@ async def test_cloud_environment_tool_errors_do_not_fallback_to_local_execution(
     local_note.write_text("local content")
     client = FakeCloudWorkspaceClient()
     client.fail_read = True
-    plugin = CoreToolsPlugin(environment=CloudEnvironment(client))
+    executor = CoreToolExecutor(environment=CloudEnvironment(client))
     registry = PluginRegistry()
-    registry.register(plugin)
-    toolset = Toolset(runtime=HookRuntime(registry))
+    toolset = Toolset(
+        runtime=HookRuntime(registry),
+        host_executor=executor,
+    )
 
     results = await toolset.execute_tools(
         [
