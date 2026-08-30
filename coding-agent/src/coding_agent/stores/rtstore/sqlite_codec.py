@@ -7,7 +7,7 @@ import sqlite3
 from datetime import datetime
 from typing import cast
 
-from agentkit.runtime.messages import CommitRef, OperationStateVersion
+from agentkit.runtime.contracts import CommitRef, OperationStateVersion
 from coding_agent.stores.rtstore.records import (
     AgentInteractionRecord,
     AgentRunRecord,

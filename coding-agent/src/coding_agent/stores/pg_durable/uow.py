@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any, cast
 
-from agentkit.runtime.messages import (
+from agentkit.runtime.contracts import (
     CommitRef,
     CommittedFactNotice,
     OperationStateVersion,

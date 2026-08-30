@@ -5,6 +5,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+from agentkit.runtime.contracts import (
+    BlockedOutcome,
+    CancelledOutcome,
+    CompletedOutcome,
+    FailedOutcome,
+    RoundLimitOutcome,
+    SafeYieldOutcome,
+    SegmentOutcome,
+)
+
 
 class StopReason(Enum):
     """Enumeration of possible reasons for stopping agent execution."""
@@ -47,3 +57,45 @@ def exception_error_message(exc: BaseException) -> str:
     if cause is not None:
         return f"{type(exc).__name__}: {exception_error_message(cause)}"
     return type(exc).__name__
+
+
+def turn_outcome_from_segment_outcome(
+    outcome: SegmentOutcome,
+    *,
+    doom_loop: bool = False,
+) -> TurnOutcome | None:
+    """Map a settled Phase C outcome to the existing product turn contract."""
+
+    if isinstance(outcome, CompletedOutcome):
+        stop_reason = StopReason.DOOM_LOOP if doom_loop else StopReason.NO_TOOL_CALLS
+        return TurnOutcome(
+            stop_reason=stop_reason,
+            final_message=outcome.final_message,
+            steps_taken=outcome.steps_taken,
+        )
+    if isinstance(outcome, RoundLimitOutcome):
+        return TurnOutcome(
+            stop_reason=StopReason.MAX_STEPS_REACHED,
+            steps_taken=outcome.steps_taken,
+        )
+    if isinstance(outcome, FailedOutcome):
+        return TurnOutcome(
+            stop_reason=StopReason.ERROR,
+            steps_taken=outcome.steps_taken,
+            error=outcome.error.message,
+        )
+    if isinstance(outcome, CancelledOutcome):
+        return TurnOutcome(
+            stop_reason=StopReason.INTERRUPTED,
+            steps_taken=outcome.steps_taken,
+        )
+    if isinstance(outcome, SafeYieldOutcome):
+        if outcome.reason != "interrupt":
+            return None
+        return TurnOutcome(
+            stop_reason=StopReason.INTERRUPTED,
+            steps_taken=outcome.steps_taken,
+        )
+    if isinstance(outcome, BlockedOutcome):
+        return None
+    raise TypeError("unsupported segment outcome")

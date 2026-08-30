@@ -22,7 +22,7 @@ AgentKit 将**机制**与**策略**分离。框架提供执行流水线、钩子
 │  (coding_agent, 自定义 Agent 等)         │
 ├─────────────────────────────────────────┤
 │              AgentKit API               │
-│  Pipeline · Plugins · Tape · Tools      │
+│ AgentEngine · SegmentCoordinator · Ports│
 ├─────────────────────────────────────────┤
 │           钩子运行时层                   │
 │  HookRuntime · HookSpec · Registry      │
@@ -100,9 +100,12 @@ src/agentkit/
 
 ## 3. 核心抽象
 
-### 3.1 Pipeline 与 PipelineContext
+### 3.1 旧版内部 Pipeline 与 PipelineContext
 
-`Pipeline` 是核心执行引擎。它将 Agent 的一次**轮次（turn）**通过 7 个顺序阶段运行，并贯穿一个可变的 `PipelineContext`。
+`Pipeline` 和 `PipelineContext` 仅为 coding-agent 兼容路径保留，可从
+`agentkit.runtime.pipeline` 直接导入，但不再由 `agentkit` 或
+`agentkit.runtime` 公共命名空间导出。这个旧版运行器通过可变上下文执行
+Agent 的七阶段轮次。
 
 ```python
 @dataclass

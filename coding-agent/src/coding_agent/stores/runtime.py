@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from agentkit.runtime.messages import OperationStateVersion, TransitionReceipt
+    from agentkit.runtime.contracts import OperationStateVersion, TransitionReceipt
     from coding_agent.events.connected_chat import (
         ChatCommandAdmission,
         ChatSnapshot,

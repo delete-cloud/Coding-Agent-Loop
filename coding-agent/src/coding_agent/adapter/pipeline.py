@@ -18,6 +18,7 @@ from agentkit.providers.models import (
     ToolResultEvent,
     UsageEvent,
 )
+from agentkit.runtime.contracts import CommittedFactNotice
 from agentkit.runtime.pipeline import Pipeline, PipelineContext
 from agentkit.tape.models import Entry
 
@@ -120,6 +121,59 @@ def _normalize_tool_result_for_wire(
             display_result = str(_redact_for_display(str(result)))
         return payload, display_result
     return result, str(_redact_for_display(result))
+
+
+def committed_fact_notice_to_wire(
+    notice: CommittedFactNotice,
+    *,
+    session_id: str,
+    agent_id: str,
+) -> ToolCallDelta | ToolResultDelta | None:
+    """Project one already-committed tool fact onto the legacy wire schema."""
+
+    if not isinstance(notice, CommittedFactNotice):
+        raise TypeError("notice must be a CommittedFactNotice")
+    if notice.fact_kind == "tool_call":
+        call_id = _required_notice_string(notice, "tool_call_id")
+        tool_name = _required_notice_string(notice, "tool_name")
+        arguments = notice.payload.get("arguments")
+        if not isinstance(arguments, Mapping):
+            raise TypeError("tool_call notice arguments must be a mapping")
+        return ToolCallDelta(
+            tool_name=tool_name,
+            arguments=dict(arguments),
+            call_id=call_id,
+            session_id=session_id,
+            agent_id=agent_id,
+        )
+    if notice.fact_kind == "tool_result":
+        call_id = _required_notice_string(notice, "tool_call_id")
+        tool_name = _required_notice_string(notice, "tool_name")
+        result = notice.payload.get("result")
+        if not isinstance(result, str | Mapping):
+            raise TypeError("tool_result notice result must be a string or mapping")
+        is_error = notice.payload.get("is_error")
+        if not isinstance(is_error, bool):
+            raise TypeError("tool_result notice is_error must be a bool")
+        normalized_result = dict(result) if isinstance(result, Mapping) else result
+        wire_result, display_result = _normalize_tool_result_for_wire(normalized_result)
+        return ToolResultDelta(
+            call_id=call_id,
+            tool_name=tool_name,
+            result=wire_result,
+            display_result=display_result,
+            is_error=is_error,
+            session_id=session_id,
+            agent_id=agent_id,
+        )
+    return None
+
+
+def _required_notice_string(notice: CommittedFactNotice, key: str) -> str:
+    value = notice.payload.get(key)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{notice.fact_kind} notice {key} must be non-empty")
+    return value
 
 
 class PipelineAdapter:

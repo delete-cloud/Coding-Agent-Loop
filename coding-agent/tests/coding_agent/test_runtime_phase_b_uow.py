@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from agentkit.runtime.messages import (
+from agentkit.runtime.contracts import (
     AppliedCommandDisposition,
     EffectMutation,
     EffectPlan,
