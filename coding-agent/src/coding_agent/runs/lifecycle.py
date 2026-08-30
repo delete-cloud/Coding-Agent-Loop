@@ -241,6 +241,8 @@ def runtime_result_from_turn_outcome(outcome: TurnOutcome) -> JSONObject:
 
 
 def runtime_status_from_turn_outcome(outcome: TurnOutcome) -> str:
+    if outcome.durable_root_status is not None:
+        return outcome.durable_root_status
     if outcome.stop_reason == StopReason.INTERRUPTED:
         return "interrupted"
     if (

@@ -78,10 +78,18 @@ def _make_ask_user_handler(
     return handler
 
 
+def _thaw_runtime_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _thaw_runtime_value(item) for key, item in value.items()}
+    if isinstance(value, tuple | list):
+        return [_thaw_runtime_value(item) for item in value]
+    return value
+
+
 def _redact_for_display(value: Any) -> Any:
     if isinstance(value, BaseModel):
         return _redact_for_display(value.model_dump())
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         redacted: dict[str, Any] = {}
         for key, item in value.items():
             if any(
@@ -99,27 +107,28 @@ def _redact_for_display(value: Any) -> Any:
             else:
                 redacted[key] = _redact_for_display(item)
         return redacted
-    if isinstance(value, list):
+    if isinstance(value, tuple | list):
         return [_redact_for_display(item) for item in value]
     if isinstance(value, str):
         return _redact_string_display_text(value)
     return value
 
 
-def _normalize_tool_result_for_wire(
-    result: str | dict[str, Any] | BaseModel,
-) -> tuple[str | dict[str, Any], str]:
+def _normalize_tool_result_for_wire(result: Any) -> tuple[Any, str]:
     if isinstance(result, BaseModel):
         payload = result.model_dump()
         return payload, json.dumps(_redact_for_display(payload))
     if isinstance(result, str):
         return result, str(_redact_for_display(result))
     if isinstance(result, Mapping):
-        payload = dict(result)
+        payload = _thaw_runtime_value(result)
         display_result = json.dumps(_redact_for_display(payload))
         if isinstance(result, dict) and type(result).__str__ is not dict.__str__:
             display_result = str(_redact_for_display(str(result)))
         return payload, display_result
+    if isinstance(result, tuple | list):
+        payload = _thaw_runtime_value(result)
+        return payload, json.dumps(_redact_for_display(payload))
     return result, str(_redact_for_display(result))
 
 
@@ -139,9 +148,12 @@ def committed_fact_notice_to_wire(
         arguments = notice.payload.get("arguments")
         if not isinstance(arguments, Mapping):
             raise TypeError("tool_call notice arguments must be a mapping")
+        thawed_arguments = _thaw_runtime_value(arguments)
+        if not isinstance(thawed_arguments, dict):
+            raise TypeError("tool_call notice arguments must thaw to a mapping")
         return ToolCallDelta(
             tool_name=tool_name,
-            arguments=dict(arguments),
+            arguments=thawed_arguments,
             call_id=call_id,
             session_id=session_id,
             agent_id=agent_id,
@@ -149,14 +161,13 @@ def committed_fact_notice_to_wire(
     if notice.fact_kind == "tool_result":
         call_id = _required_notice_string(notice, "tool_call_id")
         tool_name = _required_notice_string(notice, "tool_name")
-        result = notice.payload.get("result")
-        if not isinstance(result, str | Mapping):
-            raise TypeError("tool_result notice result must be a string or mapping")
+        if "result" not in notice.payload:
+            raise ValueError("tool_result notice requires result")
+        result = _thaw_runtime_value(notice.payload["result"])
         is_error = notice.payload.get("is_error")
         if not isinstance(is_error, bool):
             raise TypeError("tool_result notice is_error must be a bool")
-        normalized_result = dict(result) if isinstance(result, Mapping) else result
-        wire_result, display_result = _normalize_tool_result_for_wire(normalized_result)
+        wire_result, display_result = _normalize_tool_result_for_wire(result)
         return ToolResultDelta(
             call_id=call_id,
             tool_name=tool_name,

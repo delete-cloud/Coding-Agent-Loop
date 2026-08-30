@@ -178,12 +178,14 @@ class SegmentCoordinator:
         step_input = request.step_input
         steps_taken = 0
         mailbox_cut = _mailbox_cut(request)
+        propagate_task_cancellation = False
 
         try:
             while True:
-                snapshot = control_probe.observe()
-                if snapshot.raised:
-                    return _safe_yield(current_state, snapshot, steps_taken)
+                if not isinstance(step_input, (EffectSettled, ApprovalResolved)):
+                    snapshot = control_probe.observe()
+                    if snapshot.raised:
+                        return _safe_yield(current_state, snapshot, steps_taken)
 
                 if isinstance(step_input, (EffectSettled, ApprovalResolved)):
                     runtime_contracts._validate_settlement_binding(
@@ -205,9 +207,10 @@ class SegmentCoordinator:
                 )
 
                 if not defer_commit_to_authorization:
-                    snapshot = control_probe.observe()
-                    if snapshot.raised:
-                        return _safe_yield(current_state, snapshot, steps_taken)
+                    if not isinstance(step_input, (EffectSettled, ApprovalResolved)):
+                        snapshot = control_probe.observe()
+                        if snapshot.raised:
+                            return _safe_yield(current_state, snapshot, steps_taken)
 
                     if isinstance(step_input, (EffectSettled, ApprovalResolved)):
                         settlement = _settlement(step_input)
@@ -241,6 +244,11 @@ class SegmentCoordinator:
                         )
                     current_state = committed.state_version
                     await guarded_facts.emit_all(committed.notices)
+                    if propagate_task_cancellation and isinstance(
+                        step_input,
+                        EffectSettled,
+                    ):
+                        raise asyncio.CancelledError
 
                     if isinstance(step_input, (EffectSettled, ApprovalResolved)):
                         snapshot = control_probe.observe()
@@ -403,10 +411,22 @@ class SegmentCoordinator:
                         )
                     else:
                         authorized.permit.claim()
-                        execution_result = await self._effect_executor.execute(
-                            authorized.permit,
-                            cancellation,
-                        )
+                        try:
+                            execution_result = await self._effect_executor.execute(
+                                authorized.permit,
+                                cancellation,
+                            )
+                        except asyncio.CancelledError:
+                            propagate_task_cancellation = True
+                            execution_result = EffectIndeterminateResult(
+                                reason_code="effect_executor_cancelled",
+                                message="effect executor cancelled after dispatch",
+                            )
+                        except Exception as exc:
+                            execution_result = EffectIndeterminateResult(
+                                reason_code="effect_executor_error",
+                                message=_exception_message(exc),
+                            )
                     step_input = EffectSettled(
                         settlement=_effect_settlement(
                             plan=action.effect_plan,
@@ -694,6 +714,7 @@ def _effect_settlement(
             authorization_transition_id=authorization_transition_id,
             owner_epoch=owner_epoch,
             outcome=EffectSettlementOutcome.FAILED,
+            result=result.error.message,
             reason_code=result.error.code,
             reason_message=result.error.message,
         )

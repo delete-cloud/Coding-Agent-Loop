@@ -188,6 +188,11 @@ def test_runtime_turn_outcome_helpers_map_result_and_status() -> None:
         error="manual interrupt",
         steps_taken=1,
     )
+    cancelled = TurnOutcome(
+        stop_reason=StopReason.INTERRUPTED,
+        steps_taken=1,
+        durable_root_status="cancelled",
+    )
 
     assert runtime_result_from_turn_outcome(completed) == {
         "stop_reason": "no_tool_calls",
@@ -198,6 +203,7 @@ def test_runtime_turn_outcome_helpers_map_result_and_status() -> None:
     assert runtime_status_from_turn_outcome(empty) == "failed"
     assert runtime_status_from_turn_outcome(failed) == "failed"
     assert runtime_status_from_turn_outcome(interrupted) == "interrupted"
+    assert runtime_status_from_turn_outcome(cancelled) == "cancelled"
 
 
 @pytest.mark.parametrize(
@@ -218,8 +224,6 @@ def test_runtime_turn_outcome_status_rejects_any_empty_success(
     )
 
     assert runtime_status_from_turn_outcome(outcome) == "failed"
-
-
 
 
 @pytest.mark.asyncio

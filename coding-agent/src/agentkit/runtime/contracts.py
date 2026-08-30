@@ -9,6 +9,17 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Protocol, TypeAlias
 
+type JSONValue = (
+    None
+    | bool
+    | int
+    | float
+    | str
+    | Mapping[str, JSONValue]
+    | tuple[JSONValue, ...]
+    | list[JSONValue]
+)
+
 
 def _require_non_empty(field_name: str, value: str) -> None:
     if not isinstance(value, str) or not value:
@@ -605,7 +616,7 @@ class EffectSettlement:
     authorization_transition_id: str
     owner_epoch: int
     outcome: EffectSettlementOutcome
-    result: Mapping[str, Any] = field(default_factory=dict)
+    result: JSONValue = field(default_factory=dict)
     reason_code: str | None = None
     reason_message: str | None = None
 
@@ -638,11 +649,7 @@ class EffectSettlement:
                 )
             _require_non_empty("reason_code", self.reason_code)
             _require_non_blank("reason_message", self.reason_message)
-        object.__setattr__(
-            self,
-            "result",
-            _freeze_mapping(self.result, field_name="result"),
-        )
+        object.__setattr__(self, "result", _freeze_value(self.result))
 
     @classmethod
     def completed(
@@ -655,7 +662,7 @@ class EffectSettlement:
         attempt_id: str,
         authorization_transition_id: str,
         owner_epoch: int,
-        result: Mapping[str, Any],
+        result: JSONValue,
     ) -> EffectSettlement:
         return cls(
             input_id=input_id,
@@ -871,6 +878,22 @@ def _validate_settlement_binding(
             raise ValueError(f"settlement {field_name} must match pending effect plan")
 
 
+def _validate_model_completion_binding(
+    state_version: OperationStateVersion,
+    result: ModelGenerationResult,
+) -> None:
+    runtime_state = state_version.value.get("_agentkit_runtime")
+    if not isinstance(runtime_state, Mapping):
+        raise ValueError("model completion requires engine runtime state")
+    active_request_id = runtime_state.get("active_model_request_id")
+    if not isinstance(active_request_id, str) or not active_request_id:
+        raise ValueError("model completion requires an active model request")
+    if result.request_id != active_request_id:
+        raise ValueError(
+            "model completion request_id must match the active model request"
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class EngineStepRequest:
     state_version: OperationStateVersion
@@ -1068,6 +1091,11 @@ class RunSegmentRequest:
             (Initial, ModelGenerationCompleted, EffectSettled, ApprovalResolved),
         ):
             raise TypeError("step_input must be an EngineStepInput variant")
+        if isinstance(self.step_input, ModelGenerationCompleted):
+            _validate_model_completion_binding(
+                self.state_version,
+                self.step_input.result,
+            )
         if isinstance(self.step_input, EffectSettled):
             _validate_settlement_binding(
                 self.state_version,
@@ -1566,14 +1594,10 @@ DispatchAuthorizationResult: TypeAlias = (
 
 @dataclass(frozen=True, slots=True)
 class EffectCompletedResult:
-    result: Mapping[str, Any]
+    result: JSONValue
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "result",
-            _freeze_mapping(self.result, field_name="result"),
-        )
+        object.__setattr__(self, "result", _freeze_value(self.result))
 
 
 @dataclass(frozen=True, slots=True)
