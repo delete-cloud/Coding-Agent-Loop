@@ -1,7 +1,9 @@
 # ADR-0010: Checkpoint restore contract stays narrow and explicit
 
-**Status**: Accepted
+**Status**: Superseded
 **Date**: 2026-04-16
+
+Superseded by ADR-0083. The narrow legacy checkpoint restore contract remains valid only for matching legacy-runtime checkpoints; new-runtime checkpoint capture and restore are disabled until the Phase G cutover.
 
 ## Context
 

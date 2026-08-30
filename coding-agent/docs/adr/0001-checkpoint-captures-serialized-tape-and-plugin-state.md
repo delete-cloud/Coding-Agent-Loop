@@ -1,7 +1,9 @@
 # ADR-0001: Checkpoint captures serialized tape and plugin state
 
-**Status**: Accepted
+**Status**: Superseded
 **Date**: 2026-04-13
+
+Superseded by ADR-0083. The PipelineContext-coupled checkpoint capture contract is no longer the target architecture; capture and restore are redefined by the host-coordinated durable runtime boundary.
 
 ## Context
 

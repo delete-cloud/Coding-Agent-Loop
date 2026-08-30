@@ -1,7 +1,9 @@
 # ADR-0006: Checkpoint plugin state restores as best-effort hints
 
-**Status**: Accepted
+**Status**: Superseded
 **Date**: 2026-04-13
+
+Superseded by ADR-0083. The `PipelineContext.plugin_states` pre-mount hint injection belongs to the engine-coupled runtime that ADR-0083 replaces; the host-coordinated durable runtime restores from `OperationStateVersion` and committed `EventRecord` facts and removes the mutable plugin-state capture/injection path in Phase G.
 
 ## Context
 

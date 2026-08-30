@@ -1,7 +1,9 @@
 # ADR-0005: Checkpoint restore uses truncate rollback
 
-**Status**: Accepted
+**Status**: Superseded
 **Date**: 2026-04-13
+
+Superseded by ADR-0083. Same-timeline truncate rollback on the engine-owned store is no longer the target architecture; restore is re-expressed through the host-coordinated durable runtime boundary and projection epochs.
 
 ## Context
 
