@@ -48,6 +48,7 @@ from coding_agent.topics.semantic_backends import (
     SemanticIndexSchema,
 )
 from coding_agent.topics.semantic_backends import registry as semantic_backend_registry
+from coding_agent.topics.semantic_grounding import SemanticMemoryGroundingProvider
 from coding_agent.topics.semantic_index import SafeSemanticMemoryIndex
 from coding_agent.topics.semantic_recall import SemanticTopicStore
 from coding_agent.topics.semantic_sync import (
@@ -647,15 +648,7 @@ def create_child_pipeline(
     if memory_cfg.semantic.enabled and memory_cfg.effective_read_enabled:
         if semantic_memory_index is None:
             raise TypeError("semantic memory index must be initialized when enabled")
-        plugin_factories["semantic_memory"] = lambda: SemanticMemoryPlugin(
-            semantic_index=semantic_memory_index,
-            memory_review_store=memory_review_store,
-            read_enabled=memory_cfg.effective_read_enabled,
-            topic_store=semantic_topic_store,
-            topic_index=semantic_topic_index,
-            recall_min_score=memory_cfg.semantic.recall_min_score,
-            recall_min_overlap=memory_cfg.semantic.recall_min_overlap,
-        )
+        plugin_factories["semantic_memory"] = SemanticMemoryPlugin
 
     plugin_factories.update(
         {
@@ -712,6 +705,20 @@ def create_child_pipeline(
         plugin = factory()
         registry.register(plugin)
 
+    semantic_grounding_provider = None
+    if "semantic_memory" in registry.plugin_ids():
+        if semantic_memory_index is None:
+            raise TypeError("semantic memory index must be initialized when enabled")
+        semantic_grounding_provider = SemanticMemoryGroundingProvider(
+            semantic_index=semantic_memory_index,
+            memory_review_store=memory_review_store,
+            read_enabled=memory_cfg.effective_read_enabled,
+            topic_store=semantic_topic_store,
+            topic_index=semantic_topic_index,
+            recall_min_score=memory_cfg.semantic.recall_min_score,
+            recall_min_overlap=memory_cfg.semantic.recall_min_overlap,
+        )
+
     runtime = HookRuntime(registry, specs=HOOK_SPECS)
 
     memory_plugin = None
@@ -739,6 +746,7 @@ def create_child_pipeline(
         tool_executor=(
             core_tool_executor if "core_tools" in registry.plugin_ids() else None
         ),
+        context_input_provider=semantic_grounding_provider,
     )
 
     if session_id_override is None:

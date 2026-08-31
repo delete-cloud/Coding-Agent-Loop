@@ -659,14 +659,14 @@ class TestPipelineE2E:
         pipeline, ctx = _setup_agent(tmp_path)
 
         doom = DoomDetectorPlugin(threshold=3)
-        pipeline._registry._plugins[doom.state_key] = doom
-        for hook_name, hook_fn in doom.hooks().items():
+        pipeline._registry._plugins.pop(doom.state_key, None)
+        for hook_name in doom.hooks():
             pipeline._registry._hook_index[hook_name] = [
-                fn
-                for fn in pipeline._registry._hook_index.get(hook_name, [])
-                if getattr(fn, "__self__", None).__class__ is not DoomDetectorPlugin
+                binding
+                for binding in pipeline._registry._hook_index.get(hook_name, [])
+                if binding.plugin_id != doom.state_key
             ]
-            pipeline._registry._hook_index[hook_name].append(hook_fn)
+        pipeline._registry.register(doom)
         pipeline._runtime = HookRuntime(pipeline._registry)
 
         call_count = 0

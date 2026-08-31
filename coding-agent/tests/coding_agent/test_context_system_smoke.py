@@ -8,13 +8,13 @@ from pathlib import Path
 import pytest
 
 from agentkit.plugin.registry import PluginRegistry
+from agentkit.runtime.hook_runtime import HookRuntime
+from agentkit.runtime.hookspecs import HOOK_SPECS
 from agentkit.runtime.messages import (
     RuntimeMessage,
     RuntimeMessageKind,
     SequencedRuntimeMessage,
 )
-from agentkit.runtime.hook_runtime import HookRuntime
-from agentkit.runtime.hookspecs import HOOK_SPECS
 from agentkit.runtime.pipeline import Pipeline, PipelineContext
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
@@ -24,6 +24,7 @@ from coding_agent.plugins.memory import MemoryPlugin
 from coding_agent.plugins.semantic_memory import SemanticMemoryPlugin
 from coding_agent.topics.memory import MemoryReviewStore
 from coding_agent.topics.semantic_backends import FakeSemanticMemoryBackend
+from coding_agent.topics.semantic_grounding import SemanticMemoryGroundingProvider
 from coding_agent.topics.semantic_index import (
     SafeSemanticMemoryIndex,
     SemanticDocId,
@@ -184,7 +185,8 @@ async def test_semantic_memory_and_kb_use_same_runtime_prompt_to_avoid_stale_kb(
             source_refs=(SemanticSourceRef.for_topic(topic),),
         )
     )
-    semantic_memory = SemanticMemoryPlugin(
+    semantic_memory = SemanticMemoryPlugin()
+    semantic_provider = SemanticMemoryGroundingProvider(
         semantic_index=semantic_index,
         memory_review_store=MemoryReviewStore(),
         read_enabled=True,
@@ -201,7 +203,11 @@ async def test_semantic_memory_and_kb_use_same_runtime_prompt_to_avoid_stale_kb(
     registry.register(semantic_memory)
     registry.register(kb_plugin)
     runtime = HookRuntime(registry, specs=HOOK_SPECS)
-    pipeline = Pipeline(runtime=runtime, registry=registry)
+    pipeline = Pipeline(
+        runtime=runtime,
+        registry=registry,
+        context_input_provider=semantic_provider,
+    )
     tape = Tape()
     tape.append(
         Entry(

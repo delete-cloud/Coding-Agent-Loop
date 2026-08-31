@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Mapping
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Callable
 
@@ -28,6 +29,15 @@ _CAPABILITY_HOOKS: dict[PluginCapability, frozenset[str]] = {
 }
 
 
+@dataclass(frozen=True, slots=True)
+class HookBinding:
+    """A hook bound to its owning plugin and declared capabilities."""
+
+    plugin_id: str
+    hook: Callable[..., Any]
+    capabilities: frozenset[PluginCapability] | None
+
+
 class PluginRegistry:
     """Registry for agentkit plugins.
 
@@ -36,7 +46,7 @@ class PluginRegistry:
 
     def __init__(self, specs: Mapping[str, object] | None = None) -> None:
         self._plugins: dict[str, Plugin] = {}
-        self._hook_index: dict[str, list[Callable[..., Any]]] = {}
+        self._hook_index: dict[str, list[HookBinding]] = {}
         self._specs: Mapping[str, object] | None = specs
 
     def register(self, plugin: Plugin) -> None:
@@ -56,8 +66,15 @@ class PluginRegistry:
         hooks = plugin.hooks()
         self._validate_capabilities(plugin, hooks)
         self._plugins[key] = plugin
+        capabilities = getattr(plugin, "capabilities", None)
         for hook_name, hook_fn in hooks.items():
-            self._hook_index.setdefault(hook_name, []).append(hook_fn)
+            self._hook_index.setdefault(hook_name, []).append(
+                HookBinding(
+                    plugin_id=key,
+                    hook=hook_fn,
+                    capabilities=capabilities,
+                )
+            )
             if self._specs is not None and hook_name not in self._specs:
                 warnings.warn(
                     f"Plugin '{plugin.state_key}' registered unknown hook '{hook_name}' "
@@ -110,4 +127,8 @@ class PluginRegistry:
 
     def get_hooks(self, hook_name: str) -> list[Callable[..., Any]]:
         """Return all callables registered for a hook name."""
-        return list(self._hook_index.get(hook_name, []))
+        return [binding.hook for binding in self._hook_index.get(hook_name, ())]
+
+    def get_hook_bindings(self, hook_name: str) -> tuple[HookBinding, ...]:
+        """Return immutable hook ownership metadata in registration order."""
+        return tuple(self._hook_index.get(hook_name, ()))
