@@ -564,6 +564,69 @@ class TestPipeline:
         }
 
     @pytest.mark.asyncio
+    async def test_legacy_context_input_hooks_keep_curated_view_and_compatibility_context(
+        self,
+    ):
+        named_view = MappingProxyType({"semantic_memory": {"hit_count": 1}})
+        kwargs_view = MappingProxyType({"semantic_memory": {"hit_count": 2}})
+
+        class ContextInputProvider:
+            async def snapshot(self, ctx):
+                del ctx
+                return MappingProxyType(
+                    {
+                        "legacy_named": named_view,
+                        "legacy_kwargs": kwargs_view,
+                    }
+                )
+
+        class LegacyNamedContextPlugin:
+            state_key = "legacy_named"
+
+            def __init__(self):
+                self.received = None
+
+            def hooks(self):
+                return {"build_context": self.build_context}
+
+            def build_context(self, *, context_inputs, ctx=None):
+                self.received = (context_inputs, ctx)
+                return []
+
+        class LegacyKwargsContextPlugin:
+            state_key = "legacy_kwargs"
+
+            def __init__(self):
+                self.received = None
+
+            def hooks(self):
+                return {"build_context": self.build_context}
+
+            def build_context(self, *, context_inputs, **kwargs):
+                self.received = (context_inputs, kwargs)
+                return []
+
+        named_plugin = LegacyNamedContextPlugin()
+        kwargs_plugin = LegacyKwargsContextPlugin()
+        registry = PluginRegistry()
+        registry.register(named_plugin)
+        registry.register(kwargs_plugin)
+        pipeline = Pipeline(
+            runtime=HookRuntime(registry),
+            registry=registry,
+            context_input_provider=ContextInputProvider(),
+        )
+        ctx = PipelineContext(tape=Tape(), session_id="s1")
+
+        await pipeline._stage_build_context(ctx)
+
+        assert named_plugin.received == (named_view, ctx)
+        assert kwargs_plugin.received == (
+            kwargs_view,
+            {"ctx": ctx, "tape": ctx.tape},
+        )
+
+    @pytest.mark.asyncio
     async def test_run_turn_records_runtime_stage_spans(self, setup):
         pipeline, plugin = setup
         sink = RecordingObservationSink()

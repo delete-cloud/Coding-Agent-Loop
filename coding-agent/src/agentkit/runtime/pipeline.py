@@ -254,6 +254,8 @@ def _build_context_hook_kwargs(
     )
     if "context_inputs" in parameters:
         kwargs: dict[str, Any] = {"context_inputs": context_inputs}
+        if "ctx" in parameters or has_var_kwargs:
+            kwargs["ctx"] = ctx
         if "tape" in parameters or has_var_kwargs:
             kwargs["tape"] = ctx.tape
         if "runtime_prompt" in parameters:
@@ -279,14 +281,10 @@ def _latest_runtime_query(
             RuntimeMessageKind.SUBAGENT_MESSAGE,
         ):
             continue
-        value = _string_payload_value(
-            message.payload,
-            "text",
-            "message",
-            "content",
-        )
-        if value:
-            return value
+        for name in ("text", "message", "content"):
+            value = message.payload.get(name)
+            if isinstance(value, str) and value.strip():
+                return value
     return None
 
 

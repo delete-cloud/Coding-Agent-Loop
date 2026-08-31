@@ -506,6 +506,79 @@ class TestBuildContextSearch:
         with pytest.raises(TypeError):
             plugin.received["semantic_memory"]["hit_count"] = 3
 
+    @pytest.mark.asyncio
+    async def test_pipeline_kb_query_skips_blank_text_for_matching_content_digest(
+        self,
+        indexed_plugin: KBPlugin,
+    ):
+        indexed_plugin._defer_when_semantic_memory_hits = True
+        context_inputs = _semantic_context_inputs("auth", 1)
+
+        class ContextInputProvider:
+            async def snapshot(self, ctx):
+                del ctx
+                return MappingProxyType({"kb": context_inputs})
+
+        received_runtime_prompts: list[str | None] = []
+        original_build_context = indexed_plugin.build_context
+
+        def recording_build_context(
+            tape=None,
+            *,
+            context_inputs=None,
+            runtime_prompt=None,
+            **kwargs,
+        ):
+            received_runtime_prompts.append(runtime_prompt)
+            return original_build_context(
+                tape=tape,
+                context_inputs=context_inputs,
+                runtime_prompt=runtime_prompt,
+                **kwargs,
+            )
+
+        indexed_plugin.build_context = recording_build_context
+        assert indexed_plugin._kb is not None
+
+        def fail_search(*args, **kwargs):
+            del args, kwargs
+            raise AssertionError("matching frozen semantic digest must defer KB search")
+
+        indexed_plugin._kb.search_sync = fail_search
+        registry = PluginRegistry()
+        registry.register(indexed_plugin)
+        pipeline = Pipeline(
+            runtime=HookRuntime(registry),
+            registry=registry,
+            context_input_provider=ContextInputProvider(),
+        )
+        ctx = PipelineContext(
+            tape=Tape(
+                entries=[
+                    Entry(
+                        id="stale-user",
+                        kind="message",
+                        payload={"role": "user", "content": "stale tape query"},
+                    )
+                ]
+            ),
+            session_id="session-1",
+            runtime_messages=[
+                SequencedRuntimeMessage(
+                    sequence=1,
+                    message=RuntimeMessage(
+                        message_id="runtime-query",
+                        kind=RuntimeMessageKind.USER_STEER,
+                        payload={"text": " ", "content": "auth"},
+                    ),
+                )
+            ],
+        )
+
+        await pipeline._stage_build_context(ctx)
+
+        assert received_runtime_prompts == ["auth"]
+
     def test_kb_defer_reads_frozen_semantic_hit_count_without_context_marker(
         self, indexed_plugin: KBPlugin
     ):
