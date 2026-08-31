@@ -14,6 +14,8 @@ from coding_agent.events.connected_chat import (
 )
 from coding_agent.stores.runtime_store import (
     CursorEpochMismatchError,
+    CommandMailboxEntry,
+    CommandMailboxSnapshot,
     DEFAULT_HARNESS_PROJECTION,
     EffectLedgerSlot,
     EventRecord,
@@ -26,6 +28,7 @@ from coding_agent.stores.runtime_store import (
     TrustedHandoff,
     _agent_run_from_sqlite_row,
     _json_object_from_sql,
+    _sqlite_required_int,
     _json_to_sql,
     _sqlite_optional_str,
     _require_positive_int,
@@ -33,6 +36,8 @@ from coding_agent.stores.runtime_store import (
     assert_projection_binding,
     assert_raw_cursor_not_expired,
     assert_trusted_handoff,
+    format_u64,
+    runtime_command_from_mailbox_payload,
     parse_u64,
 )
 from coding_agent.server.stores.session_owner_store import (
@@ -62,6 +67,74 @@ class LocalFactSourceMixin:
         if row is None:
             return None
         return _fact_source_from_sqlite_row(row).state
+
+    async def load_runtime_command_mailbox(
+        self,
+        session_id: str,
+    ) -> CommandMailboxSnapshot:
+        _require_non_empty("session_id", session_id)
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    source.dispatch_generation,
+                    mailbox.slot_id,
+                    mailbox.disposition,
+                    mailbox.admitted_session_seq,
+                    mailbox.admitted_dispatch_generation,
+                    mailbox.payload
+                FROM session_fact_source AS source
+                LEFT JOIN session_mailbox_slots AS mailbox
+                    ON mailbox.session_id = source.session_id
+                    AND mailbox.admitted_session_seq IS NOT NULL
+                    AND mailbox.disposition IN ('pending', 'admitted')
+                WHERE source.session_id = ?
+                ORDER BY mailbox.admitted_session_seq
+                """,
+                (session_id,),
+            ).fetchall()
+        if not rows:
+            return CommandMailboxSnapshot(entries=(), mailbox_cut="0")
+        mailbox_cut = format_u64(
+            _sqlite_required_int(rows[0], "dispatch_generation", context="mailbox")
+        )
+        entries = tuple(
+            CommandMailboxEntry(
+                command=runtime_command_from_mailbox_payload(
+                    command_id=_sqlite_required_str(
+                        row,
+                        "slot_id",
+                        context="runtime command mailbox slot",
+                    ),
+                    payload=_json_object_from_sql(
+                        row["payload"],
+                        context="runtime command mailbox slot",
+                    ),
+                ),
+                admitted_session_seq=format_u64(
+                    _sqlite_required_int(
+                        row,
+                        "admitted_session_seq",
+                        context="runtime command mailbox slot",
+                    )
+                ),
+                admitted_dispatch_generation=format_u64(
+                    _sqlite_required_int(
+                        row,
+                        "admitted_dispatch_generation",
+                        context="runtime command mailbox slot",
+                    )
+                ),
+                disposition=_sqlite_required_str(
+                    row,
+                    "disposition",
+                    context="runtime command mailbox slot",
+                ),
+            )
+            for row in rows
+            if row["slot_id"] is not None
+        )
+        return CommandMailboxSnapshot(entries=entries, mailbox_cut=mailbox_cut)
 
     async def load_event_record(
         self,
@@ -456,23 +529,40 @@ class LocalFactSourceMixin:
         cls,
         connection: sqlite3.Connection,
     ) -> None:
-        columns = {
+        fact_source_columns = {
             str(row[1])
             for row in connection.execute(
                 "PRAGMA table_info(session_fact_source)"
             ).fetchall()
         }
-        migrations = (
+        fact_source_migrations = (
             ("trusted_handoff_seq", "INTEGER"),
             ("trusted_handoff_epoch", "INTEGER"),
             ("trusted_handoff_projection", "TEXT"),
             ("trusted_handoff_payload", "TEXT"),
             ("trusted_handoff_accepted_at", "TEXT"),
+            ("dispatch_generation", "INTEGER NOT NULL DEFAULT 0"),
         )
-        for name, decl in migrations:
-            if name not in columns:
+        for name, decl in fact_source_migrations:
+            if name not in fact_source_columns:
                 connection.execute(
                     f"ALTER TABLE session_fact_source ADD COLUMN {name} {decl}"
+                )
+
+        mailbox_columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(session_mailbox_slots)"
+            ).fetchall()
+        }
+        mailbox_migrations = (
+            ("admitted_session_seq", "INTEGER"),
+            ("admitted_dispatch_generation", "INTEGER"),
+        )
+        for name, decl in mailbox_migrations:
+            if name not in mailbox_columns:
+                connection.execute(
+                    f"ALTER TABLE session_mailbox_slots ADD COLUMN {name} {decl}"
                 )
 
     def _load_fact_source_row(

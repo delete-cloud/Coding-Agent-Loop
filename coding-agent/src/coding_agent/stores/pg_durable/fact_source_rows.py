@@ -32,6 +32,7 @@ class _PgFactSource:
     session_seq_int: int
     retention_floor_int: int
     projection_epoch_int: int
+    dispatch_generation_int: int
     projection: str
 
 
@@ -39,6 +40,7 @@ def _fact_source_from_pg_row(row: dict[str, object]) -> _PgFactSource:
     session_seq = _required_int(row, "session_seq")
     retention_floor = _required_int(row, "retention_floor")
     projection_epoch = _required_int(row, "projection_epoch")
+    dispatch_generation = _required_int(row, "dispatch_generation")
     projection = _required_str(row, "projection")
     session_id = _required_str(row, "session_id")
     return _PgFactSource(
@@ -48,6 +50,7 @@ def _fact_source_from_pg_row(row: dict[str, object]) -> _PgFactSource:
             retention_floor=format_u64(retention_floor),
             projection=projection,
             projection_epoch=format_u64(projection_epoch),
+            dispatch_generation=format_u64(dispatch_generation),
             trusted_handoff=stored_trusted_handoff(
                 session_id=session_id,
                 session_seq=_optional_int(row, "trusted_handoff_seq"),
@@ -59,6 +62,7 @@ def _fact_source_from_pg_row(row: dict[str, object]) -> _PgFactSource:
         session_seq_int=session_seq,
         retention_floor_int=retention_floor,
         projection_epoch_int=projection_epoch,
+        dispatch_generation_int=dispatch_generation,
         projection=projection,
     )
 

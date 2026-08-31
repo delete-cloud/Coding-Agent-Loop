@@ -575,3 +575,61 @@ async def test_sqlite_phase_b_schema_upgrade_preserves_existing_store(
         }
     assert "session_operation_states" in table_names
     assert "session_transition_receipts" in table_names
+
+
+@pytest.mark.asyncio
+async def test_sqlite_d3a_schema_upgrade_preserves_legacy_mailbox_rows(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "local.sqlite3"
+    store, owner = await _open_store(tmp_path)
+    await store.commit_authoritative_uow(
+        owner,
+        AuthoritativeUnitOfWork(
+            event=_fact("legacy-mailbox", kind="command_admitted"),
+            session_state=SESSION_STATE,
+            mailbox=MailboxDispositionSlot(
+                slot_id="turn:legacy",
+                lane="turn",
+                disposition="settled",
+                payload={"legacy": True},
+            ),
+        ),
+    )
+    with store._connect() as connection:
+        connection.execute(
+            "ALTER TABLE session_fact_source DROP COLUMN dispatch_generation"
+        )
+        connection.execute(
+            "ALTER TABLE session_mailbox_slots DROP COLUMN admitted_session_seq"
+        )
+        connection.execute(
+            "ALTER TABLE session_mailbox_slots DROP COLUMN admitted_dispatch_generation"
+        )
+
+    reopened = SQLiteLocalDurableStore(path)
+
+    fact_source = await reopened.load_session_fact_source(SESSION_ID)
+    legacy_slot = await reopened.load_mailbox_slot(SESSION_ID, "turn:legacy")
+    assert fact_source is not None
+    assert fact_source.dispatch_generation == "0"
+    assert legacy_slot is not None
+    assert legacy_slot.payload == {"legacy": True}
+    with reopened._connect() as connection:
+        fact_source_columns = {
+            row["name"]
+            for row in connection.execute(
+                "PRAGMA table_info(session_fact_source)"
+            ).fetchall()
+        }
+        mailbox_columns = {
+            row["name"]
+            for row in connection.execute(
+                "PRAGMA table_info(session_mailbox_slots)"
+            ).fetchall()
+        }
+    assert "dispatch_generation" in fact_source_columns
+    assert {
+        "admitted_session_seq",
+        "admitted_dispatch_generation",
+    } <= mailbox_columns

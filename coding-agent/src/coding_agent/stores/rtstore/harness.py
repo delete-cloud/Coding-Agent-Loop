@@ -19,6 +19,7 @@ from agentkit.runtime.contracts import (
     EffectMutation,
     OperationStateCAS,
     OperationStateVersion,
+    RuntimeCommand,
     RejectedCommandDisposition,
     SupersededCommandDisposition,
     TransitionReceipt,
@@ -54,6 +55,10 @@ class TransitionFingerprintMismatchError(RuntimeError):
 
 class CommandDispositionConflictError(RuntimeError):
     """Raised when a transition dispositions a command that is not admitted."""
+
+
+class RuntimeCommandAdmissionConflictError(RuntimeError):
+    """Raised when a command identity is reused with different durable content."""
 
 
 class EffectMutationConflictError(RuntimeError):
@@ -247,6 +252,75 @@ class MailboxDispositionSlot:
 
 
 @dataclass(frozen=True)
+class CommandMailboxEntry:
+    command: RuntimeCommand
+    admitted_session_seq: str
+    admitted_dispatch_generation: str
+    disposition: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.command, RuntimeCommand):
+            raise TypeError("command must be a RuntimeCommand")
+        parse_u64(self.admitted_session_seq, field_name="admitted_session_seq")
+        parse_u64(
+            self.admitted_dispatch_generation,
+            field_name="admitted_dispatch_generation",
+        )
+        _require_non_empty("disposition", self.disposition)
+
+
+@dataclass(frozen=True)
+class RuntimeCommandAdmission:
+    entry: CommandMailboxEntry
+    mailbox_cut: str
+    idempotent: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.entry, CommandMailboxEntry):
+            raise TypeError("entry must be a CommandMailboxEntry")
+        mailbox_cut = parse_u64(self.mailbox_cut, field_name="mailbox_cut")
+        admitted_generation = parse_u64(
+            self.entry.admitted_dispatch_generation,
+            field_name="admitted_dispatch_generation",
+        )
+        if admitted_generation > mailbox_cut:
+            raise ValueError("entry dispatch generation cannot exceed mailbox_cut")
+        if not isinstance(self.idempotent, bool):
+            raise TypeError("idempotent must be a bool")
+
+
+@dataclass(frozen=True)
+class CommandMailboxSnapshot:
+    entries: tuple[CommandMailboxEntry, ...]
+    mailbox_cut: str
+
+    def __post_init__(self) -> None:
+        entries = tuple(self.entries)
+        if any(not isinstance(entry, CommandMailboxEntry) for entry in entries):
+            raise TypeError("entries must contain CommandMailboxEntry values")
+        command_ids = [entry.command.command_id for entry in entries]
+        if len(command_ids) != len(set(command_ids)):
+            raise ValueError("entries must contain unique command identities")
+        sequences = [
+            parse_u64(entry.admitted_session_seq, field_name="admitted_session_seq")
+            for entry in entries
+        ]
+        if sequences != sorted(sequences):
+            raise ValueError("entries must be ordered by admitted_session_seq")
+        mailbox_cut = parse_u64(self.mailbox_cut, field_name="mailbox_cut")
+        if any(
+            parse_u64(
+                entry.admitted_dispatch_generation,
+                field_name="admitted_dispatch_generation",
+            )
+            > mailbox_cut
+            for entry in entries
+        ):
+            raise ValueError("entry dispatch generation cannot exceed mailbox_cut")
+        object.__setattr__(self, "entries", entries)
+
+
+@dataclass(frozen=True)
 class EffectLedgerSlot:
     effect_id: str
     status: str
@@ -417,6 +491,65 @@ def _plain_json(value: object) -> object:
     if value is None or isinstance(value, bool | int | float | str):
         return value
     raise TypeError("transition mutation contains a non-JSON value")
+
+
+def runtime_command_mailbox_payload(command: RuntimeCommand) -> JSONObject:
+    if not isinstance(command, RuntimeCommand):
+        raise TypeError("command must be a RuntimeCommand")
+    return {
+        "runtime_command_kind": command.command_kind,
+        "runtime_command_payload": cast(JSONObject, _plain_json(command.payload)),
+    }
+
+
+def runtime_command_mailbox_payloads_equal(
+    left: Mapping[str, object],
+    right: Mapping[str, object],
+) -> bool:
+    def canonical(value: Mapping[str, object]) -> str:
+        return json.dumps(
+            _plain_json(value),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+
+    return canonical(left) == canonical(right)
+
+
+def runtime_command_from_mailbox_payload(
+    *,
+    command_id: str,
+    payload: Mapping[str, object],
+) -> RuntimeCommand:
+    _require_non_empty("command_id", command_id)
+    command_kind = payload.get("runtime_command_kind")
+    command_payload = payload.get("runtime_command_payload")
+    if not isinstance(command_kind, str) or not command_kind:
+        raise ValueError("runtime command mailbox payload is missing command_kind")
+    if not isinstance(command_payload, Mapping):
+        raise TypeError(
+            "runtime command mailbox payload must contain an object payload"
+        )
+    return RuntimeCommand(
+        command_id=command_id,
+        command_kind=command_kind,
+        payload=command_payload,
+    )
+
+
+def runtime_command_invalidates_dispatch(command: RuntimeCommand) -> bool:
+    if not isinstance(command, RuntimeCommand):
+        raise TypeError("command must be a RuntimeCommand")
+    if command.command_kind in {"cancel", "interrupt"}:
+        return True
+    if command.command_kind != "approval_decision":
+        return False
+    approved = command.payload.get("approved")
+    if not isinstance(approved, bool):
+        raise TypeError("approval_decision payload must contain boolean approved")
+    return not approved
 
 
 def snapshot_transition_unit(
@@ -852,6 +985,7 @@ class SessionFactSourceState:
     projection: str
     projection_epoch: str
     trusted_handoff: TrustedHandoff | None = None
+    dispatch_generation: str = "0"
 
     def __post_init__(self) -> None:
         _require_non_empty("session_id", self.session_id)
@@ -859,6 +993,7 @@ class SessionFactSourceState:
         parse_u64(self.retention_floor, field_name="retention_floor")
         _require_non_empty("projection", self.projection)
         parse_u64(self.projection_epoch, field_name="projection_epoch")
+        parse_u64(self.dispatch_generation, field_name="dispatch_generation")
         if self.trusted_handoff is not None:
             if not isinstance(self.trusted_handoff, TrustedHandoff):
                 raise TypeError("trusted_handoff must be a TrustedHandoff")
