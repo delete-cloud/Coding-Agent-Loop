@@ -11,10 +11,6 @@ from agentkit.runtime.messages import RuntimeMessageKind
 from agentkit.runtime.pipeline import PipelineContext
 from agentkit.tape.tape import Tape
 from coding_agent.kb import KB, KBSearchResult
-from coding_agent.plugins.semantic_memory import (
-    SEMANTIC_MEMORY_GROUNDING_MARKER_KEY,
-    semantic_grounding_query_digest,
-)
 from coding_agent.topics.context_pack import (
     ContextPack,
     ContextPackItem,
@@ -23,6 +19,7 @@ from coding_agent.topics.context_pack import (
     EvidenceRef,
     stash_context_pack,
 )
+from coding_agent.topics.semantic_grounding import semantic_grounding_query_digest
 
 logger = logging.getLogger(__name__)
 
@@ -136,20 +133,26 @@ class KBPlugin:
         return {"kb": self._kb, "has_table": self._has_table}
 
     def build_context(
-        self, tape: Tape | None = None, **kwargs: Any
+        self,
+        tape: Tape | None = None,
+        *,
+        context_inputs: Mapping[str, object] | None = None,
+        runtime_prompt: str | None = None,
+        **kwargs: Any,
     ) -> list[dict[str, Any]]:
         _clear_kb_context_pack(kwargs.get("ctx"))
         if tape is None or not self._has_table or self._kb is None:
             return []
 
-        user_message = _latest_runtime_prompt_message(kwargs.get("ctx"))
+        user_message = runtime_prompt
+        if user_message is None:
+            user_message = _latest_runtime_prompt_message(kwargs.get("ctx"))
         if user_message is None:
             user_message = _latest_user_message(tape)
         if user_message is None:
             return []
-        if self._defer_when_semantic_memory_hits and _take_semantic_memory_hit_count(
-            kwargs.get("ctx"),
-            tape=tape,
+        if self._defer_when_semantic_memory_hits and _semantic_memory_hit_count(
+            context_inputs,
             query=user_message,
         ):
             return []
@@ -223,17 +226,19 @@ def _stash_kb_context_pack(ctx: Any, pack: ContextPack) -> None:
         )
 
 
-def _take_semantic_memory_hit_count(ctx: Any, *, tape: Tape, query: str) -> int:
-    if not isinstance(ctx, PipelineContext):
+def _semantic_memory_hit_count(
+    context_inputs: Mapping[str, object] | None,
+    *,
+    query: str,
+) -> int:
+    if not isinstance(context_inputs, Mapping):
         return 0
-    marker = ctx.config.pop(SEMANTIC_MEMORY_GROUNDING_MARKER_KEY, None)
-    if not isinstance(marker, Mapping):
+    summary = context_inputs.get("semantic_memory")
+    if not isinstance(summary, Mapping):
         return 0
-    if marker.get("query_digest") != semantic_grounding_query_digest(query):
+    if summary.get("query_digest") != semantic_grounding_query_digest(query):
         return 0
-    if marker.get("tape_entry_count") != len(tape):
-        return 0
-    hit_count = marker.get("hit_count", 0)
+    hit_count = summary.get("hit_count", 0)
     if isinstance(hit_count, bool):
         return 0
     if isinstance(hit_count, int):

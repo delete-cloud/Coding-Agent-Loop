@@ -14,13 +14,14 @@ from collections.abc import Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from inspect import Parameter, isawaitable, signature
-from typing import Any, Awaitable, Callable, cast
+from types import MappingProxyType
+from typing import Any, Awaitable, Callable, Protocol, cast
 
 from agentkit._types import StageName
 from agentkit.directive.types import Directive
 from agentkit.errors import HookError, HookTypeError, PipelineError
 from agentkit.observability import ObservationSink, record_span
-from agentkit.plugin.registry import PluginRegistry
+from agentkit.plugin.registry import PluginCapability, PluginRegistry
 from agentkit.providers.models import (
     DoneEvent,
     TextEvent,
@@ -83,8 +84,15 @@ _TRACE_METADATA_ATTRIBUTE_KEYS = frozenset(
         "checkpoint_id",
     }
 )
+_EMPTY_CONTEXT_INPUTS: Mapping[str, object] = MappingProxyType({})
 
 StructuredToolResultScopeFactory = Callable[[bool], AbstractContextManager[None]]
+
+
+class BuildContextInputProvider(Protocol):
+    """Host boundary that freezes plugin-specific context inputs."""
+
+    async def snapshot(self, ctx: "PipelineContext") -> Mapping[str, object]: ...
 
 
 @contextmanager
@@ -234,21 +242,52 @@ def _format_active_approvals(value: Any) -> str:
 def _build_context_hook_kwargs(
     fn: Callable[..., Any],
     ctx: "PipelineContext",
+    *,
+    context_inputs: Mapping[str, object],
 ) -> dict[str, Any]:
     try:
         parameters = signature(fn).parameters
     except (TypeError, ValueError):
         return {"tape": ctx.tape}
-    if any(
+    has_var_kwargs = any(
         parameter.kind is Parameter.VAR_KEYWORD for parameter in parameters.values()
-    ):
+    )
+    if "context_inputs" in parameters:
+        kwargs: dict[str, Any] = {"context_inputs": context_inputs}
+        if "tape" in parameters or has_var_kwargs:
+            kwargs["tape"] = ctx.tape
+        if "runtime_prompt" in parameters:
+            kwargs["runtime_prompt"] = _latest_runtime_query(ctx.runtime_messages)
+        return kwargs
+    if has_var_kwargs:
         return {"tape": ctx.tape, "ctx": ctx}
-    kwargs: dict[str, Any] = {}
+    kwargs = {}
     if "tape" in parameters:
         kwargs["tape"] = ctx.tape
     if "ctx" in parameters:
         kwargs["ctx"] = ctx
     return kwargs
+
+
+def _latest_runtime_query(
+    messages: list[SequencedRuntimeMessage],
+) -> str | None:
+    for item in reversed(messages):
+        message = item.message
+        if message.kind not in (
+            RuntimeMessageKind.USER_STEER,
+            RuntimeMessageKind.SUBAGENT_MESSAGE,
+        ):
+            continue
+        value = _string_payload_value(
+            message.payload,
+            "text",
+            "message",
+            "content",
+        )
+        if value:
+            return value
+    return None
 
 
 def _format_runtime_prompt_messages(
@@ -340,11 +379,13 @@ class Pipeline:
         directive_executor: Any = None,
         *,
         tool_executor: ToolExecutor | None = None,
+        context_input_provider: BuildContextInputProvider | None = None,
     ) -> None:
         self._runtime = runtime
         self._registry = registry
         self._directive_executor = directive_executor
         self._tool_executor = tool_executor
+        self._context_input_provider = context_input_provider
 
     @property
     def stage_names(self) -> list[str]:
@@ -572,13 +613,56 @@ class Pipeline:
         toolset = self._require_toolset(ctx, stage="load_state")
         ctx.tool_schemas = toolset.collect_schemas()
 
+    async def _snapshot_build_context_inputs(
+        self, ctx: PipelineContext
+    ) -> Mapping[str, object]:
+        if self._context_input_provider is None:
+            return _EMPTY_CONTEXT_INPUTS
+        inputs = await self._context_input_provider.snapshot(ctx)
+        if not isinstance(inputs, Mapping):
+            raise HookTypeError(
+                "BuildContextInputProvider.snapshot must return a mapping",
+                hook_name="build_context",
+            )
+        return MappingProxyType(dict(inputs))
+
     async def _call_build_context_hooks(
         self, ctx: PipelineContext
     ) -> list[list[dict[str, Any]]]:
+        plugin_inputs = await self._snapshot_build_context_inputs(ctx)
         results: list[list[dict[str, Any]]] = []
-        for fn in self._runtime.get_hooks("build_context"):
+        for binding in self._registry.get_hook_bindings("build_context"):
             try:
-                result = fn(**_build_context_hook_kwargs(fn, ctx))
+                if binding.capabilities is not None:
+                    if PluginCapability.PENDING_FACT not in binding.capabilities:
+                        raise HookError(
+                            "capability-declared build_context hook must declare "
+                            "PluginCapability.PENDING_FACT",
+                            hook_name="build_context",
+                        )
+                    if binding.plugin_id not in plugin_inputs:
+                        raise HookError(
+                            f"no context input for capability-declared plugin "
+                            f"'{binding.plugin_id}'",
+                            hook_name="build_context",
+                        )
+                    kwargs = {"input": plugin_inputs[binding.plugin_id]}
+                else:
+                    compatibility_view = plugin_inputs.get(
+                        binding.plugin_id, _EMPTY_CONTEXT_INPUTS
+                    )
+                    if not isinstance(compatibility_view, Mapping):
+                        raise HookError(
+                            f"context input for legacy plugin '{binding.plugin_id}' "
+                            "must be a mapping",
+                            hook_name="build_context",
+                        )
+                    kwargs = _build_context_hook_kwargs(
+                        binding.hook,
+                        ctx,
+                        context_inputs=compatibility_view,
+                    )
+                result = binding.hook(**kwargs)
                 if isawaitable(result):
                     result = await result
                 if result is not None:

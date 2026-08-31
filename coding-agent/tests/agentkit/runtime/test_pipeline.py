@@ -1,5 +1,7 @@
 import asyncio
 import logging
+from dataclasses import dataclass
+from types import MappingProxyType
 
 import pytest
 from unittest.mock import MagicMock
@@ -407,20 +409,114 @@ class TestPipeline:
         assert executor.calls == [("host_tool", {}, ctx)]
 
     @pytest.mark.asyncio
-    async def test_classified_plugin_context_cannot_reach_host_executor(self):
+    async def test_capability_declared_build_context_hook_receives_only_plugin_input(
+        self,
+    ):
+        @dataclass(frozen=True, slots=True)
+        class FrozenInput:
+            value: str
+
+        class ContextInputProvider:
+            def __init__(self, values):
+                self.values = MappingProxyType(values)
+                self.snapshot_contexts = []
+
+            async def snapshot(self, ctx):
+                self.snapshot_contexts.append(ctx)
+                return self.values
+
+        class ClassifiedContextPlugin:
+            capabilities = frozenset({PluginCapability.PENDING_FACT})
+
+            def __init__(self, state_key):
+                self.state_key = state_key
+                self.received = None
+
+            def hooks(self):
+                return {"build_context": self.build_context}
+
+            def build_context(self, *, input):
+                self.received = input
+                return [{"role": "system", "content": input.value}]
+
+        alpha_input = FrozenInput("alpha grounding")
+        beta_input = FrozenInput("beta grounding")
+        provider = ContextInputProvider(
+            {"classified_alpha": alpha_input, "classified_beta": beta_input}
+        )
+        alpha = ClassifiedContextPlugin("classified_alpha")
+        beta = ClassifiedContextPlugin("classified_beta")
+        registry = PluginRegistry()
+        registry.register(alpha)
+        registry.register(beta)
+        pipeline = Pipeline(
+            runtime=HookRuntime(registry),
+            registry=registry,
+            context_input_provider=provider,
+        )
+        ctx = PipelineContext(tape=Tape(), session_id="s1")
+
+        await pipeline._stage_build_context(ctx)
+
+        assert provider.snapshot_contexts == [ctx]
+        assert alpha.received is alpha_input
+        assert beta.received is beta_input
+        assert {"role": "system", "content": "alpha grounding"} in ctx.messages
+        assert {"role": "system", "content": "beta grounding"} in ctx.messages
+
+    @pytest.mark.asyncio
+    async def test_classified_plugin_cannot_receive_context_runtime_tape_store_executor_mailbox_or_cursor(
+        self,
+    ):
+        @dataclass(frozen=True, slots=True)
+        class FrozenInput:
+            value: str
+
+        frozen_input = FrozenInput("safe grounding")
+
+        class ContextInputProvider:
+            async def snapshot(self, ctx):
+                del ctx
+                return MappingProxyType({"classified_context": frozen_input})
+
         class ClassifiedContextPlugin:
             state_key = "classified_context"
             capabilities = frozenset({PluginCapability.PENDING_FACT})
 
             def __init__(self):
-                self.context_exposed_executor = False
+                self.received = None
 
             def hooks(self):
                 return {"build_context": self.build_context}
 
-            def build_context(self, *, ctx, **kwargs):
-                del kwargs
-                self.context_exposed_executor = hasattr(ctx, "_tool_executor")
+            def build_context(
+                self,
+                *,
+                input,
+                ctx=None,
+                runtime=None,
+                tape=None,
+                store=None,
+                executor=None,
+                mailbox=None,
+                cursor=None,
+                toolset=None,
+                dispatch=None,
+                **kwargs,
+            ):
+                self.received = {
+                    "input": input,
+                    "ctx": ctx,
+                    "runtime": runtime,
+                    "tape": tape,
+                    "store": store,
+                    "executor": executor,
+                    "mailbox": mailbox,
+                    "cursor": cursor,
+                    "toolset": toolset,
+                    "dispatch": dispatch,
+                    "kwargs": kwargs,
+                }
                 return []
 
         class HostExecutor:
@@ -430,17 +526,42 @@ class TestPipeline:
         plugin = ClassifiedContextPlugin()
         registry = PluginRegistry()
         registry.register(plugin)
+        runtime = HookRuntime(registry)
         pipeline = Pipeline(
-            runtime=HookRuntime(registry),
+            runtime=runtime,
             registry=registry,
             tool_executor=HostExecutor(),
+            context_input_provider=ContextInputProvider(),
+        )
+        ctx = PipelineContext(
+            tape=Tape(),
+            session_id="s1",
+            config={
+                "store": object(),
+                "executor": object(),
+                "mailbox": object(),
+                "dispatch": object(),
+            },
+            storage=object(),
+            runtime_message_bus=object(),
+            toolset=object(),
         )
 
-        await pipeline._stage_build_context(
-            PipelineContext(tape=Tape(), session_id="s1")
-        )
+        await pipeline._stage_build_context(ctx)
 
-        assert plugin.context_exposed_executor is False
+        assert plugin.received == {
+            "input": frozen_input,
+            "ctx": None,
+            "runtime": None,
+            "tape": None,
+            "store": None,
+            "executor": None,
+            "mailbox": None,
+            "cursor": None,
+            "toolset": None,
+            "dispatch": None,
+            "kwargs": {},
+        }
 
     @pytest.mark.asyncio
     async def test_run_turn_records_runtime_stage_spans(self, setup):

@@ -358,11 +358,13 @@ backend = "fake"
     runtime_pipeline = manager.get_session(session_id).runtime_pipeline
     assert runtime_pipeline is not None
     semantic_plugin = runtime_pipeline._registry.get("semantic_memory")
-
-    result = await semantic_plugin.build_context(
-        tape=later_tape,
-        ctx=PipelineContext(tape=later_tape, session_id=session_id),
+    semantic_provider = runtime_pipeline._context_input_provider
+    assert semantic_provider is not None
+    inputs = await semantic_provider.snapshot(
+        PipelineContext(tape=later_tape, session_id=session_id)
     )
+
+    result = await semantic_plugin.build_context(input=inputs["semantic_memory"])
 
     rendered = "\n".join(str(item["content"]) for item in result)
     assert durable_summary in rendered

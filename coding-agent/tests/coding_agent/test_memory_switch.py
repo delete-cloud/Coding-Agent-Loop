@@ -18,6 +18,7 @@ from coding_agent.topics.lifecycle import TOPIC_FINALIZED, TOPIC_INITIAL, TopicL
 from coding_agent.topics.memory import MemoryReviewStore
 from coding_agent.topics.range_index import TopicRangeIndex
 from coding_agent.topics.semantic_backends import FakeSemanticMemoryBackend
+from coding_agent.topics.semantic_grounding import SemanticMemoryGroundingProvider
 from coding_agent.topics.semantic_sync import (
     SemanticMemoryReviewSyncService,
     SemanticMemorySyncer,
@@ -643,7 +644,7 @@ backend = "fake"
     assert "semantic_memory_review_sync_service" not in ctx.config
 
 
-def test_disabled_semantic_config_does_not_initialize_provider_or_backend(
+def test_disabled_semantic_memory_constructs_no_provider_plugin_or_source_store(
     tmp_path: Path,
 ) -> None:
     config_path = _config(
@@ -658,7 +659,7 @@ backend = "unknown"
 """,
     )
 
-    _pipeline, ctx = create_agent(
+    pipeline, ctx = create_agent(
         config_path=config_path,
         data_dir=tmp_path / "data",
     )
@@ -667,6 +668,8 @@ backend = "unknown"
         "enabled": False,
         "backend": "unknown",
     }
+    assert "semantic_memory" not in pipeline._registry.plugin_ids()
+    assert pipeline._context_input_provider is None
     assert "semantic_memory_backend" not in ctx.config
     assert "semantic_memory_index" not in ctx.config
     assert "semantic_memory_syncer" not in ctx.config
@@ -986,8 +989,10 @@ recall_min_overlap = 0.25
     }
     plugin = pipeline._registry.get("semantic_memory")
     assert isinstance(plugin, SemanticMemoryPlugin)
-    assert plugin._recall_min_score == 0.55
-    assert plugin._recall_min_overlap == 0.25
+    provider = pipeline._context_input_provider
+    assert isinstance(provider, SemanticMemoryGroundingProvider)
+    assert provider._recall_min_score == 0.55
+    assert provider._recall_min_overlap == 0.25
 
 
 @pytest.mark.parametrize(
@@ -1089,7 +1094,7 @@ embedding_model = "   "
         )
 
 
-def test_semantic_enabled_forwards_explicit_topic_dependencies_to_plugin(
+def test_semantic_enabled_forwards_explicit_topic_dependencies_to_provider(
     tmp_path: Path,
 ) -> None:
     config_path = _default_plugin_config(
@@ -1118,8 +1123,10 @@ backend = "fake"
 
     plugin = pipeline._registry.get("semantic_memory")
     assert isinstance(plugin, SemanticMemoryPlugin)
-    assert plugin._topic_store is topic_store
-    assert plugin._topic_index is topic_index
+    provider = pipeline._context_input_provider
+    assert isinstance(provider, SemanticMemoryGroundingProvider)
+    assert provider._topic_store is topic_store
+    assert provider._topic_index is topic_index
 
 
 def test_semantic_topic_dependencies_propagate_to_child_pipeline(
@@ -1161,8 +1168,10 @@ backend = "fake"
 
     child_plugin = child_pipeline._registry.get("semantic_memory")
     assert isinstance(child_plugin, SemanticMemoryPlugin)
-    assert child_plugin._topic_store is topic_store
-    assert child_plugin._topic_index is topic_index
+    child_provider = child_pipeline._context_input_provider
+    assert isinstance(child_provider, SemanticMemoryGroundingProvider)
+    assert child_provider._topic_store is topic_store
+    assert child_provider._topic_index is topic_index
 
 
 def test_explicit_semantic_topic_dependencies_fail_fast_when_semantic_disabled(

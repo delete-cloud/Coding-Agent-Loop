@@ -3,29 +3,32 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
 from agentkit.observability import SpanRecord
+from agentkit.plugin.registry import PluginRegistry
+from agentkit.runtime.hook_runtime import HookRuntime
 from agentkit.runtime.messages import (
     RuntimeMessage,
     RuntimeMessageKind,
     SequencedRuntimeMessage,
 )
-from agentkit.runtime.pipeline import PipelineContext
+from agentkit.runtime.pipeline import Pipeline, PipelineContext
 from agentkit.tape.models import Entry
 from agentkit.tape.tape import Tape
 from coding_agent.kb import KB, DocumentChunk, KBSearchResult
 from coding_agent.plugins.kb import KBPlugin
-from coding_agent.plugins.semantic_memory import (
-    SEMANTIC_MEMORY_GROUNDING_MARKER_KEY,
-    SemanticMemoryPlugin,
-    semantic_grounding_query_digest,
-)
 from coding_agent.topics.context_pack import CONTEXT_PACK_STASH_KEY
 from coding_agent.topics.memory import MemoryReviewStore
 from coding_agent.topics.range_index import TopicRangeIndex
 from coding_agent.topics.semantic_backends import FakeSemanticMemoryBackend
+from coding_agent.topics.semantic_grounding import (
+    SemanticMemoryGroundingInput,
+    SemanticMemoryGroundingProvider,
+    semantic_grounding_query_digest,
+)
 from coding_agent.topics.semantic_index import (
     SafeSemanticMemoryIndex,
     SemanticDocId,
@@ -37,6 +40,22 @@ from coding_agent.topics.store import TopicRecord
 
 def _fake_embed(texts: list[str]) -> list[list[float]]:
     return [[float(i)] * 8 for i, _ in enumerate(texts)]
+
+
+def _semantic_context_inputs(
+    query: str,
+    hit_count: object,
+) -> MappingProxyType:
+    return MappingProxyType(
+        {
+            "semantic_memory": MappingProxyType(
+                {
+                    "query_digest": semantic_grounding_query_digest(query),
+                    "hit_count": hit_count,
+                }
+            )
+        }
+    )
 
 
 class RecordingObservationSink:
@@ -401,23 +420,117 @@ class TestBuildContextSearch:
 
         assert captured == ["fresh runtime prompt"]
 
-    def test_defers_when_semantic_memory_already_injected_context(
+    def test_semantic_grounding_marker_is_removed(self):
+        import coding_agent.plugins.semantic_memory as semantic_memory
+
+        assert not hasattr(semantic_memory, "SEMANTIC_MEMORY_GROUNDING_MARKER_KEY")
+
+    @pytest.mark.asyncio
+    async def test_kb_context_inputs_are_hit_summary_only_and_exclude_context_pack(
+        self,
+    ):
+        from coding_agent.topics.semantic_grounding import (
+            GroundingMessage,
+            SemanticMemoryGroundingInput,
+        )
+
+        grounding_input = SemanticMemoryGroundingInput(
+            input_id="session-1:user-1",
+            query_digest="digest-1",
+            hit_count=2,
+            messages=(
+                GroundingMessage(
+                    role="system",
+                    content="secret semantic grounding content",
+                ),
+            ),
+        )
+
+        class ContextInputProvider:
+            async def snapshot(self, ctx):
+                del ctx
+                summary = MappingProxyType({"query_digest": "digest-1", "hit_count": 2})
+                return MappingProxyType(
+                    {
+                        "semantic_memory": grounding_input,
+                        "kb": MappingProxyType({"semantic_memory": summary}),
+                    }
+                )
+
+        class KbCompatibilityPlugin:
+            state_key = "kb"
+
+            def __init__(self):
+                self.received = None
+
+            def hooks(self):
+                return {"build_context": self.build_context}
+
+            def build_context(self, *, tape, context_inputs):
+                del tape
+                self.received = context_inputs
+                return []
+
+        plugin = KbCompatibilityPlugin()
+        registry = PluginRegistry()
+        registry.register(plugin)
+        pipeline = Pipeline(
+            runtime=HookRuntime(registry),
+            registry=registry,
+            context_input_provider=ContextInputProvider(),
+        )
+        ctx = PipelineContext(
+            tape=Tape(
+                entries=[
+                    Entry(
+                        id="user-1",
+                        kind="message",
+                        payload={"role": "user", "content": "How does auth work?"},
+                    )
+                ]
+            ),
+            session_id="session-1",
+        )
+
+        await pipeline._stage_build_context(ctx)
+
+        assert plugin.received == {
+            "semantic_memory": {"query_digest": "digest-1", "hit_count": 2}
+        }
+        assert "messages" not in plugin.received["semantic_memory"]
+        assert "context_pack" not in plugin.received["semantic_memory"]
+        assert "provider" not in plugin.received
+        assert "semantic_memory.grounding_marker" not in ctx.config
+        with pytest.raises(TypeError):
+            plugin.received["another_plugin"] = object()
+        with pytest.raises(TypeError):
+            plugin.received["semantic_memory"]["hit_count"] = 3
+
+    def test_kb_defer_reads_frozen_semantic_hit_count_without_context_marker(
         self, indexed_plugin: KBPlugin
     ):
         indexed_plugin._defer_when_semantic_memory_hits = True
-        tape = Tape()
-        tape.append(
-            Entry(
-                kind="message",
-                payload={"role": "user", "content": "How does auth work?"},
-            )
+        tape = Tape(
+            entries=[
+                Entry(
+                    id="user-1",
+                    kind="message",
+                    payload={"role": "user", "content": "How does auth work?"},
+                )
+            ]
         )
-        ctx = PipelineContext(tape=tape)
-        ctx.config[SEMANTIC_MEMORY_GROUNDING_MARKER_KEY] = {
-            "query_digest": semantic_grounding_query_digest("How does auth work?"),
-            "tape_entry_count": len(tape),
-            "hit_count": 1,
-        }
+        context_inputs = MappingProxyType(
+            {
+                "semantic_memory": MappingProxyType(
+                    {
+                        "query_digest": semantic_grounding_query_digest(
+                            "How does auth work?"
+                        ),
+                        "hit_count": 1,
+                    }
+                )
+            }
+        )
         assert indexed_plugin._kb is not None
 
         def fail_search(*args, **kwargs):
@@ -426,34 +539,68 @@ class TestBuildContextSearch:
 
         indexed_plugin._kb.search_sync = fail_search
 
-        assert indexed_plugin.build_context(tape=tape, ctx=ctx) == []
-        assert SEMANTIC_MEMORY_GROUNDING_MARKER_KEY not in ctx.config
+        assert (
+            indexed_plugin.build_context(
+                tape=tape,
+                context_inputs=context_inputs,
+            )
+            == []
+        )
+
+    def test_defers_when_semantic_memory_summary_has_hits(
+        self, indexed_plugin: KBPlugin
+    ):
+        indexed_plugin._defer_when_semantic_memory_hits = True
+        tape = Tape(
+            entries=[
+                Entry(
+                    kind="message",
+                    payload={"role": "user", "content": "How does auth work?"},
+                )
+            ]
+        )
+        assert indexed_plugin._kb is not None
+
+        def fail_search(*args, **kwargs):
+            del args, kwargs
+            raise AssertionError("KB search should not run after semantic grounding")
+
+        indexed_plugin._kb.search_sync = fail_search
+
+        assert (
+            indexed_plugin.build_context(
+                tape=tape,
+                context_inputs=_semantic_context_inputs(
+                    "How does auth work?",
+                    1,
+                ),
+            )
+            == []
+        )
 
     def test_defer_flag_does_not_skip_when_semantic_memory_has_no_hits(
         self, indexed_plugin: KBPlugin
     ):
         indexed_plugin._defer_when_semantic_memory_hits = True
-        tape = Tape()
-        tape.append(
-            Entry(
-                kind="message",
-                payload={"role": "user", "content": "How does auth work?"},
-            )
+        tape = Tape(
+            entries=[
+                Entry(
+                    kind="message",
+                    payload={"role": "user", "content": "How does auth work?"},
+                )
+            ]
         )
-        ctx = PipelineContext(tape=tape)
-        ctx.config[SEMANTIC_MEMORY_GROUNDING_MARKER_KEY] = {
-            "query_digest": semantic_grounding_query_digest("How does auth work?"),
-            "tape_entry_count": len(tape),
-            "hit_count": 0,
-        }
 
-        result = indexed_plugin.build_context(tape=tape, ctx=ctx)
+        result = indexed_plugin.build_context(
+            tape=tape,
+            context_inputs=_semantic_context_inputs("How does auth work?", 0),
+        )
 
         assert len(result) == 1
         assert "## Repo references" in result[0]["content"]
 
     @pytest.mark.asyncio
-    async def test_subfloor_hits_zero_grounding_marker_and_kb_runs(
+    async def test_subfloor_hits_zero_grounding_summary_and_kb_runs(
         self,
         indexed_plugin: KBPlugin,
     ):
@@ -468,7 +615,7 @@ class TestBuildContextSearch:
                 source_refs=(SemanticSourceRef.for_topic(topic),),
             )
         )
-        semantic_plugin = SemanticMemoryPlugin(
+        semantic_provider = SemanticMemoryGroundingProvider(
             semantic_index=semantic_index,
             memory_review_store=MemoryReviewStore(),
             read_enabled=True,
@@ -476,67 +623,69 @@ class TestBuildContextSearch:
             topic_index=TopicRangeIndex(),
             recall_min_score=0.75,
         )
-        tape = Tape()
-        tape.append(
-            Entry(
-                kind="message",
-                payload={"role": "user", "content": "restic backup"},
-            )
+        tape = Tape(
+            entries=[
+                Entry(
+                    id="user-restic",
+                    kind="message",
+                    payload={"role": "user", "content": "restic backup"},
+                )
+            ]
         )
-        ctx = PipelineContext(tape=tape)
+        ctx = PipelineContext(tape=tape, session_id="session-restic")
 
-        assert await semantic_plugin.build_context(tape=tape, ctx=ctx) == []
-        assert ctx.config[SEMANTIC_MEMORY_GROUNDING_MARKER_KEY]["hit_count"] == 0
+        inputs = await semantic_provider.snapshot(ctx)
+        semantic_input = inputs["semantic_memory"]
+        assert isinstance(semantic_input, SemanticMemoryGroundingInput)
+        assert semantic_input.hit_count == 0
 
-        result = indexed_plugin.build_context(tape=tape, ctx=ctx)
+        result = indexed_plugin.build_context(
+            tape=tape,
+            context_inputs=inputs["kb"],
+        )
 
         assert len(result) == 1
         assert "## Repo references" in result[0]["content"]
-        assert SEMANTIC_MEMORY_GROUNDING_MARKER_KEY not in ctx.config
+        assert "semantic_memory.grounding_marker" not in ctx.config
 
-    def test_defer_flag_does_not_skip_on_stale_semantic_marker(
+    def test_defer_flag_does_not_skip_on_stale_semantic_summary(
         self, indexed_plugin: KBPlugin
     ):
         indexed_plugin._defer_when_semantic_memory_hits = True
-        tape = Tape()
-        tape.append(
-            Entry(
-                kind="message",
-                payload={"role": "user", "content": "How does auth work?"},
-            )
+        tape = Tape(
+            entries=[
+                Entry(
+                    kind="message",
+                    payload={"role": "user", "content": "How does auth work?"},
+                )
+            ]
         )
-        ctx = PipelineContext(tape=tape)
-        ctx.config[SEMANTIC_MEMORY_GROUNDING_MARKER_KEY] = {
-            "query_digest": semantic_grounding_query_digest("previous prompt"),
-            "tape_entry_count": len(tape),
-            "hit_count": 1,
-        }
 
-        result = indexed_plugin.build_context(tape=tape, ctx=ctx)
+        result = indexed_plugin.build_context(
+            tape=tape,
+            context_inputs=_semantic_context_inputs("previous prompt", 1),
+        )
 
         assert len(result) == 1
         assert "## Repo references" in result[0]["content"]
-        assert SEMANTIC_MEMORY_GROUNDING_MARKER_KEY not in ctx.config
 
     def test_defer_flag_does_not_skip_on_invalid_semantic_hit_count(
         self, indexed_plugin: KBPlugin
     ):
         indexed_plugin._defer_when_semantic_memory_hits = True
-        tape = Tape()
-        tape.append(
-            Entry(
-                kind="message",
-                payload={"role": "user", "content": "How does auth work?"},
-            )
+        tape = Tape(
+            entries=[
+                Entry(
+                    kind="message",
+                    payload={"role": "user", "content": "How does auth work?"},
+                )
+            ]
         )
-        ctx = PipelineContext(tape=tape)
-        ctx.config[SEMANTIC_MEMORY_GROUNDING_MARKER_KEY] = {
-            "query_digest": semantic_grounding_query_digest("How does auth work?"),
-            "tape_entry_count": len(tape),
-            "hit_count": True,
-        }
 
-        result = indexed_plugin.build_context(tape=tape, ctx=ctx)
+        result = indexed_plugin.build_context(
+            tape=tape,
+            context_inputs=_semantic_context_inputs("How does auth work?", True),
+        )
 
         assert len(result) == 1
         assert "## Repo references" in result[0]["content"]
