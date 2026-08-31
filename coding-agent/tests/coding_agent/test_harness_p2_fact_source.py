@@ -14,6 +14,7 @@ from agentkit.runtime.contracts import (
     AppliedCommandDisposition,
     EffectMutation,
     EffectPlan,
+    EffectStatus,
     OperationStateCAS,
     RejectedCommandDisposition,
     RuntimeCommand,
@@ -42,6 +43,7 @@ from coding_agent.stores.runtime_store import (
     ProjectionCursor,
     RawCursor,
     TrustedHandoff,
+    StaleMailboxCutError,
     StateVersionConflictError,
     TransitionFingerprintMismatchError,
 )
@@ -1242,6 +1244,35 @@ def _phase_b_pg_unit(
     )
 
 
+def _phase_b_pg_dispatch_unit(
+    transition_id: str,
+    *,
+    revision: int,
+    effect_id: str,
+    attempt_id: str,
+    expected_mailbox_cut: str,
+) -> AuthoritativeUnitOfWork:
+    return AuthoritativeUnitOfWork(
+        event=None,
+        session_state={**SESSION_PAYLOAD, "transition": transition_id},
+        transition_id=transition_id,
+        state_cas=OperationStateCAS(
+            run_id="run-phase-b-pg",
+            revision=revision,
+            projection_epoch=0,
+        ),
+        state_value={"transition": transition_id},
+        effect_mutation=EffectMutation(
+            effect_id=effect_id,
+            attempt_id=attempt_id,
+            expected_status=EffectStatus.PREPARED,
+            status=EffectStatus.DISPATCHED,
+            payload={"authorization_transition_id": transition_id},
+        ),
+        expected_mailbox_cut=expected_mailbox_cut,
+    )
+
+
 def _seed_phase_b_pg_commands(
     store: PGDurableStore,
     transition_id: str,
@@ -1315,6 +1346,120 @@ async def test_transition_receipt_same_epoch_retry_returns_stored_commit_before_
     assert later.state_version is not None
     assert later.state_version.revision == 2
     assert await store.load_event_record(SESSION_ID, "3") is None
+
+
+@pytest.mark.asyncio
+async def test_stale_dispatch_authorization_writes_nothing_postgresql(
+    tmp_path: Path,
+) -> None:
+    store, owner = await _open_store("pg", tmp_path)
+    prepare_id = "pg-dispatch-prepare"
+    effect_id = f"effect-{prepare_id}"
+    _seed_phase_b_pg_commands(store, prepare_id)
+    await store.commit_authoritative_uow(
+        owner,
+        _phase_b_pg_unit(prepare_id, revision=0),
+    )
+    first_cancel = await store.admit_runtime_command(
+        owner,
+        RuntimeCommand(
+            command_id="pg-cancel-before-dispatch",
+            command_kind="cancel",
+            payload={},
+        ),
+    )
+    assert first_cancel.mailbox_cut == "1"
+    stale = _phase_b_pg_dispatch_unit(
+        "pg-dispatch-authorize",
+        revision=1,
+        effect_id=effect_id,
+        attempt_id=f"attempt-{prepare_id}",
+        expected_mailbox_cut="0",
+    )
+
+    with pytest.raises(StaleMailboxCutError) as stale_error:
+        await store.commit_authoritative_uow(owner, stale)
+
+    assert stale_error.value.expected_mailbox_cut == 0
+    assert stale_error.value.current_mailbox_cut == 1
+    state_after_stale = await store.load_operation_state(
+        SESSION_ID,
+        "run-phase-b-pg",
+    )
+    assert state_after_stale is not None
+    assert state_after_stale.revision == 1
+    effect_after_stale = await store.load_effect_slot(SESSION_ID, effect_id)
+    assert effect_after_stale is not None
+    assert effect_after_stale.status == "prepared"
+    assert (
+        await store.load_transition_receipt(
+            SESSION_ID,
+            0,
+            "pg-dispatch-authorize",
+        )
+        is None
+    )
+
+    authorized = _phase_b_pg_dispatch_unit(
+        "pg-dispatch-authorize",
+        attempt_id=f"attempt-{prepare_id}",
+        revision=1,
+        effect_id=effect_id,
+        expected_mailbox_cut="1",
+    )
+    first = await store.commit_authoritative_uow(owner, authorized)
+    second_cancel = await store.admit_runtime_command(
+        owner,
+        RuntimeCommand(
+            command_id="pg-cancel-after-dispatch",
+            command_kind="cancel",
+            payload={},
+        ),
+    )
+    assert second_cancel.mailbox_cut == "2"
+
+    replay = await store.commit_authoritative_uow(owner, authorized)
+
+    assert replay.idempotent is True
+    assert replay.state_version == first.state_version
+    effect_after_replay = await store.load_effect_slot(SESSION_ID, effect_id)
+    assert effect_after_replay is not None
+    assert effect_after_replay.status == "dispatched"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_authorization_exact_replay_precedes_newer_cut_postgresql(
+    tmp_path: Path,
+) -> None:
+    store, owner = await _open_store("pg", tmp_path)
+    prepare_id = "pg-dispatch-replay-prepare"
+    effect_id = f"effect-{prepare_id}"
+    _seed_phase_b_pg_commands(store, prepare_id)
+    await store.commit_authoritative_uow(
+        owner,
+        _phase_b_pg_unit(prepare_id, revision=0),
+    )
+    authorized = _phase_b_pg_dispatch_unit(
+        "pg-dispatch-replay-authorize",
+        revision=1,
+        effect_id=effect_id,
+        attempt_id=f"attempt-{prepare_id}",
+        expected_mailbox_cut="0",
+    )
+    first = await store.commit_authoritative_uow(owner, authorized)
+    await store.admit_runtime_command(
+        owner,
+        RuntimeCommand(
+            command_id="pg-cancel-after-replay-authorization",
+            command_kind="cancel",
+            payload={},
+        ),
+    )
+
+    replay = await store.commit_authoritative_uow(owner, authorized)
+
+    assert replay.idempotent is True
+    assert replay.state_version == first.state_version
 
 
 @pytest.mark.asyncio

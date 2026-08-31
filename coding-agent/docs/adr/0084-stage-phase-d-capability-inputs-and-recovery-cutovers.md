@@ -1,7 +1,9 @@
 # ADR-0084: Stage Phase D capability inputs and recovery cutovers
 
-**Status**: Accepted
+**Status**: Superseded
 **Date**: 2026-08-31
+
+Superseded by ADR-0085. Completed D1, D2, and D3a decisions are re-adopted; D3b through F are restaged.
 
 Supplements ADR-0083. It does not supersede or modify ADR-0083's accepted host-coordinated runtime boundary.
 

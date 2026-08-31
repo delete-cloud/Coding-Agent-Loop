@@ -1,7 +1,9 @@
 # ADR-0018: Keep cloud-aware subagent orchestration owner-local
 
-**Status**: Accepted
+**Status**: Superseded
 **Date**: 2026-05-04
+
+Superseded by ADR-0085. ADR-0085 re-adopts the owner-local child contract and versions terminal-summary transport.
 
 ## Context
 

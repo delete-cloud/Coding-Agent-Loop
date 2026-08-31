@@ -17,6 +17,7 @@ from agentkit.runtime.contracts import (
     CommitRef,
     CommittedFactNotice,
     EffectMutation,
+    EffectStatus,
     OperationStateCAS,
     OperationStateVersion,
     RuntimeCommand,
@@ -35,6 +36,7 @@ from coding_agent.stores.rtstore.validate import (
 )
 
 DEFAULT_HARNESS_PROJECTION: Final[str] = "default"
+_MAX_U64: Final[int] = (1 << 64) - 1
 
 
 class AuthoritativeWriteRefusedError(RuntimeError):
@@ -63,6 +65,27 @@ class RuntimeCommandAdmissionConflictError(RuntimeError):
 
 class EffectMutationConflictError(RuntimeError):
     """Raised when an explicit effect mutation does not match durable state."""
+
+
+class InvalidDispatchAuthorizationError(ValueError):
+    """Raised when a typed UoW has an invalid dispatch-cut precondition."""
+
+
+class StaleMailboxCutError(RuntimeError):
+    """Raised when dispatch authorization was computed against an old cut."""
+
+    def __init__(
+        self,
+        *,
+        expected_mailbox_cut: int,
+        current_mailbox_cut: int,
+    ) -> None:
+        super().__init__(
+            "dispatch authorization mailbox cut is stale: "
+            f"expected {expected_mailbox_cut}, current {current_mailbox_cut}"
+        )
+        self.expected_mailbox_cut = expected_mailbox_cut
+        self.current_mailbox_cut = current_mailbox_cut
 
 
 class KeyExpiredError(LookupError):
@@ -363,6 +386,7 @@ class AuthoritativeUnitOfWork:
     facts: tuple[EventRecord, ...] = ()
     dispositions: tuple[CommandDisposition, ...] = ()
     effect_mutation: EffectMutation | None = None
+    expected_mailbox_cut: str | None = None
 
     def __post_init__(self) -> None:
         if self.event is not None and not isinstance(self.event, EventRecord):
@@ -423,6 +447,31 @@ class AuthoritativeUnitOfWork:
             EffectMutation,
         ):
             raise TypeError("effect_mutation must be an EffectMutation")
+        is_dispatch_authorization = (
+            self.effect_mutation is not None
+            and self.effect_mutation.expected_status is EffectStatus.PREPARED
+            and self.effect_mutation.status is EffectStatus.DISPATCHED
+        )
+        if is_dispatch_authorization and self.expected_mailbox_cut is None:
+            raise InvalidDispatchAuthorizationError(
+                "expected_mailbox_cut is required for PREPARED -> DISPATCHED"
+            )
+        if not is_dispatch_authorization and self.expected_mailbox_cut is not None:
+            raise InvalidDispatchAuthorizationError(
+                "expected_mailbox_cut is forbidden outside PREPARED -> DISPATCHED"
+            )
+        if self.expected_mailbox_cut is not None:
+            try:
+                parsed_mailbox_cut = parse_u64(
+                    self.expected_mailbox_cut,
+                    field_name="expected_mailbox_cut",
+                )
+            except ValueError as error:
+                raise InvalidDispatchAuthorizationError(str(error)) from error
+            if parsed_mailbox_cut > _MAX_U64:
+                raise InvalidDispatchAuthorizationError(
+                    "expected_mailbox_cut must be a decimal u64 string"
+                )
 
         if self.transition_id is None:
             if self.event is None:
@@ -588,6 +637,7 @@ def snapshot_transition_unit(
         facts=facts,
         dispositions=unit.dispositions,
         effect_mutation=effect_mutation,
+        expected_mailbox_cut=unit.expected_mailbox_cut,
     )
 
 
@@ -699,6 +749,7 @@ def transition_mutation_fingerprint(unit: AuthoritativeUnitOfWork) -> str:
             for disposition in unit.dispositions
         ],
         "effect_mutation": _effect_fingerprint_value(unit.effect_mutation),
+        "expected_mailbox_cut": unit.expected_mailbox_cut,
     }
     canonical = json.dumps(
         mutation,

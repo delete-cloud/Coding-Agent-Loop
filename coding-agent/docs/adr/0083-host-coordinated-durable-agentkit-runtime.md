@@ -1,7 +1,9 @@
 # ADR-0083: Adopt a host-coordinated durable AgentKit runtime boundary
 
-**Status**: Accepted
+**Status**: Superseded
 **Date**: 2026-08-29
+
+Superseded by ADR-0085, which re-adopts the frozen public runtime boundary and replaces the D3b-through-F activation schedule.
 
 Supersedes ADR-0001, ADR-0005, ADR-0006, and ADR-0010 (checkpoint restore contract stays narrow and explicit). ADR-0010 (synchronize checkpoint restore with active turns) is retained.
 

@@ -10,8 +10,10 @@ from agentkit.runtime.contracts import (
     AppliedCommandDisposition,
     EffectMutation,
     EffectPlan,
+    EffectStatus,
     OperationStateCAS,
     RejectedCommandDisposition,
+    RuntimeCommand,
     SupersededCommandDisposition,
 )
 from coding_agent.stores.durable_local import SQLiteLocalDurableStore
@@ -20,9 +22,12 @@ from coding_agent.stores.runtime_store import (
     CommandDispositionConflictError,
     EffectLedgerSlot,
     EventRecord,
+    InvalidDispatchAuthorizationError,
     MailboxDispositionSlot,
+    StaleMailboxCutError,
     StateVersionConflictError,
     TransitionFingerprintMismatchError,
+    transition_mutation_fingerprint,
 )
 
 SESSION_ID = "session-phase-b"
@@ -61,6 +66,7 @@ def _transition(
     state_value: dict[str, object] | None = None,
     dispositions: tuple[object, ...] = (),
     effect_mutation: EffectMutation | None = None,
+    expected_mailbox_cut: str | None = None,
 ) -> AuthoritativeUnitOfWork:
     return AuthoritativeUnitOfWork(
         event=None,
@@ -77,6 +83,7 @@ def _transition(
         facts=facts,
         dispositions=dispositions,
         effect_mutation=effect_mutation,
+        expected_mailbox_cut=expected_mailbox_cut,
     )
 
 
@@ -88,6 +95,16 @@ def _prepared_effect(effect_id: str = "effect-phase-b") -> EffectMutation:
             effect_kind="tool",
             payload={"name": "read", "arguments": {"path": "README.md"}},
         )
+    )
+
+
+def _dispatched_effect(effect_id: str = "effect-phase-b") -> EffectMutation:
+    return EffectMutation(
+        effect_id=effect_id,
+        attempt_id=f"attempt-{effect_id}",
+        expected_status=EffectStatus.PREPARED,
+        status=EffectStatus.DISPATCHED,
+        payload={"authorization_transition_id": "authorization-phase-b"},
     )
 
 
@@ -106,6 +123,65 @@ def _seed_commands(
             """,
             [(SESSION_ID, command_id, disposition) for command_id in command_ids],
         )
+
+
+def test_dispatch_authorization_requires_mailbox_cut() -> None:
+    with pytest.raises(
+        InvalidDispatchAuthorizationError,
+        match="expected_mailbox_cut is required",
+    ):
+        _transition(
+            "transition-dispatch-missing-cut",
+            revision=0,
+            effect_mutation=_dispatched_effect(),
+        )
+
+
+@pytest.mark.parametrize(
+    "expected_mailbox_cut",
+    ["", "-1", "01", str(2**64)],
+)
+def test_dispatch_authorization_rejects_invalid_mailbox_cut(
+    expected_mailbox_cut: str,
+) -> None:
+    with pytest.raises(InvalidDispatchAuthorizationError):
+        _transition(
+            "transition-dispatch-invalid-cut",
+            revision=0,
+            effect_mutation=_dispatched_effect(),
+            expected_mailbox_cut=expected_mailbox_cut,
+        )
+
+
+def test_mailbox_cut_is_forbidden_outside_dispatch_authorization() -> None:
+    with pytest.raises(
+        InvalidDispatchAuthorizationError,
+        match="expected_mailbox_cut is forbidden",
+    ):
+        _transition(
+            "transition-nondispatch-cut",
+            revision=0,
+            expected_mailbox_cut="0",
+        )
+
+
+def test_dispatch_authorization_cut_changes_mutation_fingerprint() -> None:
+    first = _transition(
+        "transition-dispatch-fingerprint",
+        revision=0,
+        effect_mutation=_dispatched_effect(),
+        expected_mailbox_cut="0",
+    )
+    second = _transition(
+        "transition-dispatch-fingerprint",
+        revision=0,
+        effect_mutation=_dispatched_effect(),
+        expected_mailbox_cut="1",
+    )
+
+    assert transition_mutation_fingerprint(first) != (
+        transition_mutation_fingerprint(second)
+    )
 
 
 @pytest.mark.asyncio
@@ -369,6 +445,210 @@ async def test_transition_receipt_same_epoch_retry_returns_stored_commit_before_
     assert later.state_version is not None
     assert later.state_version.revision == 2
     assert await store.load_event_record(SESSION_ID, "3") is None
+
+
+@pytest.mark.asyncio
+async def test_stale_dispatch_authorization_writes_nothing_sqlite(
+    tmp_path: Path,
+) -> None:
+    store, owner = await _open_store(tmp_path)
+    effect_id = "effect-dispatch-cut"
+    await store.commit_authoritative_uow(
+        owner,
+        _transition(
+            "transition-dispatch-prepare",
+            revision=0,
+            effect_mutation=_prepared_effect(effect_id),
+        ),
+    )
+    first_cancel = await store.admit_runtime_command(
+        owner,
+        RuntimeCommand(
+            command_id="cancel-before-dispatch",
+            command_kind="cancel",
+            payload={},
+        ),
+    )
+    assert first_cancel.mailbox_cut == "1"
+    stale = _transition(
+        "transition-dispatch-authorize",
+        revision=1,
+        effect_mutation=_dispatched_effect(effect_id),
+        expected_mailbox_cut="0",
+    )
+
+    with pytest.raises(StaleMailboxCutError) as stale_error:
+        await store.commit_authoritative_uow(owner, stale)
+
+    assert stale_error.value.expected_mailbox_cut == 0
+    assert stale_error.value.current_mailbox_cut == 1
+    state_after_stale = await store.load_operation_state(
+        SESSION_ID,
+        "run-phase-b",
+    )
+    assert state_after_stale is not None
+    assert state_after_stale.revision == 1
+    effect_after_stale = await store.load_effect_slot(SESSION_ID, effect_id)
+    assert effect_after_stale is not None
+    assert effect_after_stale.status == "prepared"
+    assert (
+        await store.load_transition_receipt(
+            SESSION_ID,
+            0,
+            "transition-dispatch-authorize",
+        )
+        is None
+    )
+
+    authorized = _transition(
+        "transition-dispatch-authorize",
+        revision=1,
+        effect_mutation=_dispatched_effect(effect_id),
+        expected_mailbox_cut="1",
+    )
+    first = await store.commit_authoritative_uow(owner, authorized)
+    second_cancel = await store.admit_runtime_command(
+        owner,
+        RuntimeCommand(
+            command_id="cancel-after-dispatch",
+            command_kind="cancel",
+            payload={},
+        ),
+    )
+    assert second_cancel.mailbox_cut == "2"
+
+    replay = await store.commit_authoritative_uow(owner, authorized)
+
+    assert replay.idempotent is True
+    assert replay.state_version == first.state_version
+    effect_after_replay = await store.load_effect_slot(SESSION_ID, effect_id)
+    assert effect_after_replay is not None
+    assert effect_after_replay.status == "dispatched"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_authorization_exact_replay_precedes_newer_cut_sqlite(
+    tmp_path: Path,
+) -> None:
+    store, owner = await _open_store(tmp_path)
+    effect_id = "effect-dispatch-replay"
+    await store.commit_authoritative_uow(
+        owner,
+        _transition(
+            "transition-dispatch-replay-prepare",
+            revision=0,
+            effect_mutation=_prepared_effect(effect_id),
+        ),
+    )
+    authorized = _transition(
+        "transition-dispatch-replay-authorize",
+        revision=1,
+        effect_mutation=_dispatched_effect(effect_id),
+        expected_mailbox_cut="0",
+    )
+    first = await store.commit_authoritative_uow(owner, authorized)
+    await store.admit_runtime_command(
+        owner,
+        RuntimeCommand(
+            command_id="cancel-after-replay-authorization",
+            command_kind="cancel",
+            payload={},
+        ),
+    )
+
+    replay = await store.commit_authoritative_uow(owner, authorized)
+
+    assert replay.idempotent is True
+    assert replay.state_version == first.state_version
+
+
+@pytest.mark.asyncio
+async def test_stale_dispatch_authorization_writes_no_receipt(
+    tmp_path: Path,
+) -> None:
+    store, owner = await _open_store(tmp_path)
+    effect_id = "effect-dispatch-no-receipt"
+    await store.commit_authoritative_uow(
+        owner,
+        _transition(
+            "transition-dispatch-no-receipt-prepare",
+            revision=0,
+            effect_mutation=_prepared_effect(effect_id),
+        ),
+    )
+    await store.admit_runtime_command(
+        owner,
+        RuntimeCommand(
+            command_id="cancel-before-no-receipt-authorization",
+            command_kind="cancel",
+            payload={},
+        ),
+    )
+    stale = _transition(
+        "transition-dispatch-no-receipt-authorize",
+        revision=1,
+        effect_mutation=_dispatched_effect(effect_id),
+        expected_mailbox_cut="0",
+    )
+
+    with pytest.raises(StaleMailboxCutError):
+        await store.commit_authoritative_uow(owner, stale)
+
+    assert (
+        await store.load_transition_receipt(
+            SESSION_ID,
+            0,
+            "transition-dispatch-no-receipt-authorize",
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_fresh_cut_can_commit_after_stale_zero_write_refusal(
+    tmp_path: Path,
+) -> None:
+    store, owner = await _open_store(tmp_path)
+    effect_id = "effect-dispatch-fresh-cut"
+    await store.commit_authoritative_uow(
+        owner,
+        _transition(
+            "transition-dispatch-fresh-cut-prepare",
+            revision=0,
+            effect_mutation=_prepared_effect(effect_id),
+        ),
+    )
+    admission = await store.admit_runtime_command(
+        owner,
+        RuntimeCommand(
+            command_id="cancel-before-fresh-cut-authorization",
+            command_kind="cancel",
+            payload={},
+        ),
+    )
+    stale = _transition(
+        "transition-dispatch-fresh-cut-authorize",
+        revision=1,
+        effect_mutation=_dispatched_effect(effect_id),
+        expected_mailbox_cut="0",
+    )
+    with pytest.raises(StaleMailboxCutError):
+        await store.commit_authoritative_uow(owner, stale)
+
+    committed = await store.commit_authoritative_uow(
+        owner,
+        _transition(
+            "transition-dispatch-fresh-cut-authorize",
+            revision=1,
+            effect_mutation=_dispatched_effect(effect_id),
+            expected_mailbox_cut=admission.mailbox_cut,
+        ),
+    )
+
+    assert committed.idempotent is False
+    effect = await store.load_effect_slot(SESSION_ID, effect_id)
+    assert effect is not None
+    assert effect.status == "dispatched"
 
 
 @pytest.mark.asyncio
