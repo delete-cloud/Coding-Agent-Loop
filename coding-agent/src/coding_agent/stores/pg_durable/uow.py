@@ -40,6 +40,7 @@ from coding_agent.stores.runtime_store import (
     parse_u64,
     receipt_generation_may_replace,
     StateVersionConflictError,
+    StaleMailboxCutError,
     TransitionFingerprintMismatchError,
     _operation_state_from_row,
     runtime_command_mailbox_payloads_equal,
@@ -336,6 +337,18 @@ class PgUnitOfWorkMixin:
                     facts=facts,
                     transition_receipt=receipt,
                 )
+
+            if unit.expected_mailbox_cut is not None:
+                expected_mailbox_cut = parse_u64(
+                    unit.expected_mailbox_cut,
+                    field_name="expected_mailbox_cut",
+                )
+                current_mailbox_cut = fact_source.dispatch_generation_int
+                if current_mailbox_cut != expected_mailbox_cut:
+                    raise StaleMailboxCutError(
+                        expected_mailbox_cut=expected_mailbox_cut,
+                        current_mailbox_cut=current_mailbox_cut,
+                    )
 
             current_state_row = await connection.fetchrow(
                 self._SELECT_OPERATION_STATE_FOR_UPDATE_SQL,

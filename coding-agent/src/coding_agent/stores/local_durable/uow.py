@@ -45,6 +45,7 @@ from coding_agent.stores.runtime_store import (
     runtime_command_mailbox_payloads_equal,
     parse_u64,
     StateVersionConflictError,
+    StaleMailboxCutError,
     _sqlite_required_int,
     _sqlite_required_str,
     TransitionFingerprintMismatchError,
@@ -362,6 +363,18 @@ class LocalUnitOfWorkMixin:
                     facts=facts,
                     transition_receipt=receipt,
                 )
+
+            if unit.expected_mailbox_cut is not None:
+                expected_mailbox_cut = parse_u64(
+                    unit.expected_mailbox_cut,
+                    field_name="expected_mailbox_cut",
+                )
+                current_mailbox_cut = fact_source.dispatch_generation_int
+                if current_mailbox_cut != expected_mailbox_cut:
+                    raise StaleMailboxCutError(
+                        expected_mailbox_cut=expected_mailbox_cut,
+                        current_mailbox_cut=current_mailbox_cut,
+                    )
 
             current_state_row = connection.execute(
                 """
