@@ -11,6 +11,7 @@ class PgHarnessSqlMixin:
         retention_floor BIGINT NOT NULL,
         projection TEXT NOT NULL,
         projection_epoch BIGINT NOT NULL,
+        dispatch_generation BIGINT NOT NULL DEFAULT 0,
         trusted_handoff_seq BIGINT,
         trusted_handoff_epoch BIGINT,
         trusted_handoff_projection TEXT,
@@ -32,6 +33,8 @@ class PgHarnessSqlMixin:
         slot_id TEXT NOT NULL,
         lane TEXT NOT NULL,
         disposition TEXT NOT NULL,
+        admitted_session_seq BIGINT,
+        admitted_dispatch_generation BIGINT,
         payload JSONB NOT NULL,
         PRIMARY KEY (session_id, slot_id)
     );
@@ -85,7 +88,11 @@ class PgHarnessSqlMixin:
         ADD COLUMN IF NOT EXISTS trusted_handoff_epoch BIGINT,
         ADD COLUMN IF NOT EXISTS trusted_handoff_projection TEXT,
         ADD COLUMN IF NOT EXISTS trusted_handoff_payload JSONB,
-        ADD COLUMN IF NOT EXISTS trusted_handoff_accepted_at TIMESTAMPTZ
+        ADD COLUMN IF NOT EXISTS trusted_handoff_accepted_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS dispatch_generation BIGINT NOT NULL DEFAULT 0;
+    ALTER TABLE session_mailbox_slots
+        ADD COLUMN IF NOT EXISTS admitted_session_seq BIGINT,
+        ADD COLUMN IF NOT EXISTS admitted_dispatch_generation BIGINT
     """
 
     _SELECT_FACT_SOURCE_FOR_UPDATE_SQL = """
@@ -113,6 +120,13 @@ class PgHarnessSqlMixin:
     _UPDATE_FACT_SOURCE_SEQ_SQL = """
     UPDATE session_fact_source
     SET session_seq = $2
+    WHERE session_id = $1
+    RETURNING *
+    """
+
+    _UPDATE_FACT_SOURCE_COMMAND_ADMISSION_SQL = """
+    UPDATE session_fact_source
+    SET session_seq = $2, dispatch_generation = $3
     WHERE session_id = $1
     RETURNING *
     """
@@ -211,6 +225,43 @@ class PgHarnessSqlMixin:
     _SELECT_MAILBOX_SLOT_SQL = """
     SELECT * FROM session_mailbox_slots
     WHERE session_id = $1 AND slot_id = $2
+    """
+
+    _SELECT_MAILBOX_SLOT_FOR_UPDATE_SQL = """
+    SELECT * FROM session_mailbox_slots
+    WHERE session_id = $1 AND slot_id = $2
+    FOR UPDATE
+    """
+
+    _INSERT_RUNTIME_COMMAND_SQL = """
+    INSERT INTO session_mailbox_slots (
+        session_id,
+        slot_id,
+        lane,
+        disposition,
+        admitted_session_seq,
+        admitted_dispatch_generation,
+        payload
+    )
+    VALUES ($1, $2, 'runtime', 'pending', $3, $4, $5::jsonb)
+    RETURNING *
+    """
+
+    _SELECT_RUNTIME_COMMAND_MAILBOX_SQL = """
+    SELECT
+        source.dispatch_generation,
+        mailbox.slot_id,
+        mailbox.disposition,
+        mailbox.admitted_session_seq,
+        mailbox.admitted_dispatch_generation,
+        mailbox.payload
+    FROM session_fact_source AS source
+    LEFT JOIN session_mailbox_slots AS mailbox
+        ON mailbox.session_id = source.session_id
+        AND mailbox.admitted_session_seq IS NOT NULL
+        AND mailbox.disposition IN ('pending', 'admitted')
+    WHERE source.session_id = $1
+    ORDER BY mailbox.admitted_session_seq
     """
 
     _UPSERT_EFFECT_SLOT_SQL = """

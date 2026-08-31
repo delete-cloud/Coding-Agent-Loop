@@ -14,6 +14,8 @@ from coding_agent.events.connected_chat import (
     project_chat_event,
 )
 from coding_agent.stores.runtime_store import (
+    CommandMailboxEntry,
+    CommandMailboxSnapshot,
     CursorEpochMismatchError,
     DEFAULT_HARNESS_PROJECTION,
     EffectLedgerSlot,
@@ -31,6 +33,8 @@ from coding_agent.stores.runtime_store import (
     assert_projection_binding,
     assert_raw_cursor_not_expired,
     assert_trusted_handoff,
+    format_u64,
+    runtime_command_from_mailbox_payload,
     parse_u64,
 )
 from coding_agent.server.stores.session_owner_store import (
@@ -45,7 +49,12 @@ from coding_agent.stores.pg_durable.fact_source_rows import (
     _mailbox_from_pg_row,
     _receipt_from_pg_row,
 )
-from coding_agent.stores.pg_durable.helpers import _required_row
+from coding_agent.stores.pg_durable.helpers import (
+    _required_dict,
+    _required_int,
+    _required_row,
+    _required_str,
+)
 
 
 class PgFactSourceMixin:
@@ -60,6 +69,37 @@ class PgFactSourceMixin:
         if row is None:
             return None
         return _fact_source_from_pg_row(dict(row)).state
+
+    async def load_runtime_command_mailbox(
+        self,
+        session_id: str,
+    ) -> CommandMailboxSnapshot:
+        _require_non_empty("session_id", session_id)
+        await self._ensure_schema()
+        pool = await self._pool.get_pool()
+        rows = await pool.fetch(self._SELECT_RUNTIME_COMMAND_MAILBOX_SQL, session_id)
+        if not rows:
+            return CommandMailboxSnapshot(entries=(), mailbox_cut="0")
+        mappings = [dict(row) for row in rows]
+        mailbox_cut = format_u64(_required_int(mappings[0], "dispatch_generation"))
+        entries = tuple(
+            CommandMailboxEntry(
+                command=runtime_command_from_mailbox_payload(
+                    command_id=_required_str(row, "slot_id"),
+                    payload=_required_dict(row, "payload"),
+                ),
+                admitted_session_seq=format_u64(
+                    _required_int(row, "admitted_session_seq")
+                ),
+                admitted_dispatch_generation=format_u64(
+                    _required_int(row, "admitted_dispatch_generation")
+                ),
+                disposition=_required_str(row, "disposition"),
+            )
+            for row in mappings
+            if row.get("slot_id") is not None
+        )
+        return CommandMailboxSnapshot(entries=entries, mailbox_cut=mailbox_cut)
 
     async def load_event_record(
         self,
@@ -227,9 +267,7 @@ class PgFactSourceMixin:
                 0,
             )
             if fact_row is None:
-                fact_row = await pool.fetchrow(
-                    self._SELECT_FACT_SOURCE_SQL, session_id
-                )
+                fact_row = await pool.fetchrow(self._SELECT_FACT_SOURCE_SQL, session_id)
             state = _fact_source_from_pg_row(
                 _required_row(fact_row, "session fact source insert")
             ).state

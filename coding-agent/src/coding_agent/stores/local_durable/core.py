@@ -52,6 +52,7 @@ class LocalCoreMixin:
         retention_floor INTEGER NOT NULL,
         projection TEXT NOT NULL,
         projection_epoch INTEGER NOT NULL,
+        dispatch_generation INTEGER NOT NULL DEFAULT 0,
         trusted_handoff_seq INTEGER,
         trusted_handoff_epoch INTEGER,
         trusted_handoff_projection TEXT,
@@ -73,6 +74,8 @@ class LocalCoreMixin:
         slot_id TEXT NOT NULL,
         lane TEXT NOT NULL,
         disposition TEXT NOT NULL,
+        admitted_session_seq INTEGER,
+        admitted_dispatch_generation INTEGER,
         payload TEXT NOT NULL,
         PRIMARY KEY (session_id, slot_id)
     );

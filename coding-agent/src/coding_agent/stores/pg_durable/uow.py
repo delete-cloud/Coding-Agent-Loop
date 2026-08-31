@@ -9,6 +9,7 @@ from agentkit.runtime.contracts import (
     CommitRef,
     CommittedFactNotice,
     OperationStateVersion,
+    RuntimeCommand,
     TransitionReceipt,
 )
 from coding_agent.events.connected_chat import (
@@ -23,18 +24,25 @@ from coding_agent.events.connected_chat import (
 from coding_agent.stores.runtime_store import (
     AuthoritativeCommit,
     AuthoritativeUnitOfWork,
+    CommandMailboxEntry,
     CommandDispositionConflictError,
+    RuntimeCommandAdmission,
+    RuntimeCommandAdmissionConflictError,
     EffectMutationConflictError,
     EventRecord,
     JSONObject,
     RawCursor,
     effect_status_may_replace,
     format_u64,
+    runtime_command_from_mailbox_payload,
+    runtime_command_invalidates_dispatch,
+    runtime_command_mailbox_payload,
     parse_u64,
     receipt_generation_may_replace,
     StateVersionConflictError,
     TransitionFingerprintMismatchError,
     _operation_state_from_row,
+    runtime_command_mailbox_payloads_equal,
     _plain_json,
     _transition_receipt_from_row,
     _require_non_empty,
@@ -54,6 +62,8 @@ from coding_agent.stores.pg_durable.helpers import (
     _require_payload_session,
     _required_owned_row,
     _required_row,
+    _required_dict,
+    _required_int,
     _required_str,
 )
 
@@ -117,6 +127,95 @@ class PgUnitOfWorkMixin:
             session_seq=commit.event.session_seq,
             idempotent=commit.idempotent,
         )
+
+    async def admit_runtime_command(
+        self,
+        authority: OwnerAuthority,
+        command: RuntimeCommand,
+    ) -> RuntimeCommandAdmission:
+        command_payload = runtime_command_mailbox_payload(command)
+        invalidates_dispatch = runtime_command_invalidates_dispatch(command)
+
+        async def body(connection: Any) -> RuntimeCommandAdmission:
+            await self._require_owner(connection, authority)
+            fact_source = await self._ensure_fact_source(
+                connection,
+                authority.session_id,
+            )
+            existing_row = await connection.fetchrow(
+                self._SELECT_MAILBOX_SLOT_FOR_UPDATE_SQL,
+                authority.session_id,
+                command.command_id,
+            )
+            if existing_row is not None:
+                existing = dict(existing_row)
+                admitted_session_seq = existing.get("admitted_session_seq")
+                admitted_generation = existing.get("admitted_dispatch_generation")
+                if admitted_session_seq is None or admitted_generation is None:
+                    raise RuntimeCommandAdmissionConflictError(
+                        "runtime command identity collides with a legacy mailbox slot"
+                    )
+                existing_payload = _required_dict(existing, "payload")
+                if not runtime_command_mailbox_payloads_equal(
+                    existing_payload,
+                    command_payload,
+                ):
+                    raise RuntimeCommandAdmissionConflictError(
+                        "runtime command identity was reused with different content"
+                    )
+                existing_command = runtime_command_from_mailbox_payload(
+                    command_id=command.command_id,
+                    payload=existing_payload,
+                )
+                return RuntimeCommandAdmission(
+                    entry=CommandMailboxEntry(
+                        command=existing_command,
+                        admitted_session_seq=format_u64(
+                            _required_int(existing, "admitted_session_seq")
+                        ),
+                        admitted_dispatch_generation=format_u64(
+                            _required_int(
+                                existing,
+                                "admitted_dispatch_generation",
+                            )
+                        ),
+                        disposition=_required_str(existing, "disposition"),
+                    ),
+                    mailbox_cut=format_u64(fact_source.dispatch_generation_int),
+                    idempotent=True,
+                )
+
+            admitted_session_seq = fact_source.session_seq_int + 1
+            dispatch_generation = fact_source.dispatch_generation_int + int(
+                invalidates_dispatch
+            )
+            updated = await connection.fetchrow(
+                self._UPDATE_FACT_SOURCE_COMMAND_ADMISSION_SQL,
+                authority.session_id,
+                admitted_session_seq,
+                dispatch_generation,
+            )
+            _required_row(updated, "runtime command fact source update")
+            inserted = await connection.fetchrow(
+                self._INSERT_RUNTIME_COMMAND_SQL,
+                authority.session_id,
+                command.command_id,
+                admitted_session_seq,
+                dispatch_generation,
+                command_payload,
+            )
+            _required_row(inserted, "runtime command mailbox insert")
+            return RuntimeCommandAdmission(
+                entry=CommandMailboxEntry(
+                    command=command,
+                    admitted_session_seq=format_u64(admitted_session_seq),
+                    admitted_dispatch_generation=format_u64(dispatch_generation),
+                    disposition="pending",
+                ),
+                mailbox_cut=format_u64(dispatch_generation),
+            )
+
+        return cast(RuntimeCommandAdmission, await self._with_transaction(body))
 
     async def load_operation_state(
         self,

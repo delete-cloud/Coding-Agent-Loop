@@ -16,6 +16,7 @@ from agentkit.runtime.contracts import (
     EffectPlan,
     OperationStateCAS,
     RejectedCommandDisposition,
+    RuntimeCommand,
 )
 
 from coding_agent.server.stores.session_owner_store import (
@@ -28,6 +29,7 @@ from coding_agent.stores.runtime_store import (
     AgentRunRecord,
     AuthoritativeUnitOfWork,
     CommandDispositionConflictError,
+    RuntimeCommandAdmissionConflictError,
     AuthoritativeWriteRefusedError,
     CursorEpochMismatchError,
     DEFAULT_HARNESS_PROJECTION,
@@ -192,6 +194,7 @@ class HarnessFakePGConnection:
                     "session_id": session_id,
                     "session_seq": args[1],
                     "retention_floor": args[2],
+                    "dispatch_generation": 0,
                     "projection": args[3],
                     "projection_epoch": args[4],
                     "trusted_handoff_seq": None,
@@ -201,6 +204,14 @@ class HarnessFakePGConnection:
                     "trusted_handoff_accepted_at": None,
                 }
             return "INSERT"
+        if (
+            "UPDATE session_fact_source" in query
+            and "dispatch_generation = $3" in query
+        ):
+            row = self.fact_source[cast(str, args[0])]
+            row["session_seq"] = args[1]
+            row["dispatch_generation"] = args[2]
+            return "UPDATE"
         if "UPDATE session_fact_source" in query and "session_seq = $2" in query:
             row = self.fact_source[cast(str, args[0])]
             row["session_seq"] = args[1]
@@ -217,6 +228,7 @@ class HarnessFakePGConnection:
                     "retention_floor": 0,
                     "projection": DEFAULT_HARNESS_PROJECTION,
                     "projection_epoch": 0,
+                    "dispatch_generation": 0,
                 },
             )
             row["projection_epoch"] = int(row["projection_epoch"]) + 1
@@ -253,14 +265,39 @@ class HarnessFakePGConnection:
                     event["projection_epoch"] = new_epoch
                     return "UPDATE"
             return "UPDATE"
-        if "INSERT INTO session_mailbox_slots" in query:
+        if (
+            "INSERT INTO session_mailbox_slots" in query
+            and "admitted_session_seq" in query
+        ):
             self.mailbox[(cast(str, args[0]), cast(str, args[1]))] = {
                 "session_id": args[0],
                 "slot_id": args[1],
-                "lane": args[2],
-                "disposition": args[3],
+                "lane": "runtime",
+                "disposition": "pending",
+                "admitted_session_seq": args[2],
+                "admitted_dispatch_generation": args[3],
                 "payload": args[4],
             }
+            return "INSERT"
+        if "INSERT INTO session_mailbox_slots" in query:
+            key = (cast(str, args[0]), cast(str, args[1]))
+            row = self.mailbox.get(
+                key,
+                {
+                    "session_id": args[0],
+                    "slot_id": args[1],
+                    "admitted_session_seq": None,
+                    "admitted_dispatch_generation": None,
+                },
+            )
+            row.update(
+                {
+                    "lane": args[2],
+                    "disposition": args[3],
+                    "payload": args[4],
+                }
+            )
+            self.mailbox[key] = row
             return "INSERT"
         if "INSERT INTO session_effect_slots" in query:
             self.effects[(cast(str, args[0]), cast(str, args[1]))] = {
@@ -455,6 +492,42 @@ class HarnessFakePGConnection:
 
     async def fetch(self, query: str, *args: object) -> list[dict[str, object]]:
         self.calls.append(("fetch", query))
+        if (
+            "FROM session_fact_source AS source" in query
+            and "LEFT JOIN session_mailbox_slots" in query
+        ):
+            session_id = cast(str, args[0])
+            source = self.fact_source.get(session_id)
+            if source is None:
+                return []
+            pending = [
+                row
+                for (row_session_id, _), row in self.mailbox.items()
+                if row_session_id == session_id
+                and row.get("admitted_session_seq") is not None
+                and row.get("disposition") in {"pending", "admitted"}
+            ]
+            if not pending:
+                return [
+                    {
+                        "dispatch_generation": source["dispatch_generation"],
+                        "slot_id": None,
+                        "disposition": None,
+                        "admitted_session_seq": None,
+                        "admitted_dispatch_generation": None,
+                        "payload": None,
+                    }
+                ]
+            return [
+                {
+                    **row,
+                    "dispatch_generation": source["dispatch_generation"],
+                }
+                for row in sorted(
+                    pending,
+                    key=lambda item: cast(int, item["admitted_session_seq"]),
+                )
+            ]
         if "FROM session_event_records" in query:
             session_id = cast(str, args[0])
             after = args[1]
@@ -1476,3 +1549,171 @@ async def test_phase_b_stores_reject_non_finite_transition_json(
         )
         is None
     )
+
+
+async def _assert_mailbox_admission_advances_dispatch_generation(
+    kind: str,
+    tmp_path: Path,
+) -> None:
+    store, owner = await _open_store(kind, tmp_path)
+    commands = (
+        RuntimeCommand(
+            command_id="command-steer",
+            command_kind="user_steer",
+            payload={"text": "inspect"},
+        ),
+        RuntimeCommand(
+            command_id="command-allow",
+            command_kind="approval_decision",
+            payload={"approved": True, "request_id": "approval-1"},
+        ),
+        RuntimeCommand(
+            command_id="command-deny",
+            command_kind="approval_decision",
+            payload={"approved": False, "request_id": "approval-2"},
+        ),
+        RuntimeCommand(
+            command_id="command-interrupt",
+            command_kind="interrupt",
+        ),
+        RuntimeCommand(
+            command_id="command-cancel",
+            command_kind="cancel",
+        ),
+    )
+
+    admissions = [
+        await store.admit_runtime_command(owner, command) for command in commands
+    ]
+
+    assert [admission.entry.admitted_session_seq for admission in admissions] == [
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+    ]
+    assert [
+        admission.entry.admitted_dispatch_generation for admission in admissions
+    ] == ["0", "0", "1", "2", "3"]
+    assert [admission.mailbox_cut for admission in admissions] == [
+        "0",
+        "0",
+        "1",
+        "2",
+        "3",
+    ]
+    assert all(not admission.idempotent for admission in admissions)
+
+    snapshot = await store.load_runtime_command_mailbox(SESSION_ID)
+    assert snapshot.mailbox_cut == "3"
+    assert tuple(entry.command for entry in snapshot.entries) == commands
+    assert [entry.admitted_session_seq for entry in snapshot.entries] == [
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+    ]
+
+    replay = await store.admit_runtime_command(owner, commands[2])
+    assert replay.idempotent
+    assert replay.entry == admissions[2].entry
+    assert replay.mailbox_cut == "3"
+
+    fact_source_before_conflict = await store.load_session_fact_source(SESSION_ID)
+    with pytest.raises(RuntimeCommandAdmissionConflictError):
+        await store.admit_runtime_command(
+            owner,
+            RuntimeCommand(
+                command_id="command-deny",
+                command_kind="approval_decision",
+                payload={"approved": True, "request_id": "approval-2"},
+            ),
+        )
+    assert (
+        await store.load_session_fact_source(SESSION_ID) == fact_source_before_conflict
+    )
+
+
+@pytest.mark.asyncio
+async def test_mailbox_admission_advances_dispatch_generation_sqlite(
+    tmp_path: Path,
+) -> None:
+    await _assert_mailbox_admission_advances_dispatch_generation("sqlite", tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_mailbox_admission_advances_dispatch_generation_postgresql(
+    tmp_path: Path,
+) -> None:
+    await _assert_mailbox_admission_advances_dispatch_generation("pg", tmp_path)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("store_kind", ["sqlite", "pg"])
+async def test_mailbox_replay_rejects_type_changed_json_payload(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store, owner = await _open_store(store_kind, tmp_path)
+    await store.admit_runtime_command(
+        owner,
+        RuntimeCommand(
+            command_id="command-type-sensitive",
+            command_kind="user_steer",
+            payload={"value": True},
+        ),
+    )
+
+    with pytest.raises(RuntimeCommandAdmissionConflictError):
+        await store.admit_runtime_command(
+            owner,
+            RuntimeCommand(
+                command_id="command-type-sensitive",
+                command_kind="user_steer",
+                payload={"value": 1},
+            ),
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("store_kind", ["sqlite", "pg"])
+async def test_runtime_command_disposition_preserves_admission_metadata(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store, owner = await _open_store(store_kind, tmp_path)
+    command = RuntimeCommand(
+        command_id="command-preserved",
+        command_kind="user_steer",
+        payload={"text": "continue"},
+    )
+    admission = await store.admit_runtime_command(owner, command)
+
+    await store.commit_authoritative_uow(
+        owner,
+        AuthoritativeUnitOfWork(
+            event=None,
+            session_state=SESSION_PAYLOAD,
+            transition_id="transition-disposition-preserves-command",
+            state_cas=OperationStateCAS(
+                run_id="run-disposition-preserves-command",
+                revision=0,
+                projection_epoch=0,
+            ),
+            state_value={"status": "running"},
+            dispositions=(AppliedCommandDisposition(command_id=command.command_id),),
+        ),
+    )
+
+    assert (await store.load_runtime_command_mailbox(SESSION_ID)).entries == ()
+    replay = await store.admit_runtime_command(owner, command)
+    assert replay.idempotent
+    assert replay.entry.command == command
+    assert replay.entry.admitted_session_seq == admission.entry.admitted_session_seq
+    assert (
+        replay.entry.admitted_dispatch_generation
+        == admission.entry.admitted_dispatch_generation
+    )
+    assert replay.entry.disposition == "applied"

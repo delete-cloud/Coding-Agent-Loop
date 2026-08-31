@@ -9,6 +9,7 @@ from agentkit.runtime.contracts import (
     CommitRef,
     CommittedFactNotice,
     OperationStateVersion,
+    RuntimeCommand,
     TransitionReceipt,
 )
 
@@ -24,7 +25,10 @@ from coding_agent.events.connected_chat import (
 from coding_agent.stores.runtime_store import (
     AuthoritativeCommit,
     AuthoritativeUnitOfWork,
+    CommandMailboxEntry,
     CommandDispositionConflictError,
+    RuntimeCommandAdmission,
+    RuntimeCommandAdmissionConflictError,
     EventRecord,
     EffectMutationConflictError,
     JSONObject,
@@ -35,8 +39,14 @@ from coding_agent.stores.runtime_store import (
     _json_to_sql,
     effect_status_may_replace,
     format_u64,
+    runtime_command_from_mailbox_payload,
+    runtime_command_invalidates_dispatch,
+    runtime_command_mailbox_payload,
+    runtime_command_mailbox_payloads_equal,
     parse_u64,
     StateVersionConflictError,
+    _sqlite_required_int,
+    _sqlite_required_str,
     TransitionFingerprintMismatchError,
     _operation_state_from_sqlite_row,
     _plain_json,
@@ -115,6 +125,120 @@ class LocalUnitOfWorkMixin:
             session_seq=commit.event.session_seq,
             idempotent=commit.idempotent,
         )
+
+    async def admit_runtime_command(
+        self,
+        authority: OwnerAuthority,
+        command: RuntimeCommand,
+    ) -> RuntimeCommandAdmission:
+        command_payload = runtime_command_mailbox_payload(command)
+        invalidates_dispatch = runtime_command_invalidates_dispatch(command)
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._assert_authority(connection, authority)
+            fact_source = self._ensure_fact_source(connection, authority.session_id)
+            existing = connection.execute(
+                """
+                SELECT * FROM session_mailbox_slots
+                WHERE session_id = ? AND slot_id = ?
+                """,
+                (authority.session_id, command.command_id),
+            ).fetchone()
+            if existing is not None:
+                admitted_session_seq = existing["admitted_session_seq"]
+                admitted_generation = existing["admitted_dispatch_generation"]
+                if admitted_session_seq is None or admitted_generation is None:
+                    raise RuntimeCommandAdmissionConflictError(
+                        "runtime command identity collides with a legacy mailbox slot"
+                    )
+                existing_payload = _json_object_from_sql(
+                    existing["payload"],
+                    context="runtime command mailbox slot",
+                )
+                if not runtime_command_mailbox_payloads_equal(
+                    existing_payload,
+                    command_payload,
+                ):
+                    raise RuntimeCommandAdmissionConflictError(
+                        "runtime command identity was reused with different content"
+                    )
+                existing_command = runtime_command_from_mailbox_payload(
+                    command_id=command.command_id,
+                    payload=existing_payload,
+                )
+                return RuntimeCommandAdmission(
+                    entry=CommandMailboxEntry(
+                        command=existing_command,
+                        admitted_session_seq=format_u64(
+                            _sqlite_required_int(
+                                existing,
+                                "admitted_session_seq",
+                                context="runtime command mailbox slot",
+                            )
+                        ),
+                        admitted_dispatch_generation=format_u64(
+                            _sqlite_required_int(
+                                existing,
+                                "admitted_dispatch_generation",
+                                context="runtime command mailbox slot",
+                            )
+                        ),
+                        disposition=_sqlite_required_str(
+                            existing,
+                            "disposition",
+                            context="runtime command mailbox slot",
+                        ),
+                    ),
+                    mailbox_cut=format_u64(fact_source.dispatch_generation_int),
+                    idempotent=True,
+                )
+
+            admitted_session_seq = fact_source.session_seq_int + 1
+            dispatch_generation = fact_source.dispatch_generation_int + int(
+                invalidates_dispatch
+            )
+            connection.execute(
+                """
+                UPDATE session_fact_source
+                SET session_seq = ?, dispatch_generation = ?
+                WHERE session_id = ?
+                """,
+                (
+                    admitted_session_seq,
+                    dispatch_generation,
+                    authority.session_id,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO session_mailbox_slots (
+                    session_id,
+                    slot_id,
+                    lane,
+                    disposition,
+                    admitted_session_seq,
+                    admitted_dispatch_generation,
+                    payload
+                )
+                VALUES (?, ?, 'runtime', 'pending', ?, ?, ?)
+                """,
+                (
+                    authority.session_id,
+                    command.command_id,
+                    admitted_session_seq,
+                    dispatch_generation,
+                    _json_to_sql(command_payload),
+                ),
+            )
+            return RuntimeCommandAdmission(
+                entry=CommandMailboxEntry(
+                    command=command,
+                    admitted_session_seq=format_u64(admitted_session_seq),
+                    admitted_dispatch_generation=format_u64(dispatch_generation),
+                    disposition="pending",
+                ),
+                mailbox_cut=format_u64(dispatch_generation),
+            )
 
     async def load_operation_state(
         self,

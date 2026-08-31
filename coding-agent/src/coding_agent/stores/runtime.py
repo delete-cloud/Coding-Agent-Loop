@@ -6,7 +6,11 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from agentkit.runtime.contracts import OperationStateVersion, TransitionReceipt
+    from agentkit.runtime.contracts import (
+        OperationStateVersion,
+        RuntimeCommand,
+        TransitionReceipt,
+    )
     from coding_agent.events.connected_chat import (
         ChatCommandAdmission,
         ChatSnapshot,
@@ -18,6 +22,7 @@ from coding_agent.stores.runtime_store import (
     AgentRunRecord,
     AuthoritativeCommit,
     AuthoritativeUnitOfWork,
+    CommandMailboxSnapshot,
     EffectLedgerSlot,
     EventRecord,
     JSONObject,
@@ -28,6 +33,7 @@ from coding_agent.stores.runtime_store import (
     RetentionFloorReplay,
     RunMessageSnapshotRecord,
     RuntimeEventRecord,
+    RuntimeCommandAdmission,
     SessionFactSourceState,
     TrustedHandoff,
 )
@@ -165,6 +171,17 @@ class HarnessFactSourceStore(Protocol):
         parent_run_id: str | None,
         session_state: JSONObject,
     ) -> ChatCommandAdmission: ...
+
+    async def admit_runtime_command(
+        self,
+        authority: OwnerAuthority,
+        command: RuntimeCommand,
+    ) -> RuntimeCommandAdmission: ...
+
+    async def load_runtime_command_mailbox(
+        self,
+        session_id: str,
+    ) -> CommandMailboxSnapshot: ...
 
     async def commit_authoritative_uow(
         self,
