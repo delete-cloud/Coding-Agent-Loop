@@ -15,6 +15,7 @@ from coding_agent.stores.pg_durable.helpers import (
     _require_payload_session,
     _required_owned_row,
 )
+from coding_agent.runtime_activation import assert_checkpoint_allowed
 
 
 class PgCheckpointMixin:
@@ -28,6 +29,9 @@ class PgCheckpointMixin:
             raise SessionOwnershipConflictError(
                 "checkpoint target belongs to another owner"
             )
+        payload = await self.load_session_payload(authority.session_id)
+        if payload is not None:
+            assert_checkpoint_allowed(payload)
 
         async def body(connection: Any) -> None:
             await self._require_owner(connection, authority)
@@ -64,6 +68,7 @@ class PgCheckpointMixin:
         snapshot: CheckpointSnapshot,
         session_payload: dict[str, Any],
     ) -> None:
+        assert_checkpoint_allowed(session_payload)
         _require_payload_session(authority, session_payload)
         meta = snapshot.meta
         if meta.session_id != authority.session_id:

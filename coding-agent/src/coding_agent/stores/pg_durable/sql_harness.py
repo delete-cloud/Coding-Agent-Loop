@@ -121,6 +121,23 @@ class PgHarnessSqlMixin:
         result JSONB NOT NULL,
         PRIMARY KEY (session_id, projection_epoch, transition_id)
     );
+    CREATE TABLE IF NOT EXISTS runtime_activation (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        new_sessions_enabled BOOLEAN NOT NULL DEFAULT FALSE
+    );
+    INSERT INTO runtime_activation (singleton, new_sessions_enabled)
+    VALUES (1, FALSE)
+    ON CONFLICT (singleton) DO NOTHING;
+    """
+
+    _CREATE_RUNTIME_ACTIVATION_SQL = """
+    CREATE TABLE IF NOT EXISTS runtime_activation (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        new_sessions_enabled BOOLEAN NOT NULL DEFAULT FALSE
+    );
+    INSERT INTO runtime_activation (singleton, new_sessions_enabled)
+    VALUES (1, FALSE)
+    ON CONFLICT (singleton) DO NOTHING;
     """
 
     _MIGRATE_HARNESS_FACT_SOURCE_SQL = """

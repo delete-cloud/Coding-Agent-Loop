@@ -26,6 +26,11 @@ from coding_agent.events.connected_chat import (
     build_chat_admission,
     build_root_settlement,
 )
+from coding_agent.runtime_activation import (
+    assert_effect_status_allowed,
+    parse_runtime_version,
+    stamp_session_payload_for_save,
+)
 from coding_agent.stores.runtime_store import (
     AuthoritativeCommit,
     AuthoritativeUnitOfWork,
@@ -2205,6 +2210,25 @@ class LocalUnitOfWorkMixin:
         tape_id = unit.session_state.get("tape_id")
         if tape_id is not None and not isinstance(tape_id, str):
             raise TypeError("session payload tape_id must be a string")
+        stored = await self.load_session_payload(authority.session_id)
+        activation = await self.load_runtime_activation()
+        stamped = stamp_session_payload_for_save(
+            incoming=unit.session_state,
+            stored=stored,
+            activation=activation,
+        )
+        runtime_version = parse_runtime_version(stamped)
+        if unit.effect is not None:
+            assert_effect_status_allowed(
+                status=unit.effect.status,
+                runtime_version=runtime_version,
+            )
+        for mutation in unit.normalized_effect_mutations:
+            assert_effect_status_allowed(
+                status=mutation.status.value,
+                runtime_version=runtime_version,
+            )
+        unit = replace(unit, session_state=stamped)
         if (
             unit.run_state is not None
             and unit.run_state.session_id != authority.session_id

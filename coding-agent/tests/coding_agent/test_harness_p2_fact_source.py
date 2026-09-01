@@ -155,6 +155,7 @@ class HarnessFakePGConnection:
         self.checkpoints: dict[str, dict[str, object]] = {}
         self.in_txn = False
         self.fail_on_operation_state_write = False
+        self.new_sessions_enabled = False
         self.fail_on_agent_run_write = False
         self._transaction_snapshot: dict[str, object] | None = None
 
@@ -177,6 +178,7 @@ class HarnessFakePGConnection:
                 "checkpoints": self.checkpoints,
                 "operation_states": self.operation_states,
                 "transition_receipts": self.transition_receipts,
+                "new_sessions_enabled": self.new_sessions_enabled,
             }
         )
 
@@ -211,6 +213,10 @@ class HarnessFakePGConnection:
             ):
                 self.session_tape_by_session[session_id] = tape_id
                 self.session_by_tape[tape_id] = session_id
+            return "INSERT"
+        if "INSERT INTO runtime_activation" in query or "UPDATE runtime_activation" in query:
+            if args:
+                self.new_sessions_enabled = bool(args[0])
             return "INSERT"
         if "INSERT INTO agent_http_sessions" in query:
             self.session_payloads[cast(str, args[0])] = cast(dict[str, object], args[1])
@@ -599,6 +605,11 @@ class HarnessFakePGConnection:
                 cast(str, args[0]),
                 {"meta": {"session_id": SESSION_ID, "tape_id": TAPE_ID}},
             )
+        if "FROM runtime_activation" in query:
+            return {
+                "singleton": 1,
+                "new_sessions_enabled": self.new_sessions_enabled,
+            }
         if "FROM agent_http_sessions" in query:
             payload = self.session_payloads.get(cast(str, args[0]))
             return None if payload is None else {"payload": payload}
