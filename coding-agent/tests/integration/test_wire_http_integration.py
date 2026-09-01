@@ -481,7 +481,7 @@ class TestSessionCatalogLiveHTTP:
 
             assert response.status_code == 200
             payload = response.json()
-            assert payload["contract_version"] == "1.0.0"
+            assert payload["contract_version"] == "1.1.0"
             assert payload["sessions"] == []
 
             assert openapi_response.status_code == 200
@@ -490,7 +490,7 @@ class TestSessionCatalogLiveHTTP:
                 schemas["SessionListResponse"]["properties"]["contract_version"][
                     "const"
                 ]
-                == "1.0.0"
+                == "1.1.0"
             )
             summary_schema = schemas["SessionSummaryResponse"]
             assert "session_id" in summary_schema["required"]

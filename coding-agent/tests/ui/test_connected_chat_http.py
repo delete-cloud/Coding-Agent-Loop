@@ -266,7 +266,7 @@ async def test_root_terminal_payload_survives_snapshot_and_sse_serialization(
 ) -> None:
     event = _fixture_event(7)
     snapshot = SimpleNamespace(
-        contract_version="1.0.0",
+        contract_version="1.1.0",
         session_id="session-01",
         projection="connected-chat",
         projection_epoch="1",

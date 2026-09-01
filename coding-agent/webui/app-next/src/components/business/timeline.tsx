@@ -37,6 +37,8 @@ function roleFor(message: TimelineMessage, t: Translate): string {
         throw new Error(`tool message ${message.id} is missing toolName`);
       }
       return message.toolError ? t("toolErrorRole") : t("toolRole");
+    case "approval":
+      return t("approvalRole");
     case "terminal": {
       if (message.terminalOutcome === undefined) {
         throw new Error(`terminal message ${message.id} is missing terminalOutcome`);
@@ -74,6 +76,43 @@ function MessageBody({ message, t }: { message: TimelineMessage; t: Translate })
             <p>{t("toolPending")}</p>
           ) : (
             <p>{message.toolOutput}</p>
+          )}
+        </>
+      );
+    }
+    case "approval": {
+      if (message.toolName === undefined) {
+        throw new Error(`approval message ${message.id} is missing toolName`);
+      }
+      if (
+        message.approvalRequestId === undefined ||
+        message.effectId === undefined ||
+        message.attemptId === undefined
+      ) {
+        throw new Error(
+          `approval message ${message.id} is missing request/effect/attempt identity`,
+        );
+      }
+      return (
+        <>
+          <p>{t("approvalRequired")}</p>
+          <p>{message.toolName}</p>
+          {message.toolArguments !== undefined && (
+            <p>
+              <code>{message.toolArguments}</code>
+            </p>
+          )}
+          <p>{message.approvalRequestId}</p>
+          <p>{message.effectId}</p>
+          <p>{message.attemptId}</p>
+          {message.approvalTargetRunId !== undefined && (
+            <>
+              <div className="msg-meta">{t("approvalChildTarget")}</div>
+              <p>{message.approvalTargetRunId}</p>
+              {message.approvalTargetParentEffectId !== undefined && (
+                <p>{message.approvalTargetParentEffectId}</p>
+              )}
+            </>
           )}
         </>
       );

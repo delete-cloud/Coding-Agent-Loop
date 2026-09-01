@@ -95,6 +95,35 @@ class _ToolResultChatPayload(_AdditiveChatPayload):
     is_error: StrictBool
 
 
+class _ApprovalRequestedChatPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    approval_request_id: str = Field(..., min_length=1)
+    tool_call_id: str = Field(..., min_length=1)
+    tool_name: str = Field(..., min_length=1)
+    arguments: dict[str, Any]
+    effect_id: str = Field(..., min_length=1)
+    attempt_id: str = Field(..., min_length=1)
+    target_run_id: str | None = Field(
+        None,
+        min_length=1,
+        exclude_if=lambda value: value is None,
+    )
+    target_parent_effect_id: str | None = Field(
+        None,
+        min_length=1,
+        exclude_if=lambda value: value is None,
+    )
+
+    @model_validator(mode="after")
+    def _child_targets_must_appear_together(
+        self,
+    ) -> _ApprovalRequestedChatPayload:
+        if (self.target_run_id is None) != (self.target_parent_effect_id is None):
+            raise ValueError("approval child targets must appear together")
+        return self
+
+
 class _RootTerminalError(BaseModel):
     model_config = ConfigDict(extra="allow", strict=True)
 
@@ -114,16 +143,18 @@ ConnectedChatPayload = (
     | _ToolCallChatPayload
     | _ToolResultChatPayload
     | _RootTerminalChatPayload
+    | _ApprovalRequestedChatPayload
 )
 
 
-_CONNECTED_CHAT_PAYLOADS: dict[str, type[_AdditiveChatPayload]] = {
+_CONNECTED_CHAT_PAYLOADS: dict[str, type[BaseModel]] = {
     "user_prompt": _TextChatPayload,
     "assistant_message": _TextChatPayload,
     "thinking": _TextChatPayload,
     "progress": _ProgressChatPayload,
     "tool_call": _ToolCallChatPayload,
     "tool_result": _ToolResultChatPayload,
+    "approval_requested": _ApprovalRequestedChatPayload,
     "root_terminal": _RootTerminalChatPayload,
 }
 
@@ -131,7 +162,7 @@ _CONNECTED_CHAT_PAYLOADS: dict[str, type[_AdditiveChatPayload]] = {
 class ConnectedChatEventSchema(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    contract_version: Literal["1.0.0"]
+    contract_version: Literal["1.1.0"]
     source_event_id: str = Field(..., min_length=1)
     session_seq: str = Field(..., pattern=r"^(0|[1-9][0-9]*)$")
     session_id: str = Field(..., min_length=1)
@@ -144,6 +175,7 @@ class ConnectedChatEventSchema(BaseModel):
         "tool_call",
         "tool_result",
         "root_terminal",
+        "approval_requested",
     ]
     created_at: datetime
     payload: ConnectedChatPayload
@@ -163,7 +195,7 @@ class ConnectedChatEventSchema(BaseModel):
 class ConnectedChatStreamControlSchema(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    contract_version: Literal["1.0.0"]
+    contract_version: Literal["1.1.0"]
     kind: Literal["replay_required"]
     reason: Literal[
         "subscriber_queue_overflow",
@@ -176,7 +208,7 @@ class ConnectedChatStreamControlSchema(BaseModel):
 class ConnectedChatSnapshotSchema(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    contract_version: Literal["1.0.0"]
+    contract_version: Literal["1.1.0"]
     session_id: str = Field(..., min_length=1)
     projection: Literal["connected-chat"]
     projection_epoch: str = Field(..., pattern=r"^(0|[1-9][0-9]*)$")
@@ -213,7 +245,7 @@ class ConnectedChatErrorResponse(BaseModel):
 
 
 class ConnectedChatCancelResponse(BaseModel):
-    contract_version: Literal["1.0.0"] = "1.0.0"
+    contract_version: Literal["1.1.0"] = "1.1.0"
     session_id: str
     run_id: str
     status: Literal["cancelling"]
@@ -271,7 +303,6 @@ class RuntimeConfigUpdateRequest(BaseModel):
     @classmethod
     def _validate_provider(cls, value: str | None) -> str | None:
         return validate_provider_value(value)
-
 
     @field_validator("model", "provider", "thinking", "approval")
     @classmethod
@@ -456,7 +487,7 @@ class SessionSummaryResponse(BaseModel):
 
 
 class SessionListResponse(BaseModel):
-    contract_version: Literal["1.0.0"] = "1.0.0"
+    contract_version: Literal["1.1.0"] = "1.1.0"
     sessions: list[SessionSummaryResponse]
 
 

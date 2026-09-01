@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from agentkit.runtime.contracts import (
+        ApprovalSettlement,
         OperationStateVersion,
         RuntimeCommand,
         TransitionReceipt,
@@ -23,6 +24,7 @@ from coding_agent.stores.runtime_store import (
     AuthoritativeCommit,
     AuthoritativeUnitOfWork,
     CommandMailboxSnapshot,
+    ChildExecutionBinding,
     EffectLedgerSlot,
     EventRecord,
     JSONObject,
@@ -30,6 +32,7 @@ from coding_agent.stores.runtime_store import (
     OperationReceiptSlot,
     ProjectionCursor,
     RawCursor,
+    RecoveredChildExecutionLease,
     RetentionFloorReplay,
     RunMessageSnapshotRecord,
     RuntimeEventRecord,
@@ -172,6 +175,12 @@ class HarnessFactSourceStore(Protocol):
         session_state: JSONObject,
     ) -> ChatCommandAdmission: ...
 
+    async def admit_new_runtime_command(
+        self,
+        authority: OwnerAuthority,
+        command: RuntimeCommand,
+    ) -> RuntimeCommandAdmission: ...
+
     async def admit_runtime_command(
         self,
         authority: OwnerAuthority,
@@ -230,6 +239,38 @@ class HarnessFactSourceStore(Protocol):
         session_id: str,
         receipt_id: str,
     ) -> OperationReceiptSlot | None: ...
+
+    async def load_child_execution_binding(
+        self,
+        session_id: str,
+        *,
+        parent_effect_id: str | None = None,
+        child_run_id: str | None = None,
+    ) -> ChildExecutionBinding | None: ...
+
+    async def acquire_recovered_child_execution_lease(
+        self,
+        authority: OwnerAuthority,
+        *,
+        child_run_id: str,
+        lease_id: str,
+    ) -> RecoveredChildExecutionLease: ...
+
+    async def rebase_recovered_child_execution_lease(
+        self,
+        authority: OwnerAuthority,
+        lease: RecoveredChildExecutionLease,
+    ) -> RecoveredChildExecutionLease: ...
+
+    async def refresh_recovered_child_execution_lease_for_approval(
+        self,
+        authority: OwnerAuthority,
+        *,
+        lease: RecoveredChildExecutionLease,
+        state_version: OperationStateVersion,
+        approval: ApprovalSettlement,
+        expected_dispatch_cut: str,
+    ) -> RecoveredChildExecutionLease: ...
 
     async def replay_raw(
         self,

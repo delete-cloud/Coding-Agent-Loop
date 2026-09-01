@@ -11,7 +11,7 @@
 // transmits them but never decodes, constructs, or edits them. The canonical
 // cursor codec is exercised byte-for-byte in wire.test.ts only.
 
-export const CONNECTED_CHAT_CONTRACT_VERSION = "1.0.0";
+export const CONNECTED_CHAT_CONTRACT_VERSION = "1.1.0";
 
 export class ContractViolationError extends Error {
   readonly path: string;
@@ -137,6 +137,17 @@ export interface ToolResultPayload {
   is_error: boolean;
   [extra: string]: unknown;
 }
+export interface ApprovalRequestedPayload {
+  approval_request_id: string;
+  tool_call_id: string;
+  tool_name: string;
+  arguments: Record<string, unknown>;
+  effect_id: string;
+  attempt_id: string;
+  target_run_id?: string;
+  target_parent_effect_id?: string;
+}
+
 
 export interface TerminalError {
   code: string;
@@ -160,6 +171,7 @@ export type ChatEventPayload =
   | ProgressPayload
   | ToolCallPayload
   | ToolResultPayload
+  | ApprovalRequestedPayload
   | RootTerminalPayload;
 
 interface EnvelopeBase {
@@ -179,6 +191,10 @@ export type ChatEventEnvelope =
   | (EnvelopeBase & { kind: "progress"; payload: ProgressPayload })
   | (EnvelopeBase & { kind: "tool_call"; payload: ToolCallPayload })
   | (EnvelopeBase & { kind: "tool_result"; payload: ToolResultPayload })
+  | (EnvelopeBase & {
+      kind: "approval_requested";
+      payload: ApprovalRequestedPayload;
+    })
   | (EnvelopeBase & { kind: "root_terminal"; payload: RootTerminalPayload });
 
 export type ChatEventKind = ChatEventEnvelope["kind"];
@@ -229,6 +245,60 @@ function parsePayload(kind: string, value: unknown): ChatEventPayload {
         output: typeof record.output === "string" ? record.output : reqString(record.output, `${path}.output`),
         is_error: reqBoolean(record.is_error, `${path}.is_error`),
       };
+    case "approval_requested": {
+      const allowed = new Set([
+        "approval_request_id",
+        "tool_call_id",
+        "tool_name",
+        "arguments",
+        "effect_id",
+        "attempt_id",
+        "target_run_id",
+        "target_parent_effect_id",
+      ]);
+      for (const key of Object.keys(record)) {
+        if (!allowed.has(key)) {
+          throw new ContractViolationError(
+            `${path}.${key}`,
+            "unknown approval_requested payload field",
+          );
+        }
+      }
+      const targetRunId =
+        record.target_run_id === undefined
+          ? undefined
+          : reqString(record.target_run_id, `${path}.target_run_id`);
+      const targetParentEffectId =
+        record.target_parent_effect_id === undefined
+          ? undefined
+          : reqString(
+              record.target_parent_effect_id,
+              `${path}.target_parent_effect_id`,
+            );
+      if ((targetRunId === undefined) !== (targetParentEffectId === undefined)) {
+        throw new ContractViolationError(
+          path,
+          "child approval targets must appear together",
+        );
+      }
+      return {
+        approval_request_id: reqString(
+          record.approval_request_id,
+          `${path}.approval_request_id`,
+        ),
+        tool_call_id: reqString(record.tool_call_id, `${path}.tool_call_id`),
+        tool_name: reqString(record.tool_name, `${path}.tool_name`),
+        arguments: reqRecord(record.arguments, `${path}.arguments`),
+        effect_id: reqString(record.effect_id, `${path}.effect_id`),
+        attempt_id: reqString(record.attempt_id, `${path}.attempt_id`),
+        ...(targetRunId === undefined
+          ? {}
+          : {
+              target_run_id: targetRunId,
+              target_parent_effect_id: targetParentEffectId,
+            }),
+      };
+    }
     case "root_terminal": {
       const outcome = reqString(record.outcome, `${path}.outcome`);
       if (!TERMINAL_OUTCOMES.has(outcome)) {

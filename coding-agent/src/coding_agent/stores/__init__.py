@@ -1,5 +1,7 @@
 """Durable store contracts for coding agent product state."""
 
+from .durable_commit_port import PostgreSQLCommitPort, SQLiteCommitPort
+
 from .runtime import (
     HarnessFactSourceStore,
     RuntimeCheckpointStore,
@@ -17,7 +19,9 @@ __all__ = [
     "RuntimeEventStore",
     "RuntimeInteractionStore",
     "RuntimeRunLifecycleStore",
+    "PostgreSQLCommitPort",
     "RuntimeRunRecoveryStore",
     "RuntimeRunStore",
     "RuntimeStore",
+    "SQLiteCommitPort",
 ]

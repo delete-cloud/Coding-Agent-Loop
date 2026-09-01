@@ -82,6 +82,38 @@ describe("Timeline dynamic messages", () => {
     expect(screen.getByText('{"path":"."}')).toBeDefined();
     expect(screen.getByText(zhMessages.timeline.toolPending)).toBeDefined();
   });
+  it("renders child approval as a visible noninteractive timeline item", () => {
+    const { container } = renderTimeline({
+      messages: [
+        msg({
+          id: "approval-1",
+          kind: "approval",
+          body: "write_file",
+          toolName: "write_file",
+          toolArguments: '{"path":"src/example.py"}',
+          approvalRequestId: "approval-01",
+          effectId: "effect-child-01",
+          attemptId: "attempt-child-01",
+          approvalTargetRunId: "child-run-1",
+          approvalTargetParentEffectId: "effect-child-01",
+        }),
+      ],
+    });
+
+    const rendered = sections(container);
+    expect(rendered).toHaveLength(1);
+    expect(roleOf(rendered[0])).toBe(zhMessages.timeline.approvalRole);
+    expect(screen.getByText(zhMessages.timeline.approvalRequired)).toBeDefined();
+    expect(screen.getByText("write_file")).toBeDefined();
+    expect(screen.getByText('{"path":"src/example.py"}')).toBeDefined();
+    expect(screen.getByText("approval-01")).toBeDefined();
+    expect(screen.getAllByText("effect-child-01")).toHaveLength(2);
+    expect(screen.getByText("attempt-child-01")).toBeDefined();
+    expect(screen.getByText("child-run-1")).toBeDefined();
+    expect(screen.getByText(zhMessages.timeline.approvalChildTarget)).toBeDefined();
+    expect(rendered[0].querySelector("button")).toBeNull();
+  });
+
 
   it("renders a tool result in place of the pending note", () => {
     renderTimeline({

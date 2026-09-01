@@ -1,8 +1,22 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Iterable
+from dataclasses import dataclass, replace
 from typing import Protocol
+from agentkit.runtime.contracts import (
+    CommittedFactSink,
+    ControlProbe,
+    FailedOutcome,
+    FrameSink,
+    RunSegmentRequest,
+    SegmentOutcome,
+)
+from coding_agent.events.child_projection import build_parent_model_context_facts
+from coding_agent.stores.durable_commit_port import (
+    AuthorizationReplayMarker,
+    AuthorizationReplayRecovery,
+)
+from coding_agent.stores.runtime_store import EventRecord
 
 from coding_agent.executors.local_daemon import (
     LocalDaemonRuntimeBinding,
@@ -32,6 +46,87 @@ from coding_agent.runs.lifecycle import (
 )
 from coding_agent.runs.persistence import RuntimeRunPersistenceService
 from coding_agent.wire.runtime import RuntimeTurnWire, RuntimeTurnWireEmitter
+
+
+def build_phase_e_turn_model_context(
+    facts: Iterable[EventRecord],
+) -> tuple[EventRecord, ...]:
+    """Non-serving Phase E context construction path."""
+
+    return build_parent_model_context_facts(facts)
+
+
+class DurableSegmentCoordinator(Protocol):
+    async def run(
+        self,
+        request: RunSegmentRequest,
+        control_probe: ControlProbe,
+        frame_sink: FrameSink,
+        committed_fact_sink: CommittedFactSink,
+    ) -> SegmentOutcome: ...
+
+
+class AuthorizationReplayPort(Protocol):
+    def consume_authorization_replay_marker(
+        self,
+        request: object,
+    ) -> AuthorizationReplayMarker | None: ...
+
+    async def recover_authorization_replay(
+        self,
+        marker: AuthorizationReplayMarker,
+    ) -> AuthorizationReplayRecovery: ...
+    async def recover_authorization_without_marker(
+        self,
+        request: object,
+    ) -> AuthorizationReplayRecovery | None: ...
+
+
+@dataclass(frozen=True)
+class DurableSegmentRunner:
+    """Hide process-local authorization replay recovery from segment callers."""
+
+    coordinator: DurableSegmentCoordinator
+    commit_port: AuthorizationReplayPort
+
+    async def run(
+        self,
+        request: RunSegmentRequest,
+        control_probe: ControlProbe,
+        frame_sink: FrameSink,
+        committed_fact_sink: CommittedFactSink,
+    ) -> SegmentOutcome:
+        current_request = request
+        while True:
+            outcome = await self.coordinator.run(
+                current_request,
+                control_probe,
+                frame_sink,
+                committed_fact_sink,
+            )
+            if not (
+                isinstance(outcome, FailedOutcome)
+                and outcome.error.code == "exact_replay_requires_recovery"
+            ):
+                return outcome
+            marker = self.commit_port.consume_authorization_replay_marker(
+                current_request
+            )
+            if marker is None:
+                recovery = await self.commit_port.recover_authorization_without_marker(
+                    current_request
+                )
+                if recovery is None:
+                    raise RuntimeError(
+                        "authorization replay failed without durable identity"
+                    )
+            else:
+                recovery = await self.commit_port.recover_authorization_replay(marker)
+            current_request = replace(
+                current_request,
+                state_version=recovery.state_version,
+                step_input=recovery.step_input,
+            )
 
 
 class RuntimeTurnConsumerFactory(Protocol):
@@ -202,6 +297,7 @@ class RuntimeTurnService:
 
 
 __all__ = [
+    "DurableSegmentRunner",
     "RuntimeProviderPreparer",
     "RuntimeTurnConsumerFactory",
     "RuntimeTurnService",

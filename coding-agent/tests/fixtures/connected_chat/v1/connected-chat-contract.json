@@ -1,67 +1,473 @@
 {
   "contract_id": "cal.connected-chat",
-  "contract_version": "1.0.0",
-  "fixture_revision": "2026-08-24.r2",
-  "projection": {"name": "connected-chat", "epoch": "7"},
-  "identity": {"dedupe_key": "source_event_id", "sequence_type": "decimal-string", "delivery": "at-least-once"},
+  "contract_version": "1.1.0",
+  "fixture_revision": "2026-08-24.r3",
+  "projection": {
+    "name": "connected-chat",
+    "epoch": "7"
+  },
+  "identity": {
+    "dedupe_key": "source_event_id",
+    "sequence_type": "decimal-string",
+    "delivery": "at-least-once"
+  },
   "cursor": {
     "type": "base64url-encoded-canonical-json",
     "python_algorithm": "base64.urlsafe_b64encode(json.dumps(payload, sort_keys=True, separators=(\",\", \":\"), ensure_ascii=False).encode(\"utf-8\")).decode(\"ascii\").rstrip(\"=\")",
-    "payload": {"v": 1, "kind": "chat", "session_id": "session-01", "projection": "connected-chat", "epoch": "7", "after_seq": "12", "high_water_seq": "20"},
+    "payload": {
+      "v": 1,
+      "kind": "chat",
+      "session_id": "session-01",
+      "projection": "connected-chat",
+      "epoch": "7",
+      "after_seq": "12",
+      "high_water_seq": "20"
+    },
     "examples": [
-      {"payload": {"v": 1, "kind": "chat", "session_id": "session-01", "projection": "connected-chat", "epoch": "7", "after_seq": "0", "high_water_seq": "20"}, "encoded": "eyJhZnRlcl9zZXEiOiIwIiwiZXBvY2giOiI3IiwiaGlnaF93YXRlcl9zZXEiOiIyMCIsImtpbmQiOiJjaGF0IiwicHJvamVjdGlvbiI6ImNvbm5lY3RlZC1jaGF0Iiwic2Vzc2lvbl9pZCI6InNlc3Npb24tMDEiLCJ2IjoxfQ"},
-      {"payload": {"v": 1, "kind": "chat", "session_id": "session-01", "projection": "connected-chat", "epoch": "7", "after_seq": "2", "high_water_seq": "20"}, "encoded": "eyJhZnRlcl9zZXEiOiIyIiwiZXBvY2giOiI3IiwiaGlnaF93YXRlcl9zZXEiOiIyMCIsImtpbmQiOiJjaGF0IiwicHJvamVjdGlvbiI6ImNvbm5lY3RlZC1jaGF0Iiwic2Vzc2lvbl9pZCI6InNlc3Npb24tMDEiLCJ2IjoxfQ"},
-      {"payload": {"v": 1, "kind": "chat", "session_id": "session-01", "projection": "connected-chat", "epoch": "7", "after_seq": "12", "high_water_seq": "20"}, "encoded": "eyJhZnRlcl9zZXEiOiIxMiIsImVwb2NoIjoiNyIsImhpZ2hfd2F0ZXJfc2VxIjoiMjAiLCJraW5kIjoiY2hhdCIsInByb2plY3Rpb24iOiJjb25uZWN0ZWQtY2hhdCIsInNlc3Npb25faWQiOiJzZXNzaW9uLTAxIiwidiI6MX0"}
+      {
+        "payload": {
+          "v": 1,
+          "kind": "chat",
+          "session_id": "session-01",
+          "projection": "connected-chat",
+          "epoch": "7",
+          "after_seq": "0",
+          "high_water_seq": "20"
+        },
+        "encoded": "eyJhZnRlcl9zZXEiOiIwIiwiZXBvY2giOiI3IiwiaGlnaF93YXRlcl9zZXEiOiIyMCIsImtpbmQiOiJjaGF0IiwicHJvamVjdGlvbiI6ImNvbm5lY3RlZC1jaGF0Iiwic2Vzc2lvbl9pZCI6InNlc3Npb24tMDEiLCJ2IjoxfQ"
+      },
+      {
+        "payload": {
+          "v": 1,
+          "kind": "chat",
+          "session_id": "session-01",
+          "projection": "connected-chat",
+          "epoch": "7",
+          "after_seq": "2",
+          "high_water_seq": "20"
+        },
+        "encoded": "eyJhZnRlcl9zZXEiOiIyIiwiZXBvY2giOiI3IiwiaGlnaF93YXRlcl9zZXEiOiIyMCIsImtpbmQiOiJjaGF0IiwicHJvamVjdGlvbiI6ImNvbm5lY3RlZC1jaGF0Iiwic2Vzc2lvbl9pZCI6InNlc3Npb24tMDEiLCJ2IjoxfQ"
+      },
+      {
+        "payload": {
+          "v": 1,
+          "kind": "chat",
+          "session_id": "session-01",
+          "projection": "connected-chat",
+          "epoch": "7",
+          "after_seq": "12",
+          "high_water_seq": "20"
+        },
+        "encoded": "eyJhZnRlcl9zZXEiOiIxMiIsImVwb2NoIjoiNyIsImhpZ2hfd2F0ZXJfc2VxIjoiMjAiLCJraW5kIjoiY2hhdCIsInByb2plY3Rpb24iOiJjb25uZWN0ZWQtY2hhdCIsInNlc3Npb25faWQiOiJzZXNzaW9uLTAxIiwidiI6MX0"
+      }
     ],
     "snapshot_semantics": "immutable high_water_seq; pages contain after_seq < session_seq <= high_water_seq",
     "continuation_semantics": "next_cursor is exclusive and advances after_seq only",
     "errors": [
-      {"case": "malformed", "status": 400, "reason": "cursor_malformed", "replay_required": false},
-      {"case": "foreign", "status": 409, "reason": "cursor_foreign_session", "replay_required": false},
-      {"case": "expired", "status": 410, "reason": "cursor_expired", "replay_required": true},
-      {"case": "wrong_epoch", "status": 409, "reason": "cursor_wrong_epoch", "replay_required": true},
-      {"case": "future", "status": 409, "reason": "cursor_future", "replay_required": false}
+      {
+        "case": "malformed",
+        "status": 400,
+        "reason": "cursor_malformed",
+        "replay_required": false
+      },
+      {
+        "case": "foreign",
+        "status": 409,
+        "reason": "cursor_foreign_session",
+        "replay_required": false
+      },
+      {
+        "case": "expired",
+        "status": 410,
+        "reason": "cursor_expired",
+        "replay_required": true
+      },
+      {
+        "case": "wrong_epoch",
+        "status": 409,
+        "reason": "cursor_wrong_epoch",
+        "replay_required": true
+      },
+      {
+        "case": "future",
+        "status": 409,
+        "reason": "cursor_future",
+        "replay_required": false
+      }
     ]
   },
   "http": {
-    "snapshot": {"method": "GET", "path": "/sessions/session-01/chat-events?limit=2", "status": 200, "response": {"contract_version": "1.0.0", "session_id": "session-01", "projection": "connected-chat", "projection_epoch": "7", "snapshot_cursor": "eyJhZnRlcl9zZXEiOiIwIiwiZXBvY2giOiI3IiwiaGlnaF93YXRlcl9zZXEiOiIyMCIsImtpbmQiOiJjaGF0IiwicHJvamVjdGlvbiI6ImNvbm5lY3RlZC1jaGF0Iiwic2Vzc2lvbl9pZCI6InNlc3Npb24tMDEiLCJ2IjoxfQ", "next_cursor": "eyJhZnRlcl9zZXEiOiIyIiwiZXBvY2giOiI3IiwiaGlnaF93YXRlcl9zZXEiOiIyMCIsImtpbmQiOiJjaGF0IiwicHJvamVjdGlvbiI6ImNvbm5lY3RlZC1jaGF0Iiwic2Vzc2lvbl9pZCI6InNlc3Npb24tMDEiLCJ2IjoxfQ", "events": []}},
-    "follow": {"method": "GET", "path": "/sessions/session-01/chat-events/follow", "cursor": "eyJhZnRlcl9zZXEiOiIxMiIsImVwb2NoIjoiNyIsImhpZ2hfd2F0ZXJfc2VxIjoiMjAiLCJraW5kIjoiY2hhdCIsInByb2plY3Rpb24iOiJjb25uZWN0ZWQtY2hhdCIsInNlc3Npb25faWQiOiJzZXNzaW9uLTAxIiwidiI6MX0", "status": 200, "media_type": "text/event-stream"},
-    "prompt": {"method": "POST", "path": "/sessions/session-01/prompt", "request": {"prompt": "Run tests", "command_id": "cmd-01"}, "media_type": "text/event-stream"},
-    "resume": {"method": "POST", "path": "/sessions/session-01/resume", "request": {"command_id": "cmd-02", "parent_run_id": "run-01", "prompt": null}, "precondition": "run-01 durably settled", "media_type": "text/event-stream"},
-    "cancel": {"method": "POST", "path": "/sessions/session-01/cancel", "status": 202, "response": {"contract_version": "1.0.0", "session_id": "session-01", "run_id": "run-01", "status": "cancelling"}},
+    "snapshot": {
+      "method": "GET",
+      "path": "/sessions/session-01/chat-events?limit=2",
+      "status": 200,
+      "response": {
+        "contract_version": "1.1.0",
+        "session_id": "session-01",
+        "projection": "connected-chat",
+        "projection_epoch": "7",
+        "snapshot_cursor": "eyJhZnRlcl9zZXEiOiIwIiwiZXBvY2giOiI3IiwiaGlnaF93YXRlcl9zZXEiOiIyMCIsImtpbmQiOiJjaGF0IiwicHJvamVjdGlvbiI6ImNvbm5lY3RlZC1jaGF0Iiwic2Vzc2lvbl9pZCI6InNlc3Npb24tMDEiLCJ2IjoxfQ",
+        "next_cursor": "eyJhZnRlcl9zZXEiOiIyIiwiZXBvY2giOiI3IiwiaGlnaF93YXRlcl9zZXEiOiIyMCIsImtpbmQiOiJjaGF0IiwicHJvamVjdGlvbiI6ImNvbm5lY3RlZC1jaGF0Iiwic2Vzc2lvbl9pZCI6InNlc3Npb24tMDEiLCJ2IjoxfQ",
+        "events": []
+      }
+    },
+    "follow": {
+      "method": "GET",
+      "path": "/sessions/session-01/chat-events/follow",
+      "cursor": "eyJhZnRlcl9zZXEiOiIxMiIsImVwb2NoIjoiNyIsImhpZ2hfd2F0ZXJfc2VxIjoiMjAiLCJraW5kIjoiY2hhdCIsInByb2plY3Rpb24iOiJjb25uZWN0ZWQtY2hhdCIsInNlc3Npb25faWQiOiJzZXNzaW9uLTAxIiwidiI6MX0",
+      "status": 200,
+      "media_type": "text/event-stream"
+    },
+    "prompt": {
+      "method": "POST",
+      "path": "/sessions/session-01/prompt",
+      "request": {
+        "prompt": "Run tests",
+        "command_id": "cmd-01"
+      },
+      "media_type": "text/event-stream"
+    },
+    "resume": {
+      "method": "POST",
+      "path": "/sessions/session-01/resume",
+      "request": {
+        "command_id": "cmd-02",
+        "parent_run_id": "run-01",
+        "prompt": null
+      },
+      "precondition": "run-01 durably settled",
+      "media_type": "text/event-stream"
+    },
+    "cancel": {
+      "method": "POST",
+      "path": "/sessions/session-01/cancel",
+      "status": 202,
+      "response": {
+        "contract_version": "1.1.0",
+        "session_id": "session-01",
+        "run_id": "run-01",
+        "status": "cancelling"
+      }
+    },
     "errors": {
       "admission": [
-        {"status": 409, "body": {"error": {"code": "turn_in_progress", "message": "A root turn is already active", "retryable": true}}},
-        {"status": 409, "body": {"error": {"code": "command_conflict", "message": "Command ID was reused with different input", "retryable": false}}},
-        {"status": 422, "body": {"error": {"code": "prompt_required", "message": "Prompt is required", "retryable": false}}}
+        {
+          "status": 409,
+          "body": {
+            "error": {
+              "code": "turn_in_progress",
+              "message": "A root turn is already active",
+              "retryable": true
+            }
+          }
+        },
+        {
+          "status": 409,
+          "body": {
+            "error": {
+              "code": "command_conflict",
+              "message": "Command ID was reused with different input",
+              "retryable": false
+            }
+          }
+        },
+        {
+          "status": 422,
+          "body": {
+            "error": {
+              "code": "prompt_required",
+              "message": "Prompt is required",
+              "retryable": false
+            }
+          }
+        }
       ],
       "lifecycle": [
-        {"status": 409, "body": {"error": {"code": "resume_source_unsettled", "message": "The source run has not durably settled", "retryable": true}}},
-        {"status": 409, "body": {"error": {"code": "no_active_turn", "message": "No active root turn exists", "retryable": false}}}
+        {
+          "status": 409,
+          "body": {
+            "error": {
+              "code": "resume_source_unsettled",
+              "message": "The source run has not durably settled",
+              "retryable": true
+            }
+          }
+        },
+        {
+          "status": 409,
+          "body": {
+            "error": {
+              "code": "no_active_turn",
+              "message": "No active root turn exists",
+              "retryable": false
+            }
+          }
+        }
       ],
       "auth": [
-        {"status": 401, "body": {"error": {"code": "credentials_required", "message": "Authentication credentials are required", "retryable": false}}}
+        {
+          "status": 401,
+          "body": {
+            "error": {
+              "code": "credentials_required",
+              "message": "Authentication credentials are required",
+              "retryable": false
+            }
+          }
+        }
       ]
     }
   },
   "events": [
-    {"event": "chat_event", "id": "12", "data": {"contract_version": "1.0.0", "source_event_id": "evt-user-01", "session_seq": "12", "session_id": "session-01", "run_id": "run-01", "kind": "user_prompt", "created_at": "2026-08-24T00:00:00Z", "payload": {"text": "Run tests"}}},
-    {"event": "chat_event", "id": "13", "data": {"contract_version": "1.0.0", "source_event_id": "evt-thinking-01", "session_seq": "13", "session_id": "session-01", "run_id": "run-01", "kind": "thinking", "created_at": "2026-08-24T00:00:01Z", "payload": {"text": "Inspecting test suite"}}},
-    {"event": "chat_event", "id": "14", "data": {"contract_version": "1.0.0", "source_event_id": "evt-progress-01", "session_seq": "14", "session_id": "session-01", "run_id": "run-01", "kind": "progress", "created_at": "2026-08-24T00:00:02Z", "payload": {"current": 1, "total": 2, "label": "Running tests"}}},
-    {"event": "chat_event", "id": "15", "data": {"contract_version": "1.0.0", "source_event_id": "evt-tool-call-01", "session_seq": "15", "session_id": "session-01", "run_id": "run-01", "kind": "tool_call", "created_at": "2026-08-24T00:00:03Z", "payload": {"call_id": "call-01", "tool_name": "bash", "arguments": {"command": "pytest"}}}},
-    {"event": "chat_event", "id": "16", "data": {"contract_version": "1.0.0", "source_event_id": "evt-tool-result-01", "session_seq": "16", "session_id": "session-01", "run_id": "run-01", "kind": "tool_result", "created_at": "2026-08-24T00:00:04Z", "payload": {"call_id": "call-01", "output": "42 passed", "is_error": false}}},
-    {"event": "chat_event", "id": "17", "data": {"contract_version": "1.0.0", "source_event_id": "evt-assistant-01", "session_seq": "17", "session_id": "session-01", "run_id": "run-01", "kind": "assistant_message", "created_at": "2026-08-24T00:00:05Z", "payload": {"text": "All tests pass."}}},
-    {"event": "chat_event", "id": "18", "data": {"contract_version": "1.0.0", "source_event_id": "evt-terminal-completed", "session_seq": "18", "session_id": "session-01", "run_id": "run-01", "kind": "root_terminal", "created_at": "2026-08-24T00:00:06Z", "payload": {"outcome": "completed", "result": "All tests pass.", "error": null}}},
-    {"event": "chat_event", "id": "19", "data": {"contract_version": "1.0.0", "source_event_id": "evt-terminal-failed", "session_seq": "19", "session_id": "session-01", "run_id": "run-02", "kind": "root_terminal", "created_at": "2026-08-24T00:01:00Z", "payload": {"outcome": "failed", "result": null, "error": {"code": "adapter_failed", "message": "Adapter failed"}}}},
-    {"event": "chat_event", "id": "20", "data": {"contract_version": "1.0.0", "source_event_id": "evt-terminal-cancelled", "session_seq": "20", "session_id": "session-01", "run_id": "run-03", "kind": "root_terminal", "created_at": "2026-08-24T00:02:00Z", "payload": {"outcome": "cancelled", "result": null, "error": null}}},
-    {"event": "chat_event", "id": "21", "data": {"contract_version": "1.0.0", "source_event_id": "evt-terminal-interrupted", "session_seq": "21", "session_id": "session-01", "run_id": "run-04", "kind": "root_terminal", "created_at": "2026-08-24T00:03:00Z", "payload": {"outcome": "interrupted", "result": null, "error": null}}}
+    {
+      "event": "chat_event",
+      "id": "12",
+      "data": {
+        "contract_version": "1.1.0",
+        "source_event_id": "evt-user-01",
+        "session_seq": "12",
+        "session_id": "session-01",
+        "run_id": "run-01",
+        "kind": "user_prompt",
+        "created_at": "2026-08-24T00:00:00Z",
+        "payload": {
+          "text": "Run tests"
+        }
+      }
+    },
+    {
+      "event": "chat_event",
+      "id": "13",
+      "data": {
+        "contract_version": "1.1.0",
+        "source_event_id": "evt-thinking-01",
+        "session_seq": "13",
+        "session_id": "session-01",
+        "run_id": "run-01",
+        "kind": "thinking",
+        "created_at": "2026-08-24T00:00:01Z",
+        "payload": {
+          "text": "Inspecting test suite"
+        }
+      }
+    },
+    {
+      "event": "chat_event",
+      "id": "14",
+      "data": {
+        "contract_version": "1.1.0",
+        "source_event_id": "evt-progress-01",
+        "session_seq": "14",
+        "session_id": "session-01",
+        "run_id": "run-01",
+        "kind": "progress",
+        "created_at": "2026-08-24T00:00:02Z",
+        "payload": {
+          "current": 1,
+          "total": 2,
+          "label": "Running tests"
+        }
+      }
+    },
+    {
+      "event": "chat_event",
+      "id": "15",
+      "data": {
+        "contract_version": "1.1.0",
+        "source_event_id": "evt-tool-call-01",
+        "session_seq": "15",
+        "session_id": "session-01",
+        "run_id": "run-01",
+        "kind": "tool_call",
+        "created_at": "2026-08-24T00:00:03Z",
+        "payload": {
+          "call_id": "call-01",
+          "tool_name": "bash",
+          "arguments": {
+            "command": "pytest"
+          }
+        }
+      }
+    },
+    {
+      "event": "chat_event",
+      "id": "16",
+      "data": {
+        "contract_version": "1.1.0",
+        "source_event_id": "evt-tool-result-01",
+        "session_seq": "16",
+        "session_id": "session-01",
+        "run_id": "run-01",
+        "kind": "tool_result",
+        "created_at": "2026-08-24T00:00:04Z",
+        "payload": {
+          "call_id": "call-01",
+          "output": "42 passed",
+          "is_error": false
+        }
+      }
+    },
+    {
+      "event": "chat_event",
+      "id": "17",
+      "data": {
+        "contract_version": "1.1.0",
+        "source_event_id": "evt-assistant-01",
+        "session_seq": "17",
+        "session_id": "session-01",
+        "run_id": "run-01",
+        "kind": "assistant_message",
+        "created_at": "2026-08-24T00:00:05Z",
+        "payload": {
+          "text": "All tests pass."
+        }
+      }
+    },
+    {
+      "event": "chat_event",
+      "id": "18",
+      "data": {
+        "contract_version": "1.1.0",
+        "source_event_id": "evt-terminal-completed",
+        "session_seq": "18",
+        "session_id": "session-01",
+        "run_id": "run-01",
+        "kind": "root_terminal",
+        "created_at": "2026-08-24T00:00:06Z",
+        "payload": {
+          "outcome": "completed",
+          "result": "All tests pass.",
+          "error": null
+        }
+      }
+    },
+    {
+      "event": "chat_event",
+      "id": "19",
+      "data": {
+        "contract_version": "1.1.0",
+        "source_event_id": "evt-terminal-failed",
+        "session_seq": "19",
+        "session_id": "session-01",
+        "run_id": "run-02",
+        "kind": "root_terminal",
+        "created_at": "2026-08-24T00:01:00Z",
+        "payload": {
+          "outcome": "failed",
+          "result": null,
+          "error": {
+            "code": "adapter_failed",
+            "message": "Adapter failed"
+          }
+        }
+      }
+    },
+    {
+      "event": "chat_event",
+      "id": "20",
+      "data": {
+        "contract_version": "1.1.0",
+        "source_event_id": "evt-terminal-cancelled",
+        "session_seq": "20",
+        "session_id": "session-01",
+        "run_id": "run-03",
+        "kind": "root_terminal",
+        "created_at": "2026-08-24T00:02:00Z",
+        "payload": {
+          "outcome": "cancelled",
+          "result": null,
+          "error": null
+        }
+      }
+    },
+    {
+      "event": "chat_event",
+      "id": "21",
+      "data": {
+        "contract_version": "1.1.0",
+        "source_event_id": "evt-terminal-interrupted",
+        "session_seq": "21",
+        "session_id": "session-01",
+        "run_id": "run-04",
+        "kind": "root_terminal",
+        "created_at": "2026-08-24T00:03:00Z",
+        "payload": {
+          "outcome": "interrupted",
+          "result": null,
+          "error": null
+        }
+      }
+    },
+    {
+      "event": "chat_event",
+      "id": "11",
+      "data": {
+        "contract_version": "1.1.0",
+        "source_event_id": "evt-approval-child-01",
+        "session_seq": "11",
+        "session_id": "session-01",
+        "run_id": "run-01",
+        "kind": "approval_requested",
+        "created_at": "2026-08-24T00:04:00Z",
+        "payload": {
+          "approval_request_id": "approval-01",
+          "tool_call_id": "call-child-01",
+          "tool_name": "write_file",
+          "arguments": {
+            "path": "src/example.py"
+          },
+          "effect_id": "effect-child-01",
+          "attempt_id": "attempt-child-01",
+          "target_run_id": "session-01:run-01:child:effect-child-01:attempt-child-01",
+          "target_parent_effect_id": "effect-child-01"
+        }
+      }
+    }
   ],
   "stream_controls": [
-    {"event": "stream_control", "data": {"contract_version": "1.0.0", "kind": "replay_required", "reason": "subscriber_queue_overflow", "cursor": "eyJhZnRlcl9zZXEiOiIxMiIsImVwb2NoIjoiNyIsImhpZ2hfd2F0ZXJfc2VxIjoiMjAiLCJraW5kIjoiY2hhdCIsInByb2plY3Rpb24iOiJjb25uZWN0ZWQtY2hhdCIsInNlc3Npb25faWQiOiJzZXNzaW9uLTAxIiwidiI6MX0"}},
-    {"event": "stream_control", "data": {"contract_version": "1.0.0", "kind": "replay_required", "reason": "ownership_lost", "cursor": "eyJhZnRlcl9zZXEiOiIxMiIsImVwb2NoIjoiNyIsImhpZ2hfd2F0ZXJfc2VxIjoiMjAiLCJraW5kIjoiY2hhdCIsInByb2plY3Rpb24iOiJjb25uZWN0ZWQtY2hhdCIsInNlc3Npb25faWQiOiJzZXNzaW9uLTAxIiwidiI6MX0"}},
-    {"event": "stream_control", "data": {"contract_version": "1.0.0", "kind": "replay_required", "reason": "sequence_loss", "cursor": "eyJhZnRlcl9zZXEiOiIxMiIsImVwb2NoIjoiNyIsImhpZ2hfd2F0ZXJfc2VxIjoiMjAiLCJraW5kIjoiY2hhdCIsInByb2plY3Rpb24iOiJjb25uZWN0ZWQtY2hhdCIsInNlc3Npb25faWQiOiJzZXNzaW9uLTAxIiwidiI6MX0"}}
+    {
+      "event": "stream_control",
+      "data": {
+        "contract_version": "1.1.0",
+        "kind": "replay_required",
+        "reason": "subscriber_queue_overflow",
+        "cursor": "eyJhZnRlcl9zZXEiOiIxMiIsImVwb2NoIjoiNyIsImhpZ2hfd2F0ZXJfc2VxIjoiMjAiLCJraW5kIjoiY2hhdCIsInByb2plY3Rpb24iOiJjb25uZWN0ZWQtY2hhdCIsInNlc3Npb25faWQiOiJzZXNzaW9uLTAxIiwidiI6MX0"
+      }
+    },
+    {
+      "event": "stream_control",
+      "data": {
+        "contract_version": "1.1.0",
+        "kind": "replay_required",
+        "reason": "ownership_lost",
+        "cursor": "eyJhZnRlcl9zZXEiOiIxMiIsImVwb2NoIjoiNyIsImhpZ2hfd2F0ZXJfc2VxIjoiMjAiLCJraW5kIjoiY2hhdCIsInByb2plY3Rpb24iOiJjb25uZWN0ZWQtY2hhdCIsInNlc3Npb25faWQiOiJzZXNzaW9uLTAxIiwidiI6MX0"
+      }
+    },
+    {
+      "event": "stream_control",
+      "data": {
+        "contract_version": "1.1.0",
+        "kind": "replay_required",
+        "reason": "sequence_loss",
+        "cursor": "eyJhZnRlcl9zZXEiOiIxMiIsImVwb2NoIjoiNyIsImhpZ2hfd2F0ZXJfc2VxIjoiMjAiLCJraW5kIjoiY2hhdCIsInByb2plY3Rpb24iOiJjb25uZWN0ZWQtY2hhdCIsInNlc3Npb25faWQiOiJzZXNzaW9uLTAxIiwidiI6MX0"
+      }
+    }
   ],
-  "overlap_example": {"replay_source_event_ids": ["evt-tool-result-01", "evt-assistant-01"], "queued_source_event_ids": ["evt-assistant-01", "evt-terminal-completed"], "visible_after_dedupe": ["evt-tool-result-01", "evt-assistant-01", "evt-terminal-completed"]},
+  "overlap_example": {
+    "replay_source_event_ids": [
+      "evt-tool-result-01",
+      "evt-assistant-01"
+    ],
+    "queued_source_event_ids": [
+      "evt-assistant-01",
+      "evt-terminal-completed"
+    ],
+    "visible_after_dedupe": [
+      "evt-tool-result-01",
+      "evt-assistant-01",
+      "evt-terminal-completed"
+    ]
+  },
   "journeys": {
     "J1": "prompt, ordered stream, one completed root terminal",
     "J2": "tool result merges into prior call despite duplicate delivery",
@@ -73,12 +479,49 @@
     "J8": "same-origin auth-disabled succeeds; enabled auth without credentials is 401"
   },
   "lifecycle": [
-    {"trigger": "normal_completion", "run_effect": "settle", "terminal": "completed", "resume": false},
-    {"trigger": "adapter_failure", "run_effect": "settle", "terminal": "failed", "resume": true},
-    {"trigger": "owning_post_disconnect", "run_effect": "interrupt", "terminal": "interrupted", "resume": true},
-    {"trigger": "passive_get_disconnect", "run_effect": "none", "terminal": null, "resume": false},
-    {"trigger": "explicit_cancel", "run_effect": "cancel", "terminal": "cancelled", "resume": true},
-    {"trigger": "sse_eof", "run_effect": "none", "terminal": null, "resume": false}
+    {
+      "trigger": "normal_completion",
+      "run_effect": "settle",
+      "terminal": "completed",
+      "resume": false
+    },
+    {
+      "trigger": "adapter_failure",
+      "run_effect": "settle",
+      "terminal": "failed",
+      "resume": true
+    },
+    {
+      "trigger": "owning_post_disconnect",
+      "run_effect": "interrupt",
+      "terminal": "interrupted",
+      "resume": true
+    },
+    {
+      "trigger": "passive_get_disconnect",
+      "run_effect": "none",
+      "terminal": null,
+      "resume": false
+    },
+    {
+      "trigger": "explicit_cancel",
+      "run_effect": "cancel",
+      "terminal": "cancelled",
+      "resume": true
+    },
+    {
+      "trigger": "sse_eof",
+      "run_effect": "none",
+      "terminal": null,
+      "resume": false
+    }
   ],
-  "deployment": {"production_api_base": "same-origin", "development_override": "NEXT_PUBLIC_CODING_AGENT_API_URL", "implicit_localhost_fallback": false, "auth_disabled_loopback": true, "auth_enabled_missing_credentials_status": 401, "login_ui": false}
+  "deployment": {
+    "production_api_base": "same-origin",
+    "development_override": "NEXT_PUBLIC_CODING_AGENT_API_URL",
+    "implicit_localhost_fallback": false,
+    "auth_disabled_loopback": true,
+    "auth_enabled_missing_credentials_status": 401,
+    "login_ui": false
+  }
 }

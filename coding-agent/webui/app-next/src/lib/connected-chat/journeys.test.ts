@@ -342,7 +342,7 @@ describe("connected-chat fixture journeys J1-J8", () => {
       `${origin}/sessions/${SESSION_ID}/chat-events?limit=2`,
       expect.objectContaining({ method: "GET" }),
     );
-    expect(snapshot.contract_version).toBe("1.0.0");
+    expect(snapshot.contract_version).toBe("1.1.0");
 
     for (const operation of J8_AUTH_OPERATIONS) {
       const authFetch = vi.fn(async () =>

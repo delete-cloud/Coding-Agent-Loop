@@ -39,7 +39,7 @@ export async function resolveCatalog(backend: FakeBackend, sessions: ChatSession
   if (!pending) throw new Error("expected a pending listSessions call");
   const snapshotsBefore = backend.snapshotCalls.length;
   await act(async () => {
-    pending.resolve({ contract_version: "1.0.0", sessions });
+    pending.resolve({ contract_version: "1.1.0", sessions });
     await flush();
   });
   if (sessions.length === 0) return;

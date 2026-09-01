@@ -76,7 +76,7 @@ def _chat_stream_openapi_response(description: str) -> dict[str, object]:
                     "chat_event": {
                         "summary": "Canonical connected-chat event frame data",
                         "value": {
-                            "contract_version": "1.0.0",
+                            "contract_version": "1.1.0",
                             "source_event_id": "evt-user-01",
                             "session_seq": "12",
                             "session_id": "session-01",
@@ -89,7 +89,7 @@ def _chat_stream_openapi_response(description: str) -> dict[str, object]:
                     "stream_control": {
                         "summary": "Replay-required stream control frame data",
                         "value": {
-                            "contract_version": "1.0.0",
+                            "contract_version": "1.1.0",
                             "kind": "replay_required",
                             "reason": "subscriber_queue_overflow",
                             "cursor": "eyJhZnRlcl9zZXEiOiIxMiIsImVwb2NoIjoiNyIsImhpZ2hfd2F0ZXJfc2VxIjoiMjAiLCJraW5kIjoiY2hhdCIsInByb2plY3Rpb24iOiJjb25uZWN0ZWQtY2hhdCIsInNlc3Npb25faWQiOiJzZXNzaW9uLTAxIiwidiI6MX0",
@@ -278,7 +278,11 @@ class ChatFollowBridge:
                         owner_task,
                         return_exceptions=True,
                     )
-                if overflow_task.done() and not overflow_task.cancelled() and subscriber.overflowed.is_set():
+                if (
+                    overflow_task.done()
+                    and not overflow_task.cancelled()
+                    and subscriber.overflowed.is_set()
+                ):
                     yield StreamControl(
                         "replay_required",
                         "subscriber_queue_overflow",
@@ -306,7 +310,10 @@ class ChatFollowBridge:
                                 self.cursor(last_safe, high_water),
                             )
                             return
-                        if not recovered or recovered[-1].session_seq != event.session_seq:
+                        if (
+                            not recovered
+                            or recovered[-1].session_seq != event.session_seq
+                        ):
                             yield StreamControl(
                                 "replay_required",
                                 "sequence_loss",

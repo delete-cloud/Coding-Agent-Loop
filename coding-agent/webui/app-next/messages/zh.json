@@ -48,6 +48,9 @@
     "toolRole": "tool",
     "toolErrorRole": "tool · error",
     "toolPending": "执行中…",
+    "approvalRole": "需要审批",
+    "approvalRequired": "此工具需获批后才能执行。",
+    "approvalChildTarget": "由子运行发起",
     "terminalCompletedRole": "terminal · completed",
     "terminalFailedRole": "terminal · failed",
     "terminalCancelledRole": "terminal · cancelled",
@@ -82,7 +85,9 @@
     "replayRequired": "事件流出现空洞——请重新加载会话以继续。",
     "model": "发送模型",
     "provider": "供应商",
-    "searchModels": "搜索模型"
+    "searchModels": "搜索模型",
+    "modelsLoading": "正在加载模型…",
+    "modelsEmpty": "远端暂无模型"
   },
   "details": {
     "label": "详情面板",

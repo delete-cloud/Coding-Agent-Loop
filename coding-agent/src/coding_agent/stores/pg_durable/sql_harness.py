@@ -70,6 +70,22 @@ class PgHarnessSqlMixin:
             session_id, effect_id, attempt_id, authorization_transition_id
         )
     );
+    CREATE TABLE IF NOT EXISTS session_child_bindings (
+        session_id TEXT NOT NULL,
+        parent_effect_id TEXT NOT NULL,
+        child_run_id TEXT NOT NULL,
+        payload JSONB NOT NULL,
+        PRIMARY KEY (session_id, parent_effect_id),
+        UNIQUE (session_id, child_run_id)
+    );
+    CREATE TABLE IF NOT EXISTS session_recovery_leases (
+        session_id TEXT NOT NULL,
+        lease_id TEXT NOT NULL,
+        child_run_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        payload JSONB NOT NULL,
+        PRIMARY KEY (session_id, lease_id)
+    );
     CREATE TABLE IF NOT EXISTS session_receipt_slots (
         session_id TEXT NOT NULL,
         receipt_id TEXT NOT NULL,

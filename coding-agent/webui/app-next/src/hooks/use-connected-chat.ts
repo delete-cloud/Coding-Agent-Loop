@@ -52,6 +52,7 @@ export type TimelineMessageKind =
   | "thinking"
   | "progress"
   | "tool"
+  | "approval"
   | "terminal";
 
 export interface TimelineMessage {
@@ -67,6 +68,12 @@ export interface TimelineMessage {
   toolError?: boolean;
   progress?: { current: number; total: number };
   terminalOutcome?: TerminalOutcome;
+  approvalRequestId?: string;
+  toolCallId?: string;
+  effectId?: string;
+  attemptId?: string;
+  approvalTargetRunId?: string;
+  approvalTargetParentEffectId?: string;
 }
 
 /** Project the canonical timeline into view messages. Pure and total. */
@@ -107,6 +114,20 @@ export function timelineToMessages(timeline: TimelineState): TimelineMessage[] {
         }
         return message;
       }
+      case "approval_requested":
+        return {
+          ...base,
+          kind: "approval",
+          body: event.payload.tool_name,
+          toolName: event.payload.tool_name,
+          toolArguments: JSON.stringify(event.payload.arguments),
+          approvalRequestId: event.payload.approval_request_id,
+          toolCallId: event.payload.tool_call_id,
+          effectId: event.payload.effect_id,
+          attemptId: event.payload.attempt_id,
+          approvalTargetRunId: event.payload.target_run_id,
+          approvalTargetParentEffectId: event.payload.target_parent_effect_id,
+        };
       case "root_terminal":
         return {
           ...base,

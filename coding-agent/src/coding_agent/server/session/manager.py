@@ -119,15 +119,20 @@ class SessionManager(
     async def _publish_chat_commit(self, commit: Any) -> None:
         from coding_agent.events.connected_chat import project_chat_event
 
-        run_id = commit.event.payload.get("run_id")
-        run = None
-        if isinstance(run_id, str):
-            run = await self._require_runtime_store().load_agent_run(run_id)
-        event = project_chat_event(commit.event, run)
-        if event is None:
-            return
-        for subscriber in tuple(self._chat_subscribers.get(event.session_id, ())):
-            subscriber.publish(event)
+        records = (() if commit.event is None else (commit.event,)) + tuple(
+            getattr(commit, "facts", ())
+        )
+        store = self._require_runtime_store()
+        for record in records:
+            run_id = record.payload.get("run_id")
+            run = None
+            if isinstance(run_id, str):
+                run = await store.load_agent_run(run_id)
+            event = project_chat_event(record, run)
+            if event is None:
+                continue
+            for subscriber in tuple(self._chat_subscribers.get(event.session_id, ())):
+                subscriber.publish(event)
 
     async def snapshot_chat_events(
         self, session_id: str, *, cursor: str | None, limit: int
@@ -277,7 +282,6 @@ class SessionManager(
             unregister=unregister,
             read_epoch=read_epoch,
         ).follow(after_seq=after_seq)
-
 
     def stream_chat_command(
         self, session_id: str, *, admission: Any
@@ -431,7 +435,6 @@ class SessionManager(
             session.turn_in_progress = True
             session.current_turn_id = admission.run_id
         return task
-
 
     async def _command_prompt(self, session_id: str, command_id: str) -> str:
         store = self._authoritative_store()

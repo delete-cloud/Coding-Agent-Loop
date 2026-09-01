@@ -58,7 +58,7 @@ describe("fixture identity", () => {
   it("pins contract id, version, and revision", () => {
     expect(fixture.contract_id).toBe("cal.connected-chat");
     expect(fixture.contract_version).toBe(CONNECTED_CHAT_CONTRACT_VERSION);
-    expect(fixture.fixture_revision).toBe("2026-08-24.r2");
+    expect(fixture.fixture_revision).toBe("2026-08-24.r3");
     expect(fixture.projection).toEqual({ name: "connected-chat", epoch: "7" });
   });
 
@@ -81,7 +81,7 @@ describe("fixture identity", () => {
 });
 
 describe("parseChatEvent", () => {
-  it("parses all seven event kinds from the fixture", () => {
+  it("parses all eight event kinds from the fixture", () => {
     const kinds = [
       "user_prompt",
       "thinking",
@@ -89,6 +89,7 @@ describe("parseChatEvent", () => {
       "tool_call",
       "tool_result",
       "assistant_message",
+      "approval_requested",
       "root_terminal",
     ];
     for (const kind of kinds) {
@@ -130,6 +131,37 @@ describe("parseChatEvent", () => {
     expect(result.payload.output).toBe("42 passed");
     expect(result.payload.is_error).toBe(false);
   });
+  it("parses an exact child approval payload on the parent envelope", () => {
+    const approval = parseChatEvent(
+      eventsByKind("approval_requested")[0].data,
+    );
+    if (approval.kind !== "approval_requested") {
+      throw new Error("wrong kind");
+    }
+    expect(approval.run_id).toBe("run-01");
+    expect(approval.payload).toEqual({
+      approval_request_id: "approval-01",
+      tool_call_id: "call-child-01",
+      tool_name: "write_file",
+      arguments: { path: "src/example.py" },
+      effect_id: "effect-child-01",
+      attempt_id: "attempt-child-01",
+      target_run_id:
+        "session-01:run-01:child:effect-child-01:attempt-child-01",
+      target_parent_effect_id: "effect-child-01",
+    });
+  });
+
+  it("rejects additive fields on approval payloads", () => {
+    const base = eventsByKind("approval_requested")[0].data;
+    expect(() =>
+      parseChatEvent({
+        ...base,
+        payload: { ...base.payload, action_url: "/unsafe" },
+      }),
+    ).toThrow(ContractViolationError);
+  });
+
 
   it("preserves unknown additive payload fields", () => {
     const base = eventsByKind("user_prompt")[0].data;
