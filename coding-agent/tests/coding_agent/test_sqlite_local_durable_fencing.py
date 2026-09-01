@@ -848,6 +848,7 @@ async def test_sqlite_local_durable_store_rejects_stale_epoch_for_session_metada
         "id": "session-a",
         "session_id": "session-a",
         "tape_id": "tape-a",
+        "runtime_version": "legacy",
     }
 
 

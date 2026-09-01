@@ -28,6 +28,10 @@ from coding_agent.stores.pg_durable.helpers import (
     _required_dict,
     _required_str,
 )
+from coding_agent.runtime_activation import (
+    RuntimeActivationState,
+    stamp_session_payload_for_save,
+)
 
 
 class PgCoreMixin:
@@ -48,6 +52,7 @@ class PgCoreMixin:
         _ = await pool.execute(PGTopicStore._CREATE_SCHEMA_SQL)
         _ = await pool.execute(self._CREATE_HARNESS_FACT_SOURCE_SQL)
         _ = await pool.execute(self._MIGRATE_HARNESS_FACT_SOURCE_SQL)
+        _ = await pool.execute(self._CREATE_RUNTIME_ACTIVATION_SQL)
         self._schema_ready = True
 
     async def _with_transaction(self, body: Callable[[Any], Any]) -> Any:
@@ -83,6 +88,51 @@ class PgCoreMixin:
             return None
         return _required_str(dict(row), "session_id")
 
+    async def load_runtime_activation(self) -> RuntimeActivationState:
+        await self._ensure_schema()
+        pool = await self._pool.get_pool()
+        row = await pool.fetchrow(
+            """
+            SELECT new_sessions_enabled FROM runtime_activation
+            WHERE singleton = 1
+            """
+        )
+        enabled = False if row is None else bool(row["new_sessions_enabled"])
+        return RuntimeActivationState(new_sessions_enabled=enabled)
+
+    async def set_new_session_runtime_activation(
+        self,
+        *,
+        enabled: bool,
+    ) -> RuntimeActivationState:
+        async def body(connection: Any) -> None:
+            await connection.execute(
+                """
+                INSERT INTO runtime_activation (singleton, new_sessions_enabled)
+                VALUES (1, $1)
+                ON CONFLICT (singleton) DO UPDATE SET
+                    new_sessions_enabled = EXCLUDED.new_sessions_enabled
+                """,
+                enabled,
+            )
+
+        await self._with_transaction(body)
+        return RuntimeActivationState(new_sessions_enabled=enabled)
+
+    async def load_session_payload(self, session_id: str) -> dict[str, Any] | None:
+        await self._ensure_schema()
+        pool = await self._pool.get_pool()
+        row = await pool.fetchrow(
+            "SELECT payload FROM agent_http_sessions WHERE session_id = $1",
+            session_id,
+        )
+        if row is None:
+            return None
+        payload = row["payload"]
+        if not isinstance(payload, dict):
+            raise TypeError("postgres session payload must be a JSON object")
+        return payload
+
     async def save_session(
         self,
         authority: OwnerAuthority,
@@ -95,16 +145,37 @@ class PgCoreMixin:
 
         async def body(connection: Any) -> None:
             await self._require_owner(connection, authority)
-            if tape_id:
-                await self._bind_tape(connection, authority.session_id, tape_id)
-            _ = await connection.fetchrow(
+            stored_row = await connection.fetchrow(
                 self._SELECT_SESSION_FOR_UPDATE_SQL,
                 authority.session_id,
             )
+            stored = None if stored_row is None else stored_row["payload"]
+            if stored is not None and not isinstance(stored, dict):
+                raise TypeError("postgres session payload must be a JSON object")
+            activation_row = await connection.fetchrow(
+                """
+                SELECT new_sessions_enabled FROM runtime_activation
+                WHERE singleton = 1
+                """
+            )
+            activation = RuntimeActivationState(
+                new_sessions_enabled=(
+                    False
+                    if activation_row is None
+                    else bool(activation_row["new_sessions_enabled"])
+                )
+            )
+            stamped = stamp_session_payload_for_save(
+                incoming=payload,
+                stored=stored,
+                activation=activation,
+            )
+            if tape_id:
+                await self._bind_tape(connection, authority.session_id, tape_id)
             await connection.execute(
                 self._UPSERT_SESSION_SQL,
                 authority.session_id,
-                payload,
+                stamped,
             )
 
         await self._with_transaction(body)

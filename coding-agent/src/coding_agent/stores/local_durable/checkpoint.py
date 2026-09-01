@@ -32,6 +32,7 @@ from coding_agent.stores.local_durable.helpers import (
     _require_json_object,
     _require_non_empty,
 )
+from coding_agent.runtime_activation import assert_checkpoint_allowed
 
 
 class LocalCheckpointMixin:
@@ -43,6 +44,9 @@ class LocalCheckpointMixin:
         meta = snapshot.meta
         if meta.session_id != authority.session_id:
             raise SessionOwnershipConflictError("checkpoint belongs to another session")
+        session_payload = self.load_session(authority.session_id)
+        if session_payload is not None:
+            assert_checkpoint_allowed(session_payload)
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._assert_authority(connection, authority)
@@ -137,6 +141,7 @@ class LocalCheckpointMixin:
         snapshot: CheckpointSnapshot,
         session_payload: SessionPayload,
     ) -> None:
+        assert_checkpoint_allowed(session_payload)
         meta = snapshot.meta
         if meta.session_id != authority.session_id:
             raise SessionOwnershipConflictError("checkpoint belongs to another session")

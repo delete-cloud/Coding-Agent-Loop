@@ -947,7 +947,10 @@ async def test_sqlite_phase_b_schema_upgrade_preserves_existing_store(
 
     reopened = SQLiteLocalDurableStore(path)
 
-    assert reopened.load_session(SESSION_ID) == SESSION_STATE
+    assert reopened.load_session(SESSION_ID) == {
+        **SESSION_STATE,
+        "runtime_version": "legacy",
+    }
     with reopened._connect() as connection:
         table_names = {
             row["name"]

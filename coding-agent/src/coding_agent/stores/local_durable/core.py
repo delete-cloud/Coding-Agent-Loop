@@ -31,6 +31,10 @@ from coding_agent.stores.local_durable.helpers import (
     _require_json_object,
     _require_non_empty,
 )
+from coding_agent.runtime_activation import (
+    RuntimeActivationState,
+    stamp_session_payload_for_save,
+)
 
 
 class LocalCoreMixin:
@@ -137,6 +141,15 @@ class LocalCoreMixin:
     );
     """
 
+    _RUNTIME_ACTIVATION_SCHEMA_SQL: Final[str] = """
+    CREATE TABLE IF NOT EXISTS runtime_activation (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        new_sessions_enabled INTEGER NOT NULL DEFAULT 0
+    );
+    INSERT OR IGNORE INTO runtime_activation (singleton, new_sessions_enabled)
+    VALUES (1, 0);
+    """
+
     def __init__(self, path: Path) -> None:
         self._path = path
         self._lock = threading.Lock()
@@ -150,6 +163,7 @@ class LocalCoreMixin:
             connection.executescript(SQLiteTopicStore._CREATE_SCHEMA_SQL)
             connection.executescript(self._SESSION_TAPES_SCHEMA_SQL)
             connection.executescript(self._HARNESS_FACT_SOURCE_SCHEMA_SQL)
+            connection.executescript(self._RUNTIME_ACTIVATION_SCHEMA_SQL)
             self._ensure_harness_fact_source_columns(connection)
 
     def _connect(self) -> sqlite3.Connection:
@@ -181,6 +195,38 @@ class LocalCoreMixin:
             lease_seconds=lease_seconds,
         )
 
+    async def load_runtime_activation(self) -> RuntimeActivationState:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT new_sessions_enabled FROM runtime_activation
+                WHERE singleton = 1
+                """,
+            ).fetchone()
+        enabled = False if row is None else bool(row["new_sessions_enabled"])
+        return RuntimeActivationState(new_sessions_enabled=enabled)
+
+    async def set_new_session_runtime_activation(
+        self,
+        *,
+        enabled: bool,
+    ) -> RuntimeActivationState:
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                INSERT INTO runtime_activation (singleton, new_sessions_enabled)
+                VALUES (1, ?)
+                ON CONFLICT(singleton) DO UPDATE SET
+                    new_sessions_enabled = excluded.new_sessions_enabled
+                """,
+                (1 if enabled else 0,),
+            )
+        return RuntimeActivationState(new_sessions_enabled=enabled)
+
+    async def load_session_payload(self, session_id: str) -> SessionPayload | None:
+        return self.load_session(session_id)
+
     async def save_session(
         self,
         authority: OwnerAuthority,
@@ -206,6 +252,33 @@ class LocalCoreMixin:
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._assert_authority(connection, authority)
+            stored_row = connection.execute(
+                "SELECT payload FROM agent_http_sessions WHERE session_id = ?",
+                (authority.session_id,),
+            ).fetchone()
+            stored = (
+                None if stored_row is None else json.loads(str(stored_row["payload"]))
+            )
+            if stored is not None and not isinstance(stored, dict):
+                raise TypeError("sqlite session payload must be a JSON object")
+            activation_row = connection.execute(
+                """
+                SELECT new_sessions_enabled FROM runtime_activation
+                WHERE singleton = 1
+                """,
+            ).fetchone()
+            activation = RuntimeActivationState(
+                new_sessions_enabled=(
+                    False
+                    if activation_row is None
+                    else bool(activation_row["new_sessions_enabled"])
+                )
+            )
+            stamped = stamp_session_payload_for_save(
+                incoming=payload,
+                stored=stored,
+                activation=activation,
+            )
             if tape_id:
                 self._bind_tape(connection, authority.session_id, tape_id)
             connection.execute(
@@ -216,7 +289,7 @@ class LocalCoreMixin:
                 DO UPDATE SET payload = excluded.payload,
                               updated_at = CURRENT_TIMESTAMP
                 """,
-                (authority.session_id, json.dumps(payload, sort_keys=True)),
+                (authority.session_id, json.dumps(stamped, sort_keys=True)),
             )
 
     async def delete_session(self, authority: OwnerAuthority) -> None:

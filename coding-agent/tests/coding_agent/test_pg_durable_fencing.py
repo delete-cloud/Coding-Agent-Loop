@@ -591,13 +591,14 @@ async def test_pg_durable_session_save_binds_unique_tape_in_transaction() -> Non
     )
 
     labels = [call[1] for call in pool.connection.calls]
-    assert labels[:6] == [
+    assert labels[:7] == [
         "BEGIN",
         "SELECT owner_id, lease_expires_at, fencing_token FROM session_owners WHERE session_id = $1 FOR UPDATE",
+        "SELECT payload FROM agent_http_sessions WHERE session_id = $1 FOR UPDATE",
+        "SELECT new_sessions_enabled FROM runtime_activation WHERE singleton = 1",
         "INSERT INTO session_tapes (session_id, tape_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
         "SELECT tape_id FROM session_tapes WHERE session_id = $1 FOR UPDATE",
         "SELECT session_id FROM session_tapes WHERE tape_id = $1 FOR UPDATE",
-        "SELECT payload FROM agent_http_sessions WHERE session_id = $1 FOR UPDATE",
     ]
 
 
