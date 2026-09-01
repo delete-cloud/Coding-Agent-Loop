@@ -16,6 +16,8 @@ from agentkit.runtime.contracts import (
     EffectPlan,
     EffectStatus,
     OperationStateCAS,
+    ReconciliationOutcome,
+    ReconciliationRecord,
     RejectedCommandDisposition,
     RuntimeCommand,
 )
@@ -35,6 +37,9 @@ from coding_agent.stores.runtime_store import (
     CursorEpochMismatchError,
     DEFAULT_HARNESS_PROJECTION,
     EffectLedgerSlot,
+    EffectMutationConflictError,
+    EffectReconciliationEvidence,
+    ExecutorAttemptConflictError,
     EventRecord,
     JSONLRuntimeStore,
     KeyExpiredError,
@@ -43,9 +48,11 @@ from coding_agent.stores.runtime_store import (
     ProjectionCursor,
     RawCursor,
     TrustedHandoff,
+    RecoveryEvidenceConflictError,
     StaleMailboxCutError,
     StateVersionConflictError,
     TransitionFingerprintMismatchError,
+    state_value_with_reconciled_effect,
 )
 
 
@@ -126,6 +133,8 @@ class HarnessFakePGConnection:
         self.events: list[dict[str, object]] = []
         self.mailbox: dict[tuple[str, str], dict[str, object]] = {}
         self.effects: dict[tuple[str, str], dict[str, object]] = {}
+        self.reconciliation_evidence: dict[tuple[str, str], dict[str, object]] = {}
+        self.executor_attempts: dict[tuple[str, str, str, str], dict[str, object]] = {}
         self.receipts: dict[tuple[str, str], dict[str, object]] = {}
         self.operation_states: dict[tuple[str, str], dict[str, object]] = {}
         self.transition_receipts: dict[tuple[str, int, str], dict[str, object]] = {}
@@ -146,6 +155,8 @@ class HarnessFakePGConnection:
                 "events": self.events,
                 "mailbox": self.mailbox,
                 "effects": self.effects,
+                "reconciliation_evidence": self.reconciliation_evidence,
+                "executor_attempts": self.executor_attempts,
                 "receipts": self.receipts,
                 "agent_runs": self.agent_runs,
                 "checkpoints": self.checkpoints,
@@ -345,6 +356,46 @@ class HarnessFakePGConnection:
                     "result": args[4],
                 }
             return "INSERT"
+        if "INSERT INTO session_effect_reconciliation_evidence" in query:
+            key = (cast(str, args[0]), cast(str, args[1]))
+            self.reconciliation_evidence[key] = {
+                "session_id": args[0],
+                "evidence_ref": args[1],
+                "effect_id": args[2],
+                "attempt_id": args[3],
+                "authorization_transition_id": args[4],
+                "reconciliation_owner_epoch": args[5],
+                "payload": args[6],
+            }
+            return "INSERT"
+        if "INSERT INTO session_executor_attempts" in query:
+            key = (
+                cast(str, args[0]),
+                cast(str, args[1]),
+                cast(str, args[2]),
+                cast(str, args[3]),
+            )
+            self.executor_attempts[key] = {
+                "session_id": args[0],
+                "effect_id": args[1],
+                "attempt_id": args[2],
+                "authorization_transition_id": args[3],
+                "dispatch_owner_epoch": args[4],
+                "status": args[5],
+                "payload": args[6],
+            }
+            return "INSERT"
+        if "UPDATE session_executor_attempts" in query:
+            key = (
+                cast(str, args[0]),
+                cast(str, args[1]),
+                cast(str, args[2]),
+                cast(str, args[3]),
+            )
+            row = self.executor_attempts[key]
+            row["status"] = args[4]
+            row["payload"] = args[5]
+            return "UPDATE"
         if "INSERT INTO agent_runs" in query:
             if self.fail_on_agent_run_write:
                 self.fail_on_agent_run_write = False
@@ -418,6 +469,29 @@ class HarnessFakePGConnection:
             return self.mailbox.get((cast(str, args[0]), cast(str, args[1])))
         if "FROM session_effect_slots" in query:
             return self.effects.get((cast(str, args[0]), cast(str, args[1])))
+        if "FROM session_effect_reconciliation_evidence" in query:
+            if "evidence_ref = $2" in query:
+                return self.reconciliation_evidence.get(
+                    (cast(str, args[0]), cast(str, args[1]))
+                )
+            for row in self.reconciliation_evidence.values():
+                if (
+                    row["session_id"] == args[0]
+                    and row["effect_id"] == args[1]
+                    and row["attempt_id"] == args[2]
+                    and row["authorization_transition_id"] == args[3]
+                ):
+                    return row
+            return None
+        if "FROM session_executor_attempts" in query:
+            return self.executor_attempts.get(
+                (
+                    cast(str, args[0]),
+                    cast(str, args[1]),
+                    cast(str, args[2]),
+                    cast(str, args[3]),
+                )
+            )
         if "FROM session_receipt_slots" in query:
             return self.receipts.get((cast(str, args[0]), cast(str, args[1])))
         if "FROM session_operation_states" in query:
@@ -486,6 +560,31 @@ class HarnessFakePGConnection:
             await self.execute(query, *args)
             return self.transition_receipts[
                 (cast(str, args[0]), cast(int, args[1]), cast(str, args[2]))
+            ]
+        if "INSERT INTO session_effect_reconciliation_evidence" in query:
+            await self.execute(query, *args)
+            return self.reconciliation_evidence[
+                (cast(str, args[0]), cast(str, args[1]))
+            ]
+        if "INSERT INTO session_executor_attempts" in query:
+            await self.execute(query, *args)
+            return self.executor_attempts[
+                (
+                    cast(str, args[0]),
+                    cast(str, args[1]),
+                    cast(str, args[2]),
+                    cast(str, args[3]),
+                )
+            ]
+        if "UPDATE session_executor_attempts" in query:
+            await self.execute(query, *args)
+            return self.executor_attempts[
+                (
+                    cast(str, args[0]),
+                    cast(str, args[1]),
+                    cast(str, args[2]),
+                    cast(str, args[3]),
+                )
             ]
         if "INSERT INTO agent_runs" in query:
             await self.execute(query, *args)
@@ -1251,6 +1350,7 @@ def _phase_b_pg_dispatch_unit(
     effect_id: str,
     attempt_id: str,
     expected_mailbox_cut: str,
+    state_value: dict[str, object] | None = None,
 ) -> AuthoritativeUnitOfWork:
     return AuthoritativeUnitOfWork(
         event=None,
@@ -1261,7 +1361,9 @@ def _phase_b_pg_dispatch_unit(
             revision=revision,
             projection_epoch=0,
         ),
-        state_value={"transition": transition_id},
+        state_value=(
+            {"transition": transition_id} if state_value is None else state_value
+        ),
         effect_mutation=EffectMutation(
             effect_id=effect_id,
             attempt_id=attempt_id,
@@ -1271,6 +1373,47 @@ def _phase_b_pg_dispatch_unit(
         ),
         expected_mailbox_cut=expected_mailbox_cut,
     )
+
+
+def _phase_d4_pg_state(
+    *,
+    effect_id: str,
+    attempt_id: str,
+    authorization_transition_id: str,
+    unknown_input_id: str | None = None,
+) -> dict[str, object]:
+    active = {
+        "effect_id": effect_id,
+        "attempt_id": attempt_id,
+        "tool_call_id": "call-pg-recovery",
+        "tool_name": "read",
+        "authorization_transition_id": authorization_transition_id,
+        "dispatch_owner_epoch": 1,
+    }
+    runtime: dict[str, object] = {
+        "pending_effect_plans": (
+            {
+                "effect_id": effect_id,
+                "attempt_id": attempt_id,
+                "effect_kind": "tool",
+                "payload": {
+                    "tool_call_id": "call-pg-recovery",
+                    "tool_name": "read",
+                },
+                "requires_approval": False,
+                "approval_request_id": None,
+                "idempotency_key": None,
+            },
+        ),
+        "active_effect_authorization": active,
+        "mailbox_cut": 0,
+    }
+    if unknown_input_id is not None:
+        runtime["unknown_effect"] = {
+            **active,
+            "indeterminate_input_id": unknown_input_id,
+        }
+    return {"_agentkit_runtime": runtime}
 
 
 def _seed_phase_b_pg_commands(
@@ -1408,6 +1551,14 @@ async def test_stale_dispatch_authorization_writes_nothing_postgresql(
         expected_mailbox_cut="1",
     )
     first = await store.commit_authoritative_uow(owner, authorized)
+    executor_attempt = await store.load_executor_attempt(
+        SESSION_ID,
+        effect_id,
+        f"attempt-{prepare_id}",
+        "pg-dispatch-authorize",
+    )
+    assert executor_attempt is not None
+    assert executor_attempt.status == "authorized_unclaimed"
     second_cancel = await store.admit_runtime_command(
         owner,
         RuntimeCommand(
@@ -1415,6 +1566,70 @@ async def test_stale_dispatch_authorization_writes_nothing_postgresql(
             command_kind="cancel",
             payload={},
         ),
+    )
+    lease = datetime(2026, 8, 30, 12, 5, tzinfo=UTC)
+    reserved = await store.reserve_executor_attempt(
+        owner,
+        effect_id=effect_id,
+        attempt_id=f"attempt-{prepare_id}",
+        authorization_transition_id="pg-dispatch-authorize",
+        executor_id="pg-executor",
+        lease_expires_at=lease,
+    )
+    assert (
+        await store.reserve_executor_attempt(
+            owner,
+            effect_id=effect_id,
+            attempt_id=f"attempt-{prepare_id}",
+            authorization_transition_id="pg-dispatch-authorize",
+            executor_id="pg-executor",
+            lease_expires_at=lease,
+        )
+        == reserved
+    )
+    started = await store.mark_executor_attempt_started(
+        owner,
+        effect_id=effect_id,
+        attempt_id=f"attempt-{prepare_id}",
+        authorization_transition_id="pg-dispatch-authorize",
+        executor_id="pg-executor",
+        claim_generation=reserved.claim_generation,
+        now=datetime(2026, 8, 30, 12, 1, tzinfo=UTC),
+    )
+    assert (
+        await store.mark_executor_attempt_started(
+            owner,
+            effect_id=effect_id,
+            attempt_id=f"attempt-{prepare_id}",
+            authorization_transition_id="pg-dispatch-authorize",
+            executor_id="pg-executor",
+            claim_generation=reserved.claim_generation,
+            now=datetime(2026, 8, 30, 12, 1, tzinfo=UTC),
+        )
+        == started
+    )
+    quiescent = await store.mark_executor_attempt_quiescent(
+        owner,
+        effect_id=effect_id,
+        attempt_id=f"attempt-{prepare_id}",
+        authorization_transition_id="pg-dispatch-authorize",
+        executor_id="pg-executor",
+        claim_generation=reserved.claim_generation,
+        now=datetime(2026, 8, 30, 12, 2, tzinfo=UTC),
+        evidence_ref="pg-quiescence",
+    )
+    assert (
+        await store.mark_executor_attempt_quiescent(
+            owner,
+            effect_id=effect_id,
+            attempt_id=f"attempt-{prepare_id}",
+            authorization_transition_id="pg-dispatch-authorize",
+            executor_id="pg-executor",
+            claim_generation=reserved.claim_generation,
+            now=datetime(2026, 8, 30, 12, 2, tzinfo=UTC),
+            evidence_ref="pg-quiescence",
+        )
+        == quiescent
     )
     assert second_cancel.mailbox_cut == "2"
 
@@ -1862,3 +2077,357 @@ async def test_runtime_command_disposition_preserves_admission_metadata(
         == admission.entry.admitted_dispatch_generation
     )
     assert replay.entry.disposition == "applied"
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_evidence_identity_conflict_is_rejected_postgresql(
+    tmp_path: Path,
+) -> None:
+    store, owner = await _open_store("pg", tmp_path)
+    evidence = EffectReconciliationEvidence(
+        evidence_ref="pg-evidence",
+        session_id=SESSION_ID,
+        effect_id="pg-effect",
+        attempt_id="pg-attempt",
+        authorization_transition_id="pg-authorization",
+        reconciliation_owner_epoch=owner.epoch,
+        outcome=ReconciliationOutcome.COMPLETED,
+        result={"content": "stable"},
+    )
+
+    assert (
+        await store.record_effect_reconciliation_evidence(owner, evidence) == evidence
+    )
+    assert (
+        await store.load_effect_reconciliation_evidence(
+            SESSION_ID,
+            evidence.evidence_ref,
+        )
+        == evidence
+    )
+    assert (
+        await store.record_effect_reconciliation_evidence(owner, evidence) == evidence
+    )
+    with pytest.raises(RecoveryEvidenceConflictError):
+        await store.record_effect_reconciliation_evidence(
+            owner,
+            replace(evidence, result={"content": "changed"}),
+        )
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_wrong_authorization_writes_nothing_postgresql(
+    tmp_path: Path,
+) -> None:
+    store, owner = await _open_store("pg", tmp_path)
+    prepare_id = "pg-reconciliation-prepare"
+    effect_id = f"effect-{prepare_id}"
+    attempt_id = f"attempt-{prepare_id}"
+    authorization_id = "pg-reconciliation-authorize"
+    _seed_phase_b_pg_commands(store, prepare_id)
+    await store.commit_authoritative_uow(
+        owner,
+        _phase_b_pg_unit(prepare_id, revision=0),
+    )
+    await store.commit_authoritative_uow(
+        owner,
+        _phase_b_pg_dispatch_unit(
+            authorization_id,
+            revision=1,
+            effect_id=effect_id,
+            attempt_id=attempt_id,
+            expected_mailbox_cut="0",
+            state_value=_phase_d4_pg_state(
+                effect_id=effect_id,
+                attempt_id=attempt_id,
+                authorization_transition_id=authorization_id,
+            ),
+        ),
+    )
+    unknown_state_value = _phase_d4_pg_state(
+        effect_id=effect_id,
+        attempt_id=attempt_id,
+        authorization_transition_id=authorization_id,
+        unknown_input_id="pg-indeterminate",
+    )
+    await store.commit_authoritative_uow(
+        owner,
+        AuthoritativeUnitOfWork(
+            event=None,
+            session_state=SESSION_PAYLOAD,
+            transition_id="pg-indeterminate",
+            state_cas=OperationStateCAS(
+                run_id="run-phase-b-pg",
+                revision=2,
+                projection_epoch=0,
+            ),
+            state_value=unknown_state_value,
+            effect_mutation=EffectMutation(
+                effect_id=effect_id,
+                attempt_id=attempt_id,
+                expected_status=EffectStatus.DISPATCHED,
+                status=EffectStatus.UNKNOWN,
+                payload={"result": None},
+            ),
+        ),
+    )
+    evidence = EffectReconciliationEvidence(
+        evidence_ref="pg-reconciliation-evidence",
+        session_id=SESSION_ID,
+        effect_id=effect_id,
+        attempt_id=attempt_id,
+        authorization_transition_id=authorization_id,
+        reconciliation_owner_epoch=owner.epoch,
+        outcome=ReconciliationOutcome.COMPLETED,
+        result={"content": "recovered"},
+    )
+    await store.record_effect_reconciliation_evidence(owner, evidence)
+    record = ReconciliationRecord(
+        effect_id=effect_id,
+        attempt_id=attempt_id,
+        observed_outcome=ReconciliationOutcome.COMPLETED,
+        evidence_ref=evidence.evidence_ref,
+        actor_id="pg-recovery-worker",
+        owner_epoch=owner.epoch,
+        transition_id="pg-reconciliation",
+    )
+    mutation = EffectMutation(
+        effect_id=effect_id,
+        attempt_id=attempt_id,
+        expected_status=EffectStatus.UNKNOWN,
+        status=EffectStatus.COMPLETED,
+        payload={
+            "result": {"content": "recovered"},
+            "reason_code": None,
+            "reason_message": None,
+        },
+        reconciliation=record,
+    )
+    current_state = await store.load_operation_state(
+        SESSION_ID,
+        "run-phase-b-pg",
+    )
+    assert current_state is not None
+    reconciled_state_value = state_value_with_reconciled_effect(
+        current_state.value,
+        evidence,
+        record,
+    )
+
+    wrong = AuthoritativeUnitOfWork(
+        event=None,
+        session_state=SESSION_PAYLOAD,
+        transition_id=record.transition_id,
+        state_cas=current_state.cas,
+        state_value=reconciled_state_value,
+        effect_mutation=mutation,
+        expected_reconciliation_authorization_transition_id="wrong-authorization",
+        reconciliation_evidence_ref=evidence.evidence_ref,
+    )
+    with pytest.raises(EffectMutationConflictError):
+        await store.commit_authoritative_uow(owner, wrong)
+    unchanged = await store.load_operation_state(SESSION_ID, "run-phase-b-pg")
+    assert unchanged == current_state
+    effect = await store.load_effect_slot(SESSION_ID, effect_id)
+    assert effect is not None
+    assert effect.status == "unknown"
+    assert (
+        await store.load_transition_receipt(
+            SESSION_ID,
+            0,
+            record.transition_id,
+        )
+        is None
+    )
+
+    tampered_runtime = dict(reconciled_state_value["_agentkit_runtime"])
+    tampered_marker = dict(tampered_runtime["reconciled_effect"])
+    tampered_marker["result"] = {"content": "tampered"}
+    tampered_runtime["reconciled_effect"] = tampered_marker
+    tampered_state_value = {
+        **reconciled_state_value,
+        "_agentkit_runtime": tampered_runtime,
+    }
+    with pytest.raises(
+        EffectMutationConflictError,
+        match="canonical evidence",
+    ):
+        await store.commit_authoritative_uow(
+            owner,
+            replace(
+                wrong,
+                state_value=tampered_state_value,
+                expected_reconciliation_authorization_transition_id=authorization_id,
+            ),
+        )
+
+    unit = replace(
+        wrong,
+        expected_reconciliation_authorization_transition_id=authorization_id,
+    )
+    committed = await store.commit_authoritative_uow(owner, unit)
+    replayed = await store.commit_authoritative_uow(owner, unit)
+    assert committed.state_version is not None
+    assert replayed.idempotent is True
+    assert replayed.state_version == committed.state_version
+
+
+@pytest.mark.asyncio
+async def test_takeover_waits_for_authoritative_executor_quiescence_row(
+    tmp_path: Path,
+) -> None:
+    store, owner = await _open_store("pg", tmp_path)
+    prepare_id = "pg-started-takeover-prepare"
+    effect_id = f"effect-{prepare_id}"
+    attempt_id = f"attempt-{prepare_id}"
+    authorization_id = "pg-started-takeover-authorize"
+    now = datetime(2026, 8, 30, 12, 0, tzinfo=UTC)
+    _seed_phase_b_pg_commands(store, prepare_id)
+    await store.commit_authoritative_uow(
+        owner,
+        _phase_b_pg_unit(prepare_id, revision=0),
+    )
+    await store.commit_authoritative_uow(
+        owner,
+        _phase_b_pg_dispatch_unit(
+            authorization_id,
+            revision=1,
+            effect_id=effect_id,
+            attempt_id=attempt_id,
+            expected_mailbox_cut="0",
+            state_value=_phase_d4_pg_state(
+                effect_id=effect_id,
+                attempt_id=attempt_id,
+                authorization_transition_id=authorization_id,
+            ),
+        ),
+    )
+    reserved = await store.reserve_executor_attempt(
+        owner,
+        effect_id=effect_id,
+        attempt_id=attempt_id,
+        authorization_transition_id=authorization_id,
+        executor_id="pg-old-executor",
+        lease_expires_at=now + timedelta(minutes=5),
+    )
+    await store.mark_executor_attempt_started(
+        owner,
+        effect_id=effect_id,
+        attempt_id=attempt_id,
+        authorization_transition_id=authorization_id,
+        executor_id="pg-old-executor",
+        claim_generation=reserved.claim_generation,
+        now=now,
+    )
+    await store.commit_authoritative_uow(
+        owner,
+        AuthoritativeUnitOfWork(
+            event=None,
+            session_state=SESSION_PAYLOAD,
+            transition_id="pg-started-indeterminate",
+            state_cas=OperationStateCAS(
+                run_id="run-phase-b-pg",
+                revision=2,
+                projection_epoch=0,
+            ),
+            state_value=_phase_d4_pg_state(
+                effect_id=effect_id,
+                attempt_id=attempt_id,
+                authorization_transition_id=authorization_id,
+                unknown_input_id="pg-started-indeterminate",
+            ),
+            effect_mutation=EffectMutation(
+                effect_id=effect_id,
+                attempt_id=attempt_id,
+                expected_status=EffectStatus.DISPATCHED,
+                status=EffectStatus.UNKNOWN,
+                payload={"result": None},
+            ),
+        ),
+    )
+    takeover = OwnerAuthority(
+        session_id=SESSION_ID,
+        owner_id="pg-takeover-owner",
+        epoch=owner.epoch + 1,
+    )
+    store._harness_pool.seed_owner(takeover)
+    evidence = EffectReconciliationEvidence(
+        evidence_ref="pg-started-evidence",
+        session_id=SESSION_ID,
+        effect_id=effect_id,
+        attempt_id=attempt_id,
+        authorization_transition_id=authorization_id,
+        reconciliation_owner_epoch=takeover.epoch,
+        outcome=ReconciliationOutcome.COMPLETED,
+        result={"content": "recovered"},
+    )
+    await store.record_effect_reconciliation_evidence(takeover, evidence)
+    record = ReconciliationRecord(
+        effect_id=effect_id,
+        attempt_id=attempt_id,
+        observed_outcome=ReconciliationOutcome.COMPLETED,
+        evidence_ref=evidence.evidence_ref,
+        actor_id="pg-recovery-worker",
+        owner_epoch=takeover.epoch,
+        transition_id="pg-started-reconciliation",
+    )
+    mutation = EffectMutation(
+        effect_id=effect_id,
+        attempt_id=attempt_id,
+        expected_status=EffectStatus.UNKNOWN,
+        status=EffectStatus.COMPLETED,
+        payload={
+            "result": {"content": "recovered"},
+            "reason_code": None,
+            "reason_message": None,
+        },
+        reconciliation=record,
+    )
+    current_state = await store.load_operation_state(
+        SESSION_ID,
+        "run-phase-b-pg",
+    )
+    assert current_state is not None
+    state_value = state_value_with_reconciled_effect(
+        current_state.value,
+        evidence,
+        record,
+    )
+    unit = AuthoritativeUnitOfWork(
+        event=None,
+        session_state=SESSION_PAYLOAD,
+        transition_id=record.transition_id,
+        state_cas=current_state.cas,
+        state_value=state_value,
+        effect_mutation=mutation,
+        expected_reconciliation_authorization_transition_id=authorization_id,
+        reconciliation_evidence_ref=evidence.evidence_ref,
+    )
+
+    with pytest.raises(
+        ExecutorAttemptConflictError,
+        match="not durably quiescent",
+    ):
+        await store.commit_authoritative_uow(takeover, unit)
+    assert (
+        await store.load_transition_receipt(
+            SESSION_ID,
+            0,
+            record.transition_id,
+        )
+        is None
+    )
+    quiescent = await store.mark_executor_attempt_quiescent(
+        takeover,
+        effect_id=effect_id,
+        attempt_id=attempt_id,
+        authorization_transition_id=authorization_id,
+        executor_id="pg-old-executor",
+        claim_generation=reserved.claim_generation,
+        now=now,
+        evidence_ref="pg-old-executor-stopped",
+    )
+    assert quiescent.status == "quiescent"
+    committed = await store.commit_authoritative_uow(takeover, unit)
+    assert committed.state_version is not None
+    assert committed.state_version.revision == 4

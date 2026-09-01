@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
@@ -12,7 +13,9 @@ from agentkit.runtime import (
     ApprovalResolved,
     ApprovalSettlement,
     BlockedOutcome,
+    CASConflictCommitResult,
     CommitRef,
+    CommitReconciliationRequest,
     CommitSettlementRequest,
     CommittedCommitResult,
     CommittedFactNotice,
@@ -29,6 +32,7 @@ from agentkit.runtime import (
     EffectSettlement,
     EffectSettlementOutcome,
     EffectStatus,
+    ExactReplayCommitResult,
     EngineStepRequest,
     FailureReport,
     FailedOutcome,
@@ -39,12 +43,19 @@ from agentkit.runtime import (
     OperationStateVersion,
     PreparedEffectAction,
     ProviderStopMetadata,
+    ReconciliationOutcome,
+    ReconciliationRecord,
     RoundLimitOutcome,
     RunSegmentRequest,
     SafeYieldOutcome,
     SegmentCoordinator,
     StreamFrame,
     StreamFrameKind,
+    TransitionReceipt,
+)
+from agentkit.runtime.coordinator import (
+    _reconcile_and_run_segment,
+    _reconciled_effect_input,
 )
 
 
@@ -742,6 +753,22 @@ async def test_run_segment_rejects_wrong_effect_transition_before_engine_or_port
     blocked, commits = await _blocked_approval_state()
     transition_count = len(commits.transition_requests)
     assert blocked.effect is not None
+    runtime = dict(blocked.state_version.value["_agentkit_runtime"])
+    runtime["active_effect_authorization"] = {
+        "effect_id": blocked.effect.effect_id,
+        "attempt_id": blocked.effect.attempt_id,
+        "tool_call_id": "call-1",
+        "tool_name": "read",
+        "authorization_transition_id": "correct-transition",
+        "dispatch_owner_epoch": 3,
+    }
+    authorized_state = replace(
+        blocked.state_version,
+        value={
+            **blocked.state_version.value,
+            "_agentkit_runtime": runtime,
+        },
+    )
     settlement = EffectSettlement.completed(
         input_id="effect-input-wrong-transition",
         tool_call_id="call-1",
@@ -758,7 +785,7 @@ async def test_run_segment_rejects_wrong_effect_transition_before_engine_or_port
             session_id="session-1",
             owner_id="owner-1",
             owner_epoch=3,
-            state_version=blocked.state_version,
+            state_version=authorized_state,
             step_input=EffectSettled(settlement=settlement),
             max_rounds=2,
         )
@@ -1191,7 +1218,7 @@ async def test_completed_effect_settlement_commits_before_probe_safe_yield() -> 
 
 
 @pytest.mark.asyncio
-async def test_executor_exception_commits_indeterminate_settlement() -> None:
+async def test_crash_retains_run_and_does_not_write_interrupted() -> None:
     timeline: list[str] = []
 
     class RaisingExecutor(RecordingEffectExecutor):
@@ -1209,12 +1236,13 @@ async def test_executor_exception_commits_indeterminate_settlement() -> None:
         commits,
         RaisingExecutor(timeline),
     )
+    facts = RecordingFactSink(timeline)
 
     outcome = await coordinator.run(
         _initial_request(),
         control_probe=QuietControlProbe(timeline),
         frame_sink=RecordingFrameSink(timeline),
-        committed_fact_sink=RecordingFactSink(timeline),
+        committed_fact_sink=facts,
     )
 
     assert isinstance(outcome, BlockedOutcome)
@@ -1223,6 +1251,13 @@ async def test_executor_exception_commits_indeterminate_settlement() -> None:
     assert settlement.outcome is EffectSettlementOutcome.INDETERMINATE
     assert settlement.reason_code == "effect_executor_error"
     assert settlement.reason_message == "RuntimeError"
+    runtime = outcome.state_version.value["_agentkit_runtime"]
+    assert len(runtime["pending_effect_plans"]) == 1
+    assert "active_effect_authorization" in runtime
+    assert runtime["unknown_effect"]["effect_id"] == settlement.effect_id
+    assert commits.settlement_requests[0].proposal.pending_facts == ()
+    assert all(notice.fact_kind != "tool_result" for notice in facts.notices)
+    assert all("interrupted" not in notice.fact_kind for notice in facts.notices)
 
 
 @pytest.mark.asyncio
@@ -1297,3 +1332,639 @@ async def test_failed_effect_message_reaches_committed_tool_result_notice() -> N
     )
     assert tool_result.payload["result"] == "tool execution failed"
     assert tool_result.payload["is_error"] is True
+
+
+def _recovery_state_value(*, reconciled: bool = False) -> dict[str, object]:
+    plan = {
+        "effect_id": "effect-recovery",
+        "attempt_id": "attempt-recovery",
+        "effect_kind": "tool",
+        "payload": {
+            "tool_call_id": "call-recovery",
+            "tool_name": "read",
+        },
+        "requires_approval": False,
+        "approval_request_id": None,
+        "idempotency_key": None,
+    }
+    active = {
+        "effect_id": "effect-recovery",
+        "attempt_id": "attempt-recovery",
+        "tool_call_id": "call-recovery",
+        "tool_name": "read",
+        "authorization_transition_id": "authorization-recovery",
+        "dispatch_owner_epoch": 3,
+    }
+    runtime: dict[str, object] = {
+        "pending_effect_plans": (plan,),
+        "active_effect_authorization": active,
+        "mailbox_cut": 11,
+    }
+    if reconciled:
+        unknown = {
+            **active,
+            "indeterminate_input_id": "indeterminate-recovery",
+        }
+        runtime["unknown_effect"] = unknown
+        runtime["reconciled_effect"] = {
+            **unknown,
+            "reconciliation_transition_id": "reconciliation-recovery",
+            "evidence_ref": "evidence-recovery",
+            "reconciliation_owner_epoch": 4,
+            "reconciled_input_id": "reconciled-recovery",
+            "outcome": "completed",
+            "result": {"content": "recovered"},
+            "reason_code": None,
+            "reason_message": None,
+        }
+    return {"_agentkit_runtime": runtime}
+
+
+@pytest.mark.parametrize(
+    "runtime_state",
+    (
+        {"pending_effect_plans": ({"effect_id": "effect-pending"},)},
+        {"unknown_effect": {"effect_id": "effect-unknown"}},
+        {"reconciled_effect": {"effect_id": "effect-reconciled"}},
+    ),
+    ids=("pending-plan", "unknown-marker", "reconciled-marker"),
+)
+def test_initial_rejects_each_outstanding_recovery_condition_independently(
+    runtime_state: dict[str, object],
+) -> None:
+    state = OperationStateVersion(
+        run_id="run-1",
+        revision=7,
+        projection_epoch=2,
+        commit_ref=CommitRef(transition_id="unrelated-transition"),
+        value={"_agentkit_runtime": runtime_state},
+    )
+
+    with pytest.raises(ValueError, match="outstanding effect recovery"):
+        RunSegmentRequest(
+            session_id="session-1",
+            owner_id="owner-2",
+            owner_epoch=4,
+            state_version=state,
+            step_input=Initial(
+                input_id="initial-during-recovery",
+                command_batch=(),
+                mailbox_cut=11,
+            ),
+            max_rounds=4,
+        )
+
+
+def test_run_segment_request_rejects_missing_retained_authorization() -> None:
+    value = _recovery_state_value()
+    runtime = dict(value["_agentkit_runtime"])
+    runtime.pop("active_effect_authorization")
+    state = OperationStateVersion(
+        run_id="run-1",
+        revision=7,
+        projection_epoch=2,
+        commit_ref=CommitRef(transition_id="fallback-transition"),
+        value={"_agentkit_runtime": runtime},
+    )
+    settlement = EffectSettlement.completed(
+        input_id="settlement-without-authorization",
+        tool_call_id="call-recovery",
+        tool_name="read",
+        effect_id="effect-recovery",
+        attempt_id="attempt-recovery",
+        authorization_transition_id="fallback-transition",
+        owner_epoch=4,
+        result={"content": "must-not-commit"},
+    )
+
+    with pytest.raises(ValueError, match="retained authorization"):
+        RunSegmentRequest(
+            session_id="session-1",
+            owner_id="owner-2",
+            owner_epoch=4,
+            state_version=state,
+            step_input=EffectSettled(settlement=settlement),
+            max_rounds=4,
+        )
+
+
+def test_run_segment_request_accepts_retained_authorization_after_commit_ref_moves() -> (
+    None
+):
+    state = OperationStateVersion(
+        run_id="run-1",
+        revision=7,
+        projection_epoch=2,
+        commit_ref=CommitRef(transition_id="unrelated-transition"),
+        value=_recovery_state_value(),
+    )
+    settlement = EffectSettlement.completed(
+        input_id="settlement-recovery",
+        tool_call_id="call-recovery",
+        tool_name="read",
+        effect_id="effect-recovery",
+        attempt_id="attempt-recovery",
+        authorization_transition_id="authorization-recovery",
+        owner_epoch=4,
+        result={"content": "recovered"},
+    )
+
+    request = RunSegmentRequest(
+        session_id="session-1",
+        owner_id="owner-2",
+        owner_epoch=4,
+        state_version=state,
+        step_input=EffectSettled(settlement=settlement),
+        max_rounds=4,
+    )
+
+    assert request.step_input.settlement == settlement
+    proposal = AgentEngine().propose(
+        EngineStepRequest(
+            state_version=request.state_version,
+            step_input=request.step_input,
+        )
+    )
+    assert proposal.pending_facts[0].fact_kind == "tool_result"
+    assert proposal.pending_facts[0].payload["result"] == {"content": "recovered"}
+
+
+def test_takeover_after_reconciliation_reuses_input_under_current_owner_epoch() -> None:
+    state = OperationStateVersion(
+        run_id="run-1",
+        revision=9,
+        projection_epoch=2,
+        commit_ref=CommitRef(transition_id="reconciliation-recovery"),
+        value=_recovery_state_value(reconciled=True),
+    )
+    step_input = _reconciled_effect_input(
+        state,
+        record=_reconciliation_record(),
+        owner_epoch=5,
+    )
+
+    request = RunSegmentRequest(
+        session_id="session-1",
+        owner_id="owner-3",
+        owner_epoch=5,
+        state_version=state,
+        step_input=step_input,
+        max_rounds=4,
+    )
+
+    assert request.step_input.input_id == "reconciled-recovery"
+    assert request.step_input.settlement.owner_epoch == 5
+    proposal = AgentEngine().propose(
+        EngineStepRequest(
+            state_version=request.state_version,
+            step_input=request.step_input,
+        )
+    )
+    assert proposal.pending_facts[0].fact_kind == "tool_result"
+
+
+def test_post_reconciliation_settlement_input_differs_from_indeterminate_input() -> (
+    None
+):
+    state = OperationStateVersion(
+        run_id="run-1",
+        revision=9,
+        projection_epoch=2,
+        commit_ref=CommitRef(transition_id="reconciliation-recovery"),
+        value=_recovery_state_value(reconciled=True),
+    )
+    step_input = _reconciled_effect_input(
+        state,
+        record=_reconciliation_record(),
+        owner_epoch=5,
+    )
+    runtime = state.value["_agentkit_runtime"]
+    reconciled = runtime["reconciled_effect"]
+
+    assert step_input.input_id == reconciled["reconciled_input_id"]
+    assert step_input.input_id != reconciled["indeterminate_input_id"]
+
+
+def test_reconciliation_rejects_wrong_attempt_authorization_or_epoch() -> None:
+    value = _recovery_state_value()
+    runtime = dict(value["_agentkit_runtime"])
+    runtime["unknown_effect"] = {
+        **runtime["active_effect_authorization"],
+        "indeterminate_input_id": "indeterminate-recovery",
+    }
+    state = OperationStateVersion(
+        run_id="run-1",
+        revision=8,
+        projection_epoch=2,
+        commit_ref=CommitRef(transition_id="indeterminate-recovery"),
+        value={"_agentkit_runtime": runtime},
+    )
+
+    with pytest.raises(ValueError, match="attempt_id"):
+        CommitReconciliationRequest(
+            session_id="session-1",
+            owner_id="owner-2",
+            owner_epoch=4,
+            state_version=state,
+            record=ReconciliationRecord(
+                effect_id="effect-recovery",
+                attempt_id="wrong-attempt",
+                observed_outcome=ReconciliationOutcome.COMPLETED,
+                evidence_ref="evidence-recovery",
+                actor_id="recovery-worker",
+                owner_epoch=4,
+                transition_id="reconciliation-recovery",
+            ),
+        )
+    with pytest.raises(ValueError, match="owner_epoch"):
+        CommitReconciliationRequest(
+            session_id="session-1",
+            owner_id="owner-2",
+            owner_epoch=4,
+            state_version=state,
+            record=ReconciliationRecord(
+                effect_id="effect-recovery",
+                attempt_id="attempt-recovery",
+                observed_outcome=ReconciliationOutcome.COMPLETED,
+                evidence_ref="evidence-recovery",
+                actor_id="recovery-worker",
+                owner_epoch=5,
+                transition_id="reconciliation-recovery",
+            ),
+        )
+    with pytest.raises(ValueError, match="transition identity"):
+        CommitReconciliationRequest(
+            session_id="session-1",
+            owner_id="owner-2",
+            owner_epoch=4,
+            state_version=state,
+            record=ReconciliationRecord(
+                effect_id="effect-recovery",
+                attempt_id="attempt-recovery",
+                observed_outcome=ReconciliationOutcome.COMPLETED,
+                evidence_ref="evidence-recovery",
+                actor_id="recovery-worker",
+                owner_epoch=4,
+                transition_id="authorization-recovery",
+            ),
+        )
+
+
+def test_unknown_effect_is_never_automatically_retried() -> None:
+    value = _recovery_state_value()
+    runtime = dict(value["_agentkit_runtime"])
+    runtime["unknown_effect"] = {
+        **runtime["active_effect_authorization"],
+        "indeterminate_input_id": "indeterminate-recovery",
+    }
+    state = OperationStateVersion(
+        run_id="run-1",
+        revision=8,
+        projection_epoch=2,
+        commit_ref=CommitRef(transition_id="indeterminate-recovery"),
+        value={"_agentkit_runtime": runtime},
+    )
+
+    with pytest.raises(ValueError, match="outstanding effect recovery"):
+        RunSegmentRequest(
+            session_id="session-1",
+            owner_id="owner-2",
+            owner_epoch=4,
+            state_version=state,
+            step_input=Initial(
+                input_id="retry-initial",
+                command_batch=(),
+                mailbox_cut=11,
+            ),
+            max_rounds=4,
+        )
+
+
+@pytest.mark.asyncio
+async def test_recoverable_settlement_cas_reloads_and_reproposes_without_reexecution() -> (
+    None
+):
+    class SettlementCASOncePort(RecordingCommitPort):
+        def __init__(self) -> None:
+            super().__init__()
+            self.conflicted = False
+
+        async def commit_settlement(self, request: Any):
+            self.timeline.append("commit_settlement")
+            self.settlement_requests.append(request)
+            if not self.conflicted:
+                self.conflicted = True
+                return CASConflictCommitResult(
+                    current_state=request.engine_request.state_version
+                )
+            state = self._state(request)
+            return CommittedCommitResult(
+                state_version=state,
+                notices=self._notices(request, state),
+            )
+
+    model = SequenceModelAdapter(
+        [
+            _model_result("result-tool", content="", tool_calls=(_tool_call(),)),
+            _model_result("result-done", content="done"),
+        ]
+    )
+    commits = SettlementCASOncePort()
+    executor = RecordingEffectExecutor()
+    coordinator = _coordinator(model, commits, executor)
+
+    outcome = await coordinator.run(
+        _initial_request(),
+        control_probe=QuietControlProbe(),
+        frame_sink=RecordingFrameSink(),
+        committed_fact_sink=RecordingFactSink(),
+    )
+
+    assert isinstance(outcome, CompletedOutcome)
+    assert len(executor.calls) == 1
+    assert len(commits.settlement_requests) == 2
+    assert (
+        commits.settlement_requests[0].settlement.input_id
+        == commits.settlement_requests[1].settlement.input_id
+    )
+
+
+@pytest.mark.asyncio
+async def test_exact_replay_adopts_committed_state_and_continues() -> None:
+    class SettlementReplayPort(RecordingCommitPort):
+        async def commit_settlement(self, request: Any):
+            self.timeline.append("commit_settlement")
+            self.settlement_requests.append(request)
+            state = self._state(request)
+            notices = self._notices(request, state)
+            receipt = TransitionReceipt(
+                session_id=request.session_id,
+                projection_epoch=state.projection_epoch,
+                transition_id=request.proposal.transition_id,
+                mutation_fingerprint="replayed-fingerprint",
+                state_version=state,
+                facts=notices,
+            )
+            return ExactReplayCommitResult(
+                state_version=state,
+                receipt=receipt,
+            )
+
+    model = SequenceModelAdapter(
+        [
+            _model_result("result-tool", content="", tool_calls=(_tool_call(),)),
+            _model_result("result-done", content="done"),
+        ]
+    )
+    commits = SettlementReplayPort()
+    executor = RecordingEffectExecutor()
+    facts = RecordingFactSink()
+    coordinator = _coordinator(model, commits, executor)
+
+    outcome = await coordinator.run(
+        _initial_request(),
+        control_probe=QuietControlProbe(),
+        frame_sink=RecordingFrameSink(),
+        committed_fact_sink=facts,
+    )
+
+    assert isinstance(outcome, CompletedOutcome)
+    assert len(executor.calls) == 1
+    assert any(notice.fact_kind == "tool_result" for notice in facts.notices)
+
+
+async def _run_reconciled_segment():
+    state = OperationStateVersion(
+        run_id="run-1",
+        revision=9,
+        projection_epoch=2,
+        commit_ref=CommitRef(transition_id="reconciliation-recovery"),
+        value=_recovery_state_value(reconciled=True),
+    )
+    settlement = EffectSettlement.completed(
+        input_id="reconciled-recovery",
+        tool_call_id="call-recovery",
+        tool_name="read",
+        effect_id="effect-recovery",
+        attempt_id="attempt-recovery",
+        authorization_transition_id="authorization-recovery",
+        owner_epoch=5,
+        result={"content": "recovered"},
+    )
+    request = RunSegmentRequest(
+        session_id="session-1",
+        owner_id="owner-3",
+        owner_epoch=5,
+        state_version=state,
+        step_input=EffectSettled(settlement=settlement),
+        max_rounds=4,
+    )
+    commits = RecordingCommitPort()
+    executor = RecordingEffectExecutor()
+    facts = RecordingFactSink()
+    outcome = await _coordinator(
+        SequenceModelAdapter([_model_result("result-done", content="continued")]),
+        commits,
+        executor,
+    ).run(
+        request,
+        control_probe=QuietControlProbe(),
+        frame_sink=RecordingFrameSink(),
+        committed_fact_sink=facts,
+    )
+    return outcome, commits, executor, facts, settlement
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_reenters_with_existing_effect_settled_input() -> None:
+    outcome, commits, executor, facts, settlement = await _run_reconciled_segment()
+
+    assert isinstance(outcome, CompletedOutcome)
+    assert executor.calls == []
+    assert commits.transition_requests[0].engine_request.step_input == EffectSettled(
+        settlement=settlement
+    )
+    assert [notice.fact_kind for notice in facts.notices].count("tool_result") == 1
+
+
+@pytest.mark.asyncio
+async def test_post_reconciliation_reentry_does_not_mutate_effect_ledger_twice() -> (
+    None
+):
+    outcome, commits, executor, facts, settlement = await _run_reconciled_segment()
+
+    assert isinstance(outcome, CompletedOutcome)
+    assert executor.calls == []
+    assert commits.settlement_requests == []
+    assert commits.reconciliation_requests == []
+    assert len(commits.transition_requests) == 2
+    assert [notice.fact_kind for notice in facts.notices].count("tool_result") == 1
+    assert settlement.outcome is EffectSettlementOutcome.COMPLETED
+
+
+def _unknown_reconciliation_state() -> OperationStateVersion:
+    value = _recovery_state_value()
+    runtime = dict(value["_agentkit_runtime"])
+    runtime["unknown_effect"] = {
+        **runtime["active_effect_authorization"],
+        "indeterminate_input_id": "indeterminate-recovery",
+    }
+    return OperationStateVersion(
+        run_id="run-1",
+        revision=8,
+        projection_epoch=2,
+        commit_ref=CommitRef(transition_id="indeterminate-recovery"),
+        value={"_agentkit_runtime": runtime},
+    )
+
+
+def _reconciliation_record() -> ReconciliationRecord:
+    return ReconciliationRecord(
+        effect_id="effect-recovery",
+        attempt_id="attempt-recovery",
+        observed_outcome=ReconciliationOutcome.COMPLETED,
+        evidence_ref="evidence-recovery",
+        actor_id="recovery-worker",
+        owner_epoch=4,
+        transition_id="reconciliation-recovery",
+    )
+
+
+def _reconciled_state(
+    state: OperationStateVersion,
+    record: ReconciliationRecord,
+) -> OperationStateVersion:
+    runtime = dict(state.value["_agentkit_runtime"])
+    unknown = dict(runtime["unknown_effect"])
+    runtime["reconciled_effect"] = {
+        **unknown,
+        "reconciliation_transition_id": record.transition_id,
+        "evidence_ref": record.evidence_ref,
+        "reconciliation_owner_epoch": record.owner_epoch,
+        "reconciled_input_id": f"{record.transition_id}:settled",
+        "outcome": record.observed_outcome.value,
+        "result": {"content": "recovered"},
+        "reason_code": None,
+        "reason_message": None,
+    }
+    return OperationStateVersion(
+        run_id=state.run_id,
+        revision=state.revision + 1,
+        projection_epoch=state.projection_epoch,
+        commit_ref=CommitRef(transition_id=record.transition_id),
+        value={"_agentkit_runtime": runtime},
+    )
+
+
+def test_reconciliation_evidence_reconstructs_terminal_settlement_after_crash() -> None:
+    record = _reconciliation_record()
+    committed = _reconciled_state(_unknown_reconciliation_state(), record)
+    reloaded = replace(
+        committed,
+        value=json.loads(json.dumps(committed.value, default=dict)),
+    )
+
+    before_crash = _reconciled_effect_input(
+        committed,
+        record=record,
+        owner_epoch=5,
+    )
+    after_crash = _reconciled_effect_input(
+        reloaded,
+        record=record,
+        owner_epoch=5,
+    )
+
+    assert after_crash == before_crash
+    assert after_crash.settlement.result == {"content": "recovered"}
+    assert after_crash.settlement.authorization_transition_id == (
+        "authorization-recovery"
+    )
+
+
+class ReconciliationCommitPort(RecordingCommitPort):
+    def __init__(self, *, exact_replay: bool = False, cas_once: bool = False) -> None:
+        super().__init__()
+        self.exact_replay = exact_replay
+        self.cas_once = cas_once
+        self.cas_returned = False
+
+    async def commit_reconciliation(self, request: CommitReconciliationRequest):
+        self.timeline.append("commit_reconciliation")
+        self.reconciliation_requests.append(request)
+        if self.cas_once and not self.cas_returned:
+            self.cas_returned = True
+            current = OperationStateVersion(
+                run_id=request.state_version.run_id,
+                revision=request.state_version.revision + 1,
+                projection_epoch=request.state_version.projection_epoch,
+                commit_ref=CommitRef(transition_id="unrelated-unknown-state"),
+                value=request.state_version.value,
+            )
+            return CASConflictCommitResult(current_state=current)
+        state = _reconciled_state(request.state_version, request.record)
+        if self.exact_replay:
+            return ExactReplayCommitResult(
+                state_version=state,
+                receipt=TransitionReceipt(
+                    session_id=request.session_id,
+                    projection_epoch=state.projection_epoch,
+                    transition_id=request.record.transition_id,
+                    mutation_fingerprint="reconciliation-fingerprint",
+                    state_version=state,
+                    facts=(),
+                ),
+            )
+        return CommittedCommitResult(state_version=state)
+
+
+async def _run_reconciliation_recovery(port: ReconciliationCommitPort):
+    executor = RecordingEffectExecutor()
+    facts = RecordingFactSink()
+    coordinator = _coordinator(
+        SequenceModelAdapter([_model_result("result-done", content="continued")]),
+        port,
+        executor,
+    )
+    outcome = await _reconcile_and_run_segment(
+        coordinator,
+        session_id="session-1",
+        owner_id="owner-recovery",
+        owner_epoch=4,
+        state_version=_unknown_reconciliation_state(),
+        record=_reconciliation_record(),
+        max_rounds=4,
+        control_probe=QuietControlProbe(),
+        frame_sink=RecordingFrameSink(),
+        committed_fact_sink=facts,
+    )
+    return outcome, port, executor, facts
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_exact_replay_is_adopted() -> None:
+    outcome, port, executor, facts = await _run_reconciliation_recovery(
+        ReconciliationCommitPort(exact_replay=True)
+    )
+
+    assert isinstance(outcome, CompletedOutcome)
+    assert len(port.reconciliation_requests) == 1
+    assert port.settlement_requests == []
+    assert executor.calls == []
+    assert [notice.fact_kind for notice in facts.notices].count("tool_result") == 1
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_cas_reloads_and_retries_same_record() -> None:
+    outcome, port, executor, facts = await _run_reconciliation_recovery(
+        ReconciliationCommitPort(cas_once=True)
+    )
+
+    assert isinstance(outcome, CompletedOutcome)
+    assert len(port.reconciliation_requests) == 2
+    assert (
+        port.reconciliation_requests[0].record == port.reconciliation_requests[1].record
+    )
+    assert port.reconciliation_requests[1].state_version.revision == 9
+    assert executor.calls == []
+    assert [notice.fact_kind for notice in facts.notices].count("tool_result") == 1

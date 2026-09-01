@@ -9,6 +9,7 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from enum import StrEnum
 from typing import Any, Final, cast
 
 from agentkit.runtime.contracts import (
@@ -18,6 +19,8 @@ from agentkit.runtime.contracts import (
     CommittedFactNotice,
     EffectMutation,
     EffectStatus,
+    ReconciliationRecord,
+    ReconciliationOutcome,
     OperationStateCAS,
     OperationStateVersion,
     RuntimeCommand,
@@ -86,6 +89,25 @@ class StaleMailboxCutError(RuntimeError):
         )
         self.expected_mailbox_cut = expected_mailbox_cut
         self.current_mailbox_cut = current_mailbox_cut
+
+
+class InvalidReconciliationPreconditionError(ValueError):
+    """Raised when a reconciliation UoW omits its durable recovery binding."""
+
+
+class RecoveryEvidenceConflictError(RuntimeError):
+    """Raised when a durable recovery evidence identity changes content."""
+
+
+class ExecutorAttemptConflictError(RuntimeError):
+    """Raised when an executor-attempt state transition is not exact."""
+
+
+class ExecutorAttemptStatus(StrEnum):
+    AUTHORIZED_UNCLAIMED = "authorized_unclaimed"
+    RESERVED = "reserved"
+    STARTED = "started"
+    QUIESCENT = "quiescent"
 
 
 class KeyExpiredError(LookupError):
@@ -356,6 +378,228 @@ class EffectLedgerSlot:
 
 
 @dataclass(frozen=True)
+class EffectReconciliationEvidence:
+    evidence_ref: str
+    session_id: str
+    effect_id: str
+    attempt_id: str
+    authorization_transition_id: str
+    reconciliation_owner_epoch: int
+    outcome: ReconciliationOutcome
+    result: object
+    reason_code: str | None = None
+    reason_message: str | None = None
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "evidence_ref",
+            "session_id",
+            "effect_id",
+            "attempt_id",
+            "authorization_transition_id",
+        ):
+            _require_non_empty(field_name, getattr(self, field_name))
+        if (
+            isinstance(self.reconciliation_owner_epoch, bool)
+            or not isinstance(self.reconciliation_owner_epoch, int)
+            or self.reconciliation_owner_epoch <= 0
+        ):
+            raise ValueError("reconciliation_owner_epoch must be a positive integer")
+        if not isinstance(self.outcome, ReconciliationOutcome):
+            object.__setattr__(
+                self,
+                "outcome",
+                ReconciliationOutcome(self.outcome),
+            )
+        if self.outcome is ReconciliationOutcome.COMPLETED:
+            if self.reason_code is not None or self.reason_message is not None:
+                raise ValueError("completed evidence cannot carry a failure reason")
+        else:
+            if self.reason_code is None or self.reason_message is None:
+                raise ValueError("failed evidence requires a stable reason")
+            _require_non_empty("reason_code", self.reason_code)
+            if not self.reason_message.strip():
+                raise ValueError("reason_message must not be blank")
+        object.__setattr__(self, "result", _plain_json(self.result))
+
+    def payload(self) -> JSONObject:
+        return {
+            "evidence_ref": self.evidence_ref,
+            "session_id": self.session_id,
+            "effect_id": self.effect_id,
+            "attempt_id": self.attempt_id,
+            "authorization_transition_id": self.authorization_transition_id,
+            "reconciliation_owner_epoch": self.reconciliation_owner_epoch,
+            "outcome": self.outcome.value,
+            "result": self.result,
+            "reason_code": self.reason_code,
+            "reason_message": self.reason_message,
+        }
+
+
+def reconciled_effect_input_id(record: ReconciliationRecord) -> str:
+    if not isinstance(record, ReconciliationRecord):
+        raise TypeError("record must be a ReconciliationRecord")
+    return f"{record.transition_id}:settled"
+
+
+def state_value_with_reconciled_effect(
+    current_value: Mapping[str, Any],
+    evidence: EffectReconciliationEvidence,
+    record: ReconciliationRecord,
+) -> JSONObject:
+    if not isinstance(evidence, EffectReconciliationEvidence):
+        raise TypeError("evidence must be EffectReconciliationEvidence")
+    if not isinstance(record, ReconciliationRecord):
+        raise TypeError("record must be a ReconciliationRecord")
+    if (
+        evidence.effect_id != record.effect_id
+        or evidence.attempt_id != record.attempt_id
+        or evidence.reconciliation_owner_epoch != record.owner_epoch
+        or evidence.outcome is not record.observed_outcome
+        or evidence.evidence_ref != record.evidence_ref
+    ):
+        raise ValueError("evidence and reconciliation record do not match")
+    state_value = cast(JSONObject, _plain_json(current_value))
+    raw_runtime = state_value.get("_agentkit_runtime")
+    if not isinstance(raw_runtime, dict):
+        raise ValueError("reconciliation requires committed runtime state")
+    runtime_state = dict(raw_runtime)
+    raw_unknown = runtime_state.get("unknown_effect")
+    if not isinstance(raw_unknown, dict):
+        raise ValueError("reconciliation requires a committed unknown effect")
+    unknown = dict(raw_unknown)
+    raw_active = runtime_state.get("active_effect_authorization")
+    pending_plans = runtime_state.get("pending_effect_plans")
+    if not isinstance(raw_active, dict):
+        raise ValueError("reconciliation requires retained authorization")
+    if not isinstance(pending_plans, list | tuple) or not pending_plans:
+        raise ValueError("reconciliation requires a retained effect plan")
+    active = dict(raw_active)
+    authorization_fields = (
+        "effect_id",
+        "attempt_id",
+        "tool_call_id",
+        "tool_name",
+        "authorization_transition_id",
+        "dispatch_owner_epoch",
+    )
+    if any(
+        unknown.get(field_name) != active.get(field_name)
+        for field_name in authorization_fields
+    ):
+        raise ValueError("unknown effect does not match retained authorization")
+    indeterminate_input_id = unknown.get("indeterminate_input_id")
+    if not isinstance(indeterminate_input_id, str) or not indeterminate_input_id:
+        raise ValueError("unknown effect is missing its consume-once input")
+    if (
+        unknown.get("effect_id") != evidence.effect_id
+        or unknown.get("attempt_id") != evidence.attempt_id
+        or unknown.get("authorization_transition_id")
+        != evidence.authorization_transition_id
+    ):
+        raise ValueError("unknown effect does not match reconciliation evidence")
+    runtime_state["reconciled_effect"] = {
+        **unknown,
+        "reconciliation_transition_id": record.transition_id,
+        "evidence_ref": evidence.evidence_ref,
+        "reconciliation_owner_epoch": evidence.reconciliation_owner_epoch,
+        "reconciled_input_id": reconciled_effect_input_id(record),
+        "outcome": evidence.outcome.value,
+        "result": evidence.result,
+        "reason_code": evidence.reason_code,
+        "reason_message": evidence.reason_message,
+    }
+    state_value["_agentkit_runtime"] = runtime_state
+    return state_value
+
+
+@dataclass(frozen=True)
+class ExecutorAttemptRecord:
+    session_id: str
+    effect_id: str
+    attempt_id: str
+    authorization_transition_id: str
+    dispatch_owner_epoch: int
+    status: ExecutorAttemptStatus
+    executor_id: str | None = None
+    claim_generation: int = 0
+    reservation_lease_expires_at: datetime | None = None
+    quiescence_evidence_ref: str | None = None
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "session_id",
+            "effect_id",
+            "attempt_id",
+            "authorization_transition_id",
+            "status",
+        ):
+            _require_non_empty(field_name, getattr(self, field_name))
+        if not isinstance(self.status, ExecutorAttemptStatus):
+            object.__setattr__(self, "status", ExecutorAttemptStatus(self.status))
+        if (
+            isinstance(self.dispatch_owner_epoch, bool)
+            or not isinstance(self.dispatch_owner_epoch, int)
+            or self.dispatch_owner_epoch <= 0
+        ):
+            raise ValueError("dispatch_owner_epoch must be a positive integer")
+        if (
+            isinstance(self.claim_generation, bool)
+            or not isinstance(self.claim_generation, int)
+            or self.claim_generation < 0
+        ):
+            raise ValueError("claim_generation must be a non-negative integer")
+        if self.status is ExecutorAttemptStatus.AUTHORIZED_UNCLAIMED:
+            if (
+                self.executor_id is not None
+                or self.claim_generation != 0
+                or self.reservation_lease_expires_at is not None
+                or self.quiescence_evidence_ref is not None
+            ):
+                raise ValueError("authorized_unclaimed attempt cannot carry a claim")
+            return
+        if self.executor_id is None:
+            raise ValueError("claimed executor attempt requires executor_id")
+        _require_non_empty("executor_id", self.executor_id)
+        if self.claim_generation <= 0:
+            raise ValueError("claimed executor attempt requires claim_generation")
+        if self.reservation_lease_expires_at is None:
+            raise ValueError("claimed executor attempt requires reservation lease")
+        _require_datetime(
+            "reservation_lease_expires_at",
+            self.reservation_lease_expires_at,
+        )
+        if self.status is ExecutorAttemptStatus.QUIESCENT:
+            if self.quiescence_evidence_ref is None:
+                raise ValueError("quiescent executor attempt requires evidence")
+            _require_non_empty(
+                "quiescence_evidence_ref",
+                self.quiescence_evidence_ref,
+            )
+        elif self.quiescence_evidence_ref is not None:
+            raise ValueError("only quiescent executor attempts carry evidence")
+
+    def payload(self) -> JSONObject:
+        return {
+            "session_id": self.session_id,
+            "effect_id": self.effect_id,
+            "attempt_id": self.attempt_id,
+            "authorization_transition_id": self.authorization_transition_id,
+            "dispatch_owner_epoch": self.dispatch_owner_epoch,
+            "status": self.status.value,
+            "executor_id": self.executor_id,
+            "claim_generation": self.claim_generation,
+            "reservation_lease_expires_at": (
+                None
+                if self.reservation_lease_expires_at is None
+                else self.reservation_lease_expires_at.isoformat()
+            ),
+            "quiescence_evidence_ref": self.quiescence_evidence_ref,
+        }
+
+
+@dataclass(frozen=True)
 class OperationReceiptSlot:
     receipt_id: str
     generation: str
@@ -387,6 +631,8 @@ class AuthoritativeUnitOfWork:
     dispositions: tuple[CommandDisposition, ...] = ()
     effect_mutation: EffectMutation | None = None
     expected_mailbox_cut: str | None = None
+    expected_reconciliation_authorization_transition_id: str | None = None
+    reconciliation_evidence_ref: str | None = None
 
     def __post_init__(self) -> None:
         if self.event is not None and not isinstance(self.event, EventRecord):
@@ -473,6 +719,46 @@ class AuthoritativeUnitOfWork:
                     "expected_mailbox_cut must be a decimal u64 string"
                 )
 
+        is_reconciliation = (
+            self.effect_mutation is not None
+            and self.effect_mutation.expected_status is EffectStatus.UNKNOWN
+            and self.effect_mutation.status
+            in {EffectStatus.COMPLETED, EffectStatus.FAILED}
+            and self.effect_mutation.reconciliation is not None
+        )
+        reconciliation_fields = (
+            self.expected_reconciliation_authorization_transition_id,
+            self.reconciliation_evidence_ref,
+        )
+        if is_reconciliation and any(value is None for value in reconciliation_fields):
+            raise InvalidReconciliationPreconditionError(
+                "reconciliation requires retained authorization and durable evidence"
+            )
+        if not is_reconciliation and any(
+            value is not None for value in reconciliation_fields
+        ):
+            raise InvalidReconciliationPreconditionError(
+                "reconciliation preconditions are forbidden outside UNKNOWN settlement"
+            )
+        if self.expected_reconciliation_authorization_transition_id is not None:
+            _require_non_empty(
+                "expected_reconciliation_authorization_transition_id",
+                self.expected_reconciliation_authorization_transition_id,
+            )
+        if self.reconciliation_evidence_ref is not None:
+            _require_non_empty(
+                "reconciliation_evidence_ref",
+                self.reconciliation_evidence_ref,
+            )
+            if (
+                self.effect_mutation is not None
+                and self.effect_mutation.reconciliation is not None
+                and self.effect_mutation.reconciliation.evidence_ref
+                != self.reconciliation_evidence_ref
+            ):
+                raise InvalidReconciliationPreconditionError(
+                    "reconciliation evidence_ref must match the mutation record"
+                )
         if self.transition_id is None:
             if self.event is None:
                 raise ValueError("legacy unit of work requires an event")
@@ -638,6 +924,10 @@ def snapshot_transition_unit(
         dispositions=unit.dispositions,
         effect_mutation=effect_mutation,
         expected_mailbox_cut=unit.expected_mailbox_cut,
+        expected_reconciliation_authorization_transition_id=(
+            unit.expected_reconciliation_authorization_transition_id
+        ),
+        reconciliation_evidence_ref=unit.reconciliation_evidence_ref,
     )
 
 
@@ -750,6 +1040,10 @@ def transition_mutation_fingerprint(unit: AuthoritativeUnitOfWork) -> str:
         ],
         "effect_mutation": _effect_fingerprint_value(unit.effect_mutation),
         "expected_mailbox_cut": unit.expected_mailbox_cut,
+        "expected_reconciliation_authorization_transition_id": (
+            unit.expected_reconciliation_authorization_transition_id
+        ),
+        "reconciliation_evidence_ref": unit.reconciliation_evidence_ref,
     }
     canonical = json.dumps(
         mutation,

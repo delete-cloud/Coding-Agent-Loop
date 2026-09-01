@@ -45,6 +45,31 @@ class PgHarnessSqlMixin:
         payload JSONB NOT NULL,
         PRIMARY KEY (session_id, effect_id)
     );
+    CREATE TABLE IF NOT EXISTS session_effect_reconciliation_evidence (
+        session_id TEXT NOT NULL,
+        evidence_ref TEXT NOT NULL,
+        effect_id TEXT NOT NULL,
+        attempt_id TEXT NOT NULL,
+        authorization_transition_id TEXT NOT NULL,
+        reconciliation_owner_epoch BIGINT NOT NULL,
+        payload JSONB NOT NULL,
+        PRIMARY KEY (session_id, evidence_ref),
+        UNIQUE (
+            session_id, effect_id, attempt_id, authorization_transition_id
+        )
+    );
+    CREATE TABLE IF NOT EXISTS session_executor_attempts (
+        session_id TEXT NOT NULL,
+        effect_id TEXT NOT NULL,
+        attempt_id TEXT NOT NULL,
+        authorization_transition_id TEXT NOT NULL,
+        dispatch_owner_epoch BIGINT NOT NULL,
+        status TEXT NOT NULL,
+        payload JSONB NOT NULL,
+        PRIMARY KEY (
+            session_id, effect_id, attempt_id, authorization_transition_id
+        )
+    );
     CREATE TABLE IF NOT EXISTS session_receipt_slots (
         session_id TEXT NOT NULL,
         receipt_id TEXT NOT NULL,
@@ -281,6 +306,12 @@ class PgHarnessSqlMixin:
     WHERE session_id = $1 AND effect_id = $2
     """
 
+    _SELECT_EFFECT_SLOT_FOR_UPDATE_SQL = """
+    SELECT * FROM session_effect_slots
+    WHERE session_id = $1 AND effect_id = $2
+    FOR UPDATE
+    """
+
     _UPSERT_RECEIPT_SLOT_SQL = """
     INSERT INTO session_receipt_slots (
         session_id, receipt_id, generation, payload, compensation_effect_id
@@ -337,5 +368,51 @@ class PgHarnessSqlMixin:
         session_id, projection_epoch, transition_id, mutation_fingerprint, result
     )
     VALUES ($1, $2, $3, $4, $5::jsonb)
+    RETURNING *
+    """
+
+    _SELECT_RECONCILIATION_EVIDENCE_SQL = """
+    SELECT * FROM session_effect_reconciliation_evidence
+    WHERE session_id = $1 AND evidence_ref = $2
+    FOR UPDATE
+    """
+
+    _SELECT_RECONCILIATION_EVIDENCE_IDENTITY_SQL = """
+    SELECT * FROM session_effect_reconciliation_evidence
+    WHERE session_id = $1 AND effect_id = $2 AND attempt_id = $3
+      AND authorization_transition_id = $4
+    FOR UPDATE
+    """
+
+    _INSERT_RECONCILIATION_EVIDENCE_SQL = """
+    INSERT INTO session_effect_reconciliation_evidence (
+        session_id, evidence_ref, effect_id, attempt_id,
+        authorization_transition_id, reconciliation_owner_epoch, payload
+    )
+    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+    RETURNING *
+    """
+
+    _SELECT_EXECUTOR_ATTEMPT_SQL = """
+    SELECT * FROM session_executor_attempts
+    WHERE session_id = $1 AND effect_id = $2 AND attempt_id = $3
+      AND authorization_transition_id = $4
+    FOR UPDATE
+    """
+
+    _INSERT_EXECUTOR_ATTEMPT_SQL = """
+    INSERT INTO session_executor_attempts (
+        session_id, effect_id, attempt_id, authorization_transition_id,
+        dispatch_owner_epoch, status, payload
+    )
+    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+    RETURNING *
+    """
+
+    _UPDATE_EXECUTOR_ATTEMPT_SQL = """
+    UPDATE session_executor_attempts
+    SET status = $5, payload = $6::jsonb
+    WHERE session_id = $1 AND effect_id = $2 AND attempt_id = $3
+      AND authorization_transition_id = $4
     RETURNING *
     """
