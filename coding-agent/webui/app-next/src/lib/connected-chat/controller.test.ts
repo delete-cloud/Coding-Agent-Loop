@@ -60,7 +60,7 @@ class ControlledStream implements AsyncIterable<ChatStreamItem> {
 }
 
 function snapshot(sessionId: string, snapshotEvents: ChatEventEnvelope[] = [], snapshotCursor = cursor): ChatSnapshot {
-  return { contract_version: "1.0.0", session_id: sessionId, projection: "connected-chat", projection_epoch: "7", snapshot_cursor: snapshotCursor, next_cursor: null, events: snapshotEvents };
+  return { contract_version: "1.1.0", session_id: sessionId, projection: "connected-chat", projection_epoch: "7", snapshot_cursor: snapshotCursor, next_cursor: null, events: snapshotEvents };
 }
 
 function item(event: ChatEventEnvelope): ChatStreamItem { return { type: "chat_event", id: event.session_seq, event }; }

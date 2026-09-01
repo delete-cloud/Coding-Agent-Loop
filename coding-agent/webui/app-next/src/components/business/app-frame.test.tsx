@@ -714,7 +714,7 @@ describe("AppFrame draft sessions", () => {
     });
     await act(async () => {
       backend.lists.at(-1)?.resolve({
-        contract_version: "1.0.0",
+        contract_version: "1.1.0",
         sessions: [],
       });
       await flush();
@@ -781,7 +781,7 @@ describe("AppFrame draft sessions", () => {
     });
     await waitUntil(() => backend.lists.length === 2, "create to refresh the catalog");
     await act(async () => {
-      backend.lists[1].resolve({ contract_version: "1.0.0", sessions: catalogSessions });
+      backend.lists[1].resolve({ contract_version: "1.1.0", sessions: catalogSessions });
       await flush();
     });
     await waitUntil(
@@ -839,7 +839,7 @@ describe("AppFrame draft sessions", () => {
     });
     await waitUntil(() => backend.lists.length === 2, "create to refresh the catalog");
     await act(async () => {
-      backend.lists[1].resolve({ contract_version: "1.0.0", sessions: catalogSessions });
+      backend.lists[1].resolve({ contract_version: "1.1.0", sessions: catalogSessions });
       await flush();
     });
     await waitUntil(
@@ -863,7 +863,7 @@ describe("AppFrame draft sessions", () => {
     rerender(withIntl(<AppFrame services={services} />));
     await waitUntil(() => backend.lists.length === 3, "aborted first send to refresh the catalog");
     await act(async () => {
-      backend.lists[2].resolve({ contract_version: "1.0.0", sessions: catalogSessions });
+      backend.lists[2].resolve({ contract_version: "1.1.0", sessions: catalogSessions });
       await flush();
     });
 
@@ -895,7 +895,7 @@ describe("AppFrame draft sessions", () => {
     });
     await waitUntil(() => backend.lists.length === 2, "create to refresh the catalog");
     await act(async () => {
-      backend.lists[1].resolve({ contract_version: "1.0.0", sessions: [] });
+      backend.lists[1].resolve({ contract_version: "1.1.0", sessions: [] });
       await flush();
     });
 

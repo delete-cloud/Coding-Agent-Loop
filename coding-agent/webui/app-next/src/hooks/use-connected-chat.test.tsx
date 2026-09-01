@@ -34,6 +34,7 @@ describe("timelineToMessages", () => {
     const messages = timelineToMessages(fullTimeline());
 
     expect(messages.map((m) => m.id)).toEqual([
+      "evt-approval-child-01",
       "evt-user-01",
       "evt-thinking-01",
       "evt-progress-01",
@@ -45,6 +46,7 @@ describe("timelineToMessages", () => {
       "evt-terminal-interrupted",
     ]);
     expect(messages.map((m) => m.kind)).toEqual([
+      "approval",
       "user",
       "thinking",
       "progress",
@@ -56,24 +58,37 @@ describe("timelineToMessages", () => {
       "terminal",
     ]);
 
-    expect(messages[0].body).toBe("Run tests");
-    expect(messages[0].createdAt).toBe("2026-08-24T00:00:00Z");
-    expect(messages[1].body).toBe("Inspecting test suite");
-    expect(messages[2].body).toBe("Running tests");
-    expect(messages[2].progress).toEqual({ current: 1, total: 2 });
-    expect(messages[4].body).toBe("All tests pass.");
+    expect(messages[1].body).toBe("Run tests");
+    expect(messages[1].createdAt).toBe("2026-08-24T00:00:00Z");
+    expect(messages[2].body).toBe("Inspecting test suite");
+    expect(messages[3].body).toBe("Running tests");
+    expect(messages[3].progress).toEqual({ current: 1, total: 2 });
+    expect(messages[5].body).toBe("All tests pass.");
 
-    const tool = messages[3];
+    const tool = messages[4];
     expect(tool.toolName).toBe("bash");
     expect(tool.toolArguments).toBe(JSON.stringify({ command: "pytest" }));
     expect(tool.toolOutput).toBe("42 passed");
     expect(tool.toolError).toBe(false);
 
-    expect(messages[5].terminalOutcome).toBe("completed");
-    expect(messages[5].body).toBe("All tests pass.");
-    expect(messages[6].terminalOutcome).toBe("failed");
-    expect(messages[6].body).toBe("Adapter failed");
-    expect(messages[8].terminalOutcome).toBe("interrupted");
+    expect(messages[6].terminalOutcome).toBe("completed");
+    expect(messages[6].body).toBe("All tests pass.");
+    expect(messages[7].terminalOutcome).toBe("failed");
+    expect(messages[7].body).toBe("Adapter failed");
+    expect(messages[9].terminalOutcome).toBe("interrupted");
+    expect(messages[0]).toMatchObject({
+      kind: "approval",
+      body: "write_file",
+      toolName: "write_file",
+      toolArguments: JSON.stringify({ path: "src/example.py" }),
+      approvalRequestId: "approval-01",
+      toolCallId: "call-child-01",
+      effectId: "effect-child-01",
+      attemptId: "attempt-child-01",
+      approvalTargetRunId:
+        "session-01:run-01:child:effect-child-01:attempt-child-01",
+      approvalTargetParentEffectId: "effect-child-01",
+    });
   });
 
   it("renders a tool call without a result and marks error results", () => {
@@ -239,7 +254,7 @@ describe("useConnectedChat", () => {
     });
     expect(backend.cancels).toHaveLength(1);
     backend.cancels[0].resolve({
-      contract_version: "1.0.0",
+      contract_version: "1.1.0",
       session_id: "session-01",
       run_id: "run-01",
       status: "cancelling",
@@ -284,7 +299,7 @@ describe("useSessionCatalog", () => {
 
     await act(async () => {
       backend.lists[0].resolve({
-        contract_version: "1.0.0",
+        contract_version: "1.1.0",
         sessions: [{ session_id: "session-01", title: "Run tests" }],
       });
     });
@@ -312,7 +327,7 @@ describe("useSessionCatalog", () => {
     expect(result.current.status).toBe("loading");
     await act(async () => {
       backend.lists[1].resolve({
-        contract_version: "1.0.0",
+        contract_version: "1.1.0",
         sessions: [{ session_id: "session-02", title: null }],
       });
     });
@@ -324,7 +339,7 @@ describe("useSessionCatalog", () => {
     const backend = new FakeBackend();
     const { result } = renderHook(() => useSessionCatalog(backend));
     await act(async () => {
-      backend.lists[0].resolve({ contract_version: "1.0.0", sessions: [] });
+      backend.lists[0].resolve({ contract_version: "1.1.0", sessions: [] });
     });
 
     let createdId: string | null = null;
@@ -348,7 +363,7 @@ describe("useSessionCatalog", () => {
 
     await act(async () => {
       backend.lists[1].resolve({
-        contract_version: "1.0.0",
+        contract_version: "1.1.0",
         sessions: [{ session_id: "session-03", title: null }],
       });
       await pendingCreate;

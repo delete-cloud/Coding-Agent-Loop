@@ -115,7 +115,7 @@ export function makeSnapshot(
   snapshotCursor = "cursor",
 ): ChatSnapshot {
   return {
-    contract_version: "1.0.0",
+    contract_version: "1.1.0",
     session_id: sessionId,
     projection: "connected-chat",
     projection_epoch: "7",

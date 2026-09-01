@@ -75,6 +75,60 @@ def store_kind(request: pytest.FixtureRequest) -> str:
     return str(request.param)
 
 
+def test_connected_chat_projector_filters_child_internals_and_keeps_targeted_approval() -> (
+    None
+):
+    parent = _run("parent-run")
+    internal = EventRecord(
+        event_id="child-internal",
+        session_id=SESSION_ID,
+        event_kind="assistant_message",
+        payload={
+            "run_id": "child-run",
+            "text": "private child thought",
+            "subagent_child": True,
+            "skip_parent_context": True,
+        },
+        created_at=datetime(2026, 8, 24, tzinfo=UTC),
+        session_seq="1",
+    )
+    approval = EventRecord(
+        event_id="child-approval",
+        session_id=SESSION_ID,
+        event_kind="approval_requested",
+        payload={
+            "run_id": "parent-run",
+            "approval_request_id": "approval-1",
+            "tool_call_id": "call-1",
+            "tool_name": "write_file",
+            "arguments": {"path": "src/file.py"},
+            "effect_id": "child-effect",
+            "attempt_id": "child-attempt",
+            "target_run_id": "child-run",
+            "target_parent_effect_id": "parent-effect",
+            "subagent_child": True,
+            "skip_parent_context": True,
+        },
+        created_at=datetime(2026, 8, 24, tzinfo=UTC),
+        session_seq="2",
+    )
+
+    assert project_chat_event(internal, None) is None
+    projected = project_chat_event(approval, parent)
+    assert projected is not None
+    assert projected.run_id == "parent-run"
+    assert projected.payload == {
+        "approval_request_id": "approval-1",
+        "tool_call_id": "call-1",
+        "tool_name": "write_file",
+        "arguments": {"path": "src/file.py"},
+        "effect_id": "child-effect",
+        "attempt_id": "child-attempt",
+        "target_run_id": "child-run",
+        "target_parent_effect_id": "parent-effect",
+    }
+
+
 @pytest.mark.asyncio
 async def test_snapshot_chat_events_empty_and_nonempty_pages_are_bounded(
     store_kind: str,

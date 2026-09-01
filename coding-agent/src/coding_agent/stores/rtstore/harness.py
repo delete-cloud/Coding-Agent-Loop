@@ -10,14 +10,16 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Final, cast
+from typing import Any, Final, TypeVar, cast
 
 from agentkit.runtime.contracts import (
+    ApprovalSettlement,
     AppliedCommandDisposition,
     CommandDisposition,
     CommitRef,
     CommittedFactNotice,
     EffectMutation,
+    EffectPlan,
     EffectStatus,
     ReconciliationRecord,
     ReconciliationOutcome,
@@ -103,11 +105,28 @@ class ExecutorAttemptConflictError(RuntimeError):
     """Raised when an executor-attempt state transition is not exact."""
 
 
+class ChildBindingConflictError(RuntimeError):
+    """Raised when a parent effect is rebound to a different durable child."""
+
+
+class RecoveryLeaseConflictError(RuntimeError):
+    """Raised when recovered child lease authority is stale or unavailable."""
+
+
+class StaleRecoveryGuardError(RuntimeError):
+    """Raised before writes when a recovery guard no longer owns the fact cut."""
+
+
 class ExecutorAttemptStatus(StrEnum):
     AUTHORIZED_UNCLAIMED = "authorized_unclaimed"
     RESERVED = "reserved"
     STARTED = "started"
     QUIESCENT = "quiescent"
+
+
+class RecoveryGuardKind(StrEnum):
+    CHILD_TERMINAL = "child_terminal"
+    PARENT_SETTLEMENT = "parent_settlement"
 
 
 class KeyExpiredError(LookupError):
@@ -526,6 +545,8 @@ class ExecutorAttemptRecord:
     claim_generation: int = 0
     reservation_lease_expires_at: datetime | None = None
     quiescence_evidence_ref: str | None = None
+    authorization_mailbox_cut: str = "0"
+    authorization_mailbox_session_seq: str = "0"
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -550,6 +571,14 @@ class ExecutorAttemptRecord:
             or self.claim_generation < 0
         ):
             raise ValueError("claim_generation must be a non-negative integer")
+        parse_u64(
+            self.authorization_mailbox_cut,
+            field_name="authorization_mailbox_cut",
+        )
+        parse_u64(
+            self.authorization_mailbox_session_seq,
+            field_name="authorization_mailbox_session_seq",
+        )
         if self.status is ExecutorAttemptStatus.AUTHORIZED_UNCLAIMED:
             if (
                 self.executor_id is not None
@@ -588,6 +617,10 @@ class ExecutorAttemptRecord:
             "authorization_transition_id": self.authorization_transition_id,
             "dispatch_owner_epoch": self.dispatch_owner_epoch,
             "status": self.status.value,
+            "authorization_mailbox_cut": self.authorization_mailbox_cut,
+            "authorization_mailbox_session_seq": (
+                self.authorization_mailbox_session_seq
+            ),
             "executor_id": self.executor_id,
             "claim_generation": self.claim_generation,
             "reservation_lease_expires_at": (
@@ -597,6 +630,145 @@ class ExecutorAttemptRecord:
             ),
             "quiescence_evidence_ref": self.quiescence_evidence_ref,
         }
+
+
+@dataclass(frozen=True)
+class RecoveredChildExecutionLease:
+    session_id: str
+    child_run_id: str
+    lease_id: str
+    resume_generation: int
+    resume_cut: str
+    owner_epoch: int
+    prior_session_seq: str = "0"
+    resume_session_seq: str = "0"
+    mailbox_snapshot: tuple[CommandMailboxEntry, ...] = ()
+
+    def __post_init__(self) -> None:
+        for field_name in ("session_id", "child_run_id", "lease_id"):
+            _require_non_empty(field_name, getattr(self, field_name))
+        if (
+            isinstance(self.resume_generation, bool)
+            or not isinstance(self.resume_generation, int)
+            or self.resume_generation <= 0
+        ):
+            raise ValueError("resume_generation must be a positive integer")
+        parse_u64(self.resume_cut, field_name="resume_cut")
+        prior_session_seq = parse_u64(
+            self.prior_session_seq,
+            field_name="prior_session_seq",
+        )
+        resume_session_seq = parse_u64(
+            self.resume_session_seq,
+            field_name="resume_session_seq",
+        )
+        if prior_session_seq > resume_session_seq:
+            raise ValueError("prior_session_seq cannot exceed resume_session_seq")
+        snapshot = tuple(self.mailbox_snapshot)
+        if any(not isinstance(entry, CommandMailboxEntry) for entry in snapshot):
+            raise TypeError("mailbox_snapshot must contain CommandMailboxEntry values")
+        admitted_sequences = [
+            parse_u64(
+                entry.admitted_session_seq,
+                field_name="admitted_session_seq",
+            )
+            for entry in snapshot
+        ]
+        if admitted_sequences != sorted(admitted_sequences):
+            raise ValueError("mailbox_snapshot must be ordered by admitted_session_seq")
+        if any(
+            sequence <= prior_session_seq or sequence > resume_session_seq
+            for sequence in admitted_sequences
+        ):
+            raise ValueError("mailbox_snapshot entry is outside lease session range")
+        object.__setattr__(self, "mailbox_snapshot", snapshot)
+        if (
+            isinstance(self.owner_epoch, bool)
+            or not isinstance(self.owner_epoch, int)
+            or self.owner_epoch <= 0
+        ):
+            raise ValueError("owner_epoch must be a positive integer")
+
+
+@dataclass(frozen=True)
+class ChildExecutionBinding:
+    session_id: str
+    parent_run_id: str
+    parent_effect_id: str
+    parent_attempt_id: str
+    child_run_id: str
+    authorization_transition_id: str
+    live_parent_settlement_transition_id: str
+    active_lease: RecoveredChildExecutionLease | None = None
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "session_id",
+            "parent_run_id",
+            "parent_effect_id",
+            "parent_attempt_id",
+            "child_run_id",
+            "authorization_transition_id",
+            "live_parent_settlement_transition_id",
+        ):
+            _require_non_empty(field_name, getattr(self, field_name))
+        if self.active_lease is not None:
+            if not isinstance(self.active_lease, RecoveredChildExecutionLease):
+                raise TypeError(
+                    "active_lease must be RecoveredChildExecutionLease or None"
+                )
+            if (
+                self.active_lease.session_id != self.session_id
+                or self.active_lease.child_run_id != self.child_run_id
+            ):
+                raise ValueError("active lease must match its child binding")
+
+
+@dataclass(frozen=True)
+class RecoveryTransitionGuard:
+    lease_id: str
+    child_run_id: str
+    resume_generation: int
+    expected_recovery_cut: str
+    kind: RecoveryGuardKind
+
+    def __post_init__(self) -> None:
+        _require_non_empty("lease_id", self.lease_id)
+        _require_non_empty("child_run_id", self.child_run_id)
+        if (
+            isinstance(self.resume_generation, bool)
+            or not isinstance(self.resume_generation, int)
+            or self.resume_generation <= 0
+        ):
+            raise ValueError("resume_generation must be a positive integer")
+        parse_u64(
+            self.expected_recovery_cut,
+            field_name="expected_recovery_cut",
+        )
+        if not isinstance(self.kind, RecoveryGuardKind):
+            object.__setattr__(self, "kind", RecoveryGuardKind(self.kind))
+
+
+@dataclass(frozen=True)
+class UnstartedDispatchCloseoutGuard:
+    effect_id: str
+    attempt_id: str
+    authorization_transition_id: str
+    executor_id: str
+    evidence_ref: str
+    closed_at: datetime
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "effect_id",
+            "attempt_id",
+            "authorization_transition_id",
+            "executor_id",
+            "evidence_ref",
+        ):
+            _require_non_empty(field_name, getattr(self, field_name))
+
+        _require_datetime("closed_at", self.closed_at)
 
 
 @dataclass(frozen=True)
@@ -625,14 +797,21 @@ class AuthoritativeUnitOfWork:
     require_settled_parent_run_id: str | None = None
     require_unsettled_root_run_id: str | None = None
     transition_id: str | None = None
+    adopt_transition_ids: tuple[str, ...] = ()
     state_cas: OperationStateCAS | None = None
     state_value: Mapping[str, Any] | None = None
     facts: tuple[EventRecord, ...] = ()
     dispositions: tuple[CommandDisposition, ...] = ()
     effect_mutation: EffectMutation | None = None
+    effect_mutations: tuple[EffectMutation, ...] = ()
+    effect_plans: tuple[EffectPlan, ...] = ()
     expected_mailbox_cut: str | None = None
     expected_reconciliation_authorization_transition_id: str | None = None
     reconciliation_evidence_ref: str | None = None
+    child_bindings: tuple[ChildExecutionBinding, ...] = ()
+    recovery_guard: RecoveryTransitionGuard | None = None
+    terminal_action: bool = False
+    unstarted_dispatch_closeout: UnstartedDispatchCloseoutGuard | None = None
 
     def __post_init__(self) -> None:
         if self.event is not None and not isinstance(self.event, EventRecord):
@@ -670,6 +849,20 @@ class AuthoritativeUnitOfWork:
                     "root settlement run_state does not match required run"
                 )
         facts = tuple(self.facts)
+        adopt_transition_ids = tuple(self.adopt_transition_ids)
+        if any(
+            not isinstance(transition_id, str) for transition_id in adopt_transition_ids
+        ):
+            raise TypeError("adopt_transition_ids must contain strings")
+        if any(not transition_id for transition_id in adopt_transition_ids):
+            raise ValueError("adopt_transition_ids must be non-empty strings")
+        if len(adopt_transition_ids) != len(set(adopt_transition_ids)):
+            raise ValueError("adopt_transition_ids must be unique")
+        if self.transition_id in adopt_transition_ids:
+            raise ValueError(
+                "adopt_transition_ids cannot contain the current transition"
+            )
+        object.__setattr__(self, "adopt_transition_ids", adopt_transition_ids)
         if any(not isinstance(fact, EventRecord) for fact in facts):
             raise TypeError("facts must contain EventRecord values")
         object.__setattr__(self, "facts", facts)
@@ -693,11 +886,104 @@ class AuthoritativeUnitOfWork:
             EffectMutation,
         ):
             raise TypeError("effect_mutation must be an EffectMutation")
-        is_dispatch_authorization = (
-            self.effect_mutation is not None
-            and self.effect_mutation.expected_status is EffectStatus.PREPARED
-            and self.effect_mutation.status is EffectStatus.DISPATCHED
-        )
+        mutations = tuple(self.effect_mutations)
+        if any(not isinstance(mutation, EffectMutation) for mutation in mutations):
+            raise TypeError("effect_mutations must contain EffectMutation values")
+        if self.effect_mutation is not None and mutations:
+            raise ValueError(
+                "singular and plural effect mutation inputs are mutually exclusive"
+            )
+        object.__setattr__(self, "effect_mutations", mutations)
+        normalized_mutations = self.normalized_effect_mutations
+        effect_ids = [mutation.effect_id for mutation in normalized_mutations]
+        if len(effect_ids) != len(set(effect_ids)):
+            raise ValueError("effect_mutations contain duplicate effect_id values")
+
+        plans = tuple(self.effect_plans)
+        if any(not isinstance(plan, EffectPlan) for plan in plans):
+            raise TypeError("effect_plans must contain EffectPlan values")
+        plan_effect_ids = [plan.effect_id for plan in plans]
+        if len(plan_effect_ids) != len(set(plan_effect_ids)):
+            raise ValueError("effect_plans contain duplicate effect_id values")
+        prepared_effect_ids = [
+            mutation.effect_id
+            for mutation in normalized_mutations
+            if mutation.expected_status is None
+        ]
+        if plans and plan_effect_ids != prepared_effect_ids:
+            raise ValueError(
+                "effect_plans must match ordered prepared effect mutations"
+            )
+        object.__setattr__(self, "effect_plans", plans)
+        bindings = tuple(self.child_bindings)
+        if any(not isinstance(binding, ChildExecutionBinding) for binding in bindings):
+            raise TypeError("child_bindings must contain ChildExecutionBinding values")
+        binding_effect_ids = [binding.parent_effect_id for binding in bindings]
+        if len(binding_effect_ids) != len(set(binding_effect_ids)):
+            raise ValueError("child_bindings contain duplicate parent effect IDs")
+        binding_child_ids = [binding.child_run_id for binding in bindings]
+        if len(binding_child_ids) != len(set(binding_child_ids)):
+            raise ValueError("child_bindings contain duplicate child run IDs")
+        prepared_attempts = {
+            (mutation.effect_id, mutation.attempt_id)
+            for mutation in normalized_mutations
+            if mutation.expected_status is None
+        }
+        if any(
+            (binding.parent_effect_id, binding.parent_attempt_id)
+            not in prepared_attempts
+            for binding in bindings
+        ):
+            raise ValueError("child binding must match a prepared effect mutation")
+        object.__setattr__(self, "child_bindings", bindings)
+        if self.recovery_guard is not None and not isinstance(
+            self.recovery_guard,
+            RecoveryTransitionGuard,
+        ):
+            raise TypeError("recovery_guard must be RecoveryTransitionGuard or None")
+        if self.recovery_guard is not None and self.expected_mailbox_cut is not None:
+            raise ValueError(
+                "recovery_guard and dispatch mailbox cut are mutually exclusive"
+            )
+        if not isinstance(self.terminal_action, bool):
+            raise TypeError("terminal_action must be a bool")
+        if self.unstarted_dispatch_closeout is not None and not isinstance(
+            self.unstarted_dispatch_closeout,
+            UnstartedDispatchCloseoutGuard,
+        ):
+            raise TypeError(
+                "unstarted_dispatch_closeout must be "
+                "UnstartedDispatchCloseoutGuard or None"
+            )
+        if self.unstarted_dispatch_closeout is not None:
+            closeout = self.unstarted_dispatch_closeout
+            closeout_mutations = [
+                mutation
+                for mutation in normalized_mutations
+                if mutation.effect_id == closeout.effect_id
+                and mutation.attempt_id == closeout.attempt_id
+                and mutation.expected_status is EffectStatus.DISPATCHED
+                and mutation.status is EffectStatus.UNKNOWN
+                and mutation.payload.get("authorization_transition_id")
+                == closeout.authorization_transition_id
+            ]
+            if len(normalized_mutations) != 1 or len(closeout_mutations) != 1:
+                raise ValueError(
+                    "unstarted dispatch closeout requires its single "
+                    "DISPATCHED -> UNKNOWN mutation"
+                )
+
+        dispatch_mutations = [
+            mutation
+            for mutation in normalized_mutations
+            if mutation.expected_status is EffectStatus.PREPARED
+            and mutation.status is EffectStatus.DISPATCHED
+        ]
+        if dispatch_mutations and len(normalized_mutations) != 1:
+            raise InvalidDispatchAuthorizationError(
+                "dispatch authorization requires exactly one effect mutation"
+            )
+        is_dispatch_authorization = len(dispatch_mutations) == 1
         if is_dispatch_authorization and self.expected_mailbox_cut is None:
             raise InvalidDispatchAuthorizationError(
                 "expected_mailbox_cut is required for PREPARED -> DISPATCHED"
@@ -719,13 +1005,21 @@ class AuthoritativeUnitOfWork:
                     "expected_mailbox_cut must be a decimal u64 string"
                 )
 
-        is_reconciliation = (
-            self.effect_mutation is not None
-            and self.effect_mutation.expected_status is EffectStatus.UNKNOWN
-            and self.effect_mutation.status
-            in {EffectStatus.COMPLETED, EffectStatus.FAILED}
-            and self.effect_mutation.reconciliation is not None
+        reconciliation_mutations = [
+            mutation
+            for mutation in normalized_mutations
+            if mutation.expected_status is EffectStatus.UNKNOWN
+            and mutation.status in {EffectStatus.COMPLETED, EffectStatus.FAILED}
+            and mutation.reconciliation is not None
+        ]
+        if len(reconciliation_mutations) > 1:
+            raise InvalidReconciliationPreconditionError(
+                "a transition may reconcile at most one effect"
+            )
+        reconciliation_mutation = (
+            reconciliation_mutations[0] if reconciliation_mutations else None
         )
+        is_reconciliation = reconciliation_mutation is not None
         reconciliation_fields = (
             self.expected_reconciliation_authorization_transition_id,
             self.reconciliation_evidence_ref,
@@ -751,9 +1045,9 @@ class AuthoritativeUnitOfWork:
                 self.reconciliation_evidence_ref,
             )
             if (
-                self.effect_mutation is not None
-                and self.effect_mutation.reconciliation is not None
-                and self.effect_mutation.reconciliation.evidence_ref
+                reconciliation_mutation is not None
+                and reconciliation_mutation.reconciliation is not None
+                and reconciliation_mutation.reconciliation.evidence_ref
                 != self.reconciliation_evidence_ref
             ):
                 raise InvalidReconciliationPreconditionError(
@@ -767,7 +1061,12 @@ class AuthoritativeUnitOfWork:
                 or self.state_value is not None
                 or facts
                 or dispositions
-                or self.effect_mutation is not None
+                or normalized_mutations
+                or plans
+                or bindings
+                or self.recovery_guard is not None
+                or self.terminal_action
+                or self.unstarted_dispatch_closeout is not None
             ):
                 raise ValueError(
                     "transition fields require transition_id, state_cas, and state_value"
@@ -793,15 +1092,14 @@ class AuthoritativeUnitOfWork:
                 raise ValueError(
                     "typed transitions cannot mix legacy unit-of-work mutations"
                 )
-            if (
-                self.effect_mutation is not None
-                and self.effect_mutation.reconciliation is not None
-                and self.effect_mutation.reconciliation.transition_id
-                != self.transition_id
-            ):
-                raise ValueError(
-                    "reconciliation transition_id must match the unit of work"
-                )
+            for mutation in normalized_mutations:
+                if (
+                    mutation.reconciliation is not None
+                    and mutation.reconciliation.transition_id != self.transition_id
+                ):
+                    raise ValueError(
+                        "reconciliation transition_id must match the unit of work"
+                    )
 
         for event in ((self.event,) if self.event is not None else ()) + facts:
             if event.session_seq is not None:
@@ -810,8 +1108,39 @@ class AuthoritativeUnitOfWork:
                 raise ValueError("event.projection_epoch is allocated by the store")
 
     @property
+    def normalized_effect_mutations(self) -> tuple[EffectMutation, ...]:
+        if self.effect_mutation is not None:
+            return (self.effect_mutation,)
+        return self.effect_mutations
+
+    @property
     def is_transition(self) -> bool:
         return self.transition_id is not None
+
+
+@dataclass(frozen=True)
+class RecoveredChildControlState:
+    dispatch_generation: str
+    session_seq: str
+    mailbox_snapshot: tuple[CommandMailboxEntry, ...] = ()
+
+    def __post_init__(self) -> None:
+        parse_u64(
+            self.dispatch_generation,
+            field_name="dispatch_generation",
+        )
+        parse_u64(self.session_seq, field_name="session_seq")
+        snapshot = tuple(self.mailbox_snapshot)
+        if any(
+            parse_u64(
+                entry.admitted_session_seq,
+                field_name="admitted_session_seq",
+            )
+            > parse_u64(self.session_seq, field_name="session_seq")
+            for entry in snapshot
+        ):
+            raise ValueError("control snapshot entry exceeds session_seq")
+        object.__setattr__(self, "mailbox_snapshot", snapshot)
 
 
 def _plain_json(value: object) -> object:
@@ -887,6 +1216,173 @@ def runtime_command_invalidates_dispatch(command: RuntimeCommand) -> bool:
     return not approved
 
 
+def validate_recovery_approval_refresh(
+    *,
+    lease: RecoveredChildExecutionLease,
+    state_version: OperationStateVersion,
+    approval: ApprovalSettlement,
+    mailbox_snapshot: tuple[CommandMailboxEntry, ...],
+) -> None:
+    """Validate one approved command against the durable child waiting plan."""
+
+    if state_version.run_id != lease.child_run_id:
+        raise RecoveryLeaseConflictError(
+            "approval refresh state does not belong to the recovered child"
+        )
+    if approval.owner_epoch != lease.owner_epoch or not approval.approved:
+        raise RecoveryLeaseConflictError(
+            "approval refresh does not belong to the active owner"
+        )
+    runtime_state = state_version.value.get("_agentkit_runtime")
+    if not isinstance(runtime_state, Mapping):
+        raise RecoveryLeaseConflictError(
+            "approval refresh requires durable child runtime state"
+        )
+    plans = runtime_state.get("pending_effect_plans")
+    if not isinstance(plans, list | tuple) or not plans:
+        raise RecoveryLeaseConflictError(
+            "approval refresh requires a durable waiting effect plan"
+        )
+    plan = plans[0]
+    if not isinstance(plan, Mapping):
+        raise RecoveryLeaseConflictError(
+            "approval refresh waiting effect plan is malformed"
+        )
+    payload = plan.get("payload")
+    if not isinstance(payload, Mapping):
+        raise RecoveryLeaseConflictError(
+            "approval refresh waiting effect payload is malformed"
+        )
+    expected_plan = (
+        approval.effect_id,
+        approval.attempt_id,
+        approval.input_id,
+        approval.tool_call_id,
+        approval.tool_name,
+    )
+    actual_plan = (
+        plan.get("effect_id"),
+        plan.get("attempt_id"),
+        plan.get("approval_request_id"),
+        payload.get("tool_call_id"),
+        payload.get("tool_name"),
+    )
+    if actual_plan != expected_plan:
+        raise RecoveryLeaseConflictError(
+            "approval refresh does not match the durable waiting effect plan"
+        )
+    matching = [
+        entry
+        for entry in mailbox_snapshot
+        if entry.command.command_id == approval.command_id
+    ]
+    if len(matching) != 1:
+        raise RecoveryLeaseConflictError(
+            "approval refresh command is absent or duplicated"
+        )
+    entry = matching[0]
+    command = entry.command
+    admitted_session_seq = parse_u64(
+        entry.admitted_session_seq,
+        field_name="admitted_session_seq",
+    )
+    is_new = admitted_session_seq > parse_u64(
+        lease.resume_session_seq,
+        field_name="resume_session_seq",
+    )
+    is_exact_replay = entry in lease.mailbox_snapshot
+    if (
+        entry.disposition != "pending"
+        or command.command_kind != "approval_decision"
+        or command.payload.get("approved") is not True
+        or command.payload.get("request_id") != approval.input_id
+        or command.payload.get("target_run_id") != lease.child_run_id
+        or not (is_new or is_exact_replay)
+    ):
+        raise RecoveryLeaseConflictError(
+            "approval refresh command does not authorize this recovered child"
+        )
+
+
+_ReceiptRow = TypeVar("_ReceiptRow")
+_TERMINAL_PARENT_EFFECT_STATUSES = frozenset(
+    {
+        EffectStatus.COMPLETED.value,
+        EffectStatus.FAILED.value,
+        EffectStatus.UNKNOWN.value,
+        EffectStatus.REJECTED.value,
+    }
+)
+
+
+def adopt_parent_settlement_receipt(
+    *,
+    current_id: str,
+    current_row: _ReceiptRow | None,
+    adopted_rows: tuple[tuple[str, _ReceiptRow | None], ...],
+    parent_effect_status: str | None,
+) -> tuple[str, _ReceiptRow] | None:
+    """Choose the unique parent-settlement receipt or detect corruption."""
+
+    present: dict[str, _ReceiptRow] = {}
+    if current_row is not None:
+        present[current_id] = current_row
+    for transition_id, row in adopted_rows:
+        if row is not None:
+            present[transition_id] = row
+    if len(present) >= 2:
+        raise EffectMutationConflictError(
+            "live and recovery parent settlement receipts both exist"
+        )
+    if current_row is not None:
+        return current_id, current_row
+    if len(present) == 1:
+        transition_id, row = next(iter(present.items()))
+        return transition_id, row
+    if parent_effect_status in _TERMINAL_PARENT_EFFECT_STATUSES:
+        raise EffectMutationConflictError(
+            "terminal parent effect has no live or recovery settlement receipt"
+        )
+    return None
+
+
+def validate_new_runtime_command_target(command: RuntimeCommand) -> None:
+    if not isinstance(command, RuntimeCommand):
+        raise TypeError("command must be a RuntimeCommand")
+    if command.command_kind not in {"cancel", "interrupt", "approval_decision"}:
+        return
+    target_run_id = command.payload.get("target_run_id")
+    target_scope = command.payload.get("target_scope")
+    has_run_target = isinstance(target_run_id, str) and bool(target_run_id)
+    has_global_target = target_scope == "global"
+    if target_run_id is not None and not has_run_target:
+        raise ValueError("target_run_id must be a non-empty string")
+    if target_scope is not None and not has_global_target:
+        raise ValueError("target_scope must be 'global'")
+    if has_run_target == has_global_target:
+        raise ValueError(
+            "new-runtime command requires exactly one run or global target"
+        )
+    if command.command_kind == "approval_decision":
+        approved = command.payload.get("approved")
+        if not isinstance(approved, bool):
+            raise TypeError("approval_decision payload must contain boolean approved")
+        if approved and has_global_target:
+            raise ValueError("approved decisions require target_run_id")
+
+
+def runtime_command_targets(
+    command: RuntimeCommand,
+    *,
+    run_ids: frozenset[str],
+) -> bool:
+    validate_new_runtime_command_target(command)
+    return (
+        command.payload.get("target_scope") == "global"
+        or command.payload.get("target_run_id") in run_ids
+    )
+
+
 def snapshot_transition_unit(
     unit: AuthoritativeUnitOfWork,
 ) -> AuthoritativeUnitOfWork:
@@ -894,6 +1390,7 @@ def snapshot_transition_unit(
 
     if not unit.is_transition:
         return unit
+
     if unit.state_value is None:
         raise ValueError("typed transition is incomplete")
     facts = tuple(
@@ -903,31 +1400,62 @@ def snapshot_transition_unit(
         )
         for fact in unit.facts
     )
-    effect_mutation = (
-        None
-        if unit.effect_mutation is None
-        else replace(
-            unit.effect_mutation,
+    mutations = tuple(
+        replace(
+            mutation,
             payload=cast(
                 Mapping[str, Any],
-                _plain_json(unit.effect_mutation.payload),
+                _plain_json(mutation.payload),
             ),
         )
+        for mutation in unit.normalized_effect_mutations
+    )
+    plans = tuple(
+        replace(
+            plan,
+            payload=cast(
+                Mapping[str, Any],
+                _plain_json(plan.payload),
+            ),
+        )
+        for plan in unit.effect_plans
     )
     return AuthoritativeUnitOfWork(
         event=None,
         session_state=cast(JSONObject, _plain_json(unit.session_state)),
         transition_id=unit.transition_id,
         state_cas=unit.state_cas,
+        adopt_transition_ids=unit.adopt_transition_ids,
         state_value=cast(Mapping[str, Any], _plain_json(unit.state_value)),
         facts=facts,
         dispositions=unit.dispositions,
-        effect_mutation=effect_mutation,
+        effect_mutations=mutations,
+        effect_plans=plans,
         expected_mailbox_cut=unit.expected_mailbox_cut,
         expected_reconciliation_authorization_transition_id=(
             unit.expected_reconciliation_authorization_transition_id
         ),
         reconciliation_evidence_ref=unit.reconciliation_evidence_ref,
+        child_bindings=tuple(
+            replace(
+                binding,
+                active_lease=(
+                    None
+                    if binding.active_lease is None
+                    else replace(binding.active_lease)
+                ),
+            )
+            for binding in unit.child_bindings
+        ),
+        recovery_guard=(
+            None if unit.recovery_guard is None else replace(unit.recovery_guard)
+        ),
+        terminal_action=unit.terminal_action,
+        unstarted_dispatch_closeout=(
+            None
+            if unit.unstarted_dispatch_closeout is None
+            else replace(unit.unstarted_dispatch_closeout)
+        ),
     )
 
 
@@ -1014,6 +1542,285 @@ def _effect_fingerprint_value(mutation: EffectMutation | None) -> object:
     }
 
 
+def _effect_plan_payload(plan: EffectPlan) -> JSONObject:
+    return {
+        "effect_id": plan.effect_id,
+        "attempt_id": plan.attempt_id,
+        "effect_kind": plan.effect_kind,
+        "payload": cast(JSONObject, _plain_json(plan.payload)),
+        "idempotency_key": plan.idempotency_key,
+        "requires_approval": plan.requires_approval,
+        "approval_request_id": plan.approval_request_id,
+    }
+
+
+def _recovery_mailbox_entry_payload(entry: CommandMailboxEntry) -> JSONObject:
+    command_payload = runtime_command_mailbox_payload(entry.command)
+    return {
+        "command_id": entry.command.command_id,
+        "command_kind": command_payload["runtime_command_kind"],
+        "command_payload": command_payload["runtime_command_payload"],
+        "admitted_session_seq": entry.admitted_session_seq,
+        "admitted_dispatch_generation": entry.admitted_dispatch_generation,
+        "disposition": entry.disposition,
+    }
+
+
+def recovered_child_lease_payload(
+    lease: RecoveredChildExecutionLease | None,
+) -> JSONObject | None:
+    if lease is None:
+        return None
+    return {
+        "session_id": lease.session_id,
+        "child_run_id": lease.child_run_id,
+        "lease_id": lease.lease_id,
+        "resume_generation": lease.resume_generation,
+        "resume_cut": lease.resume_cut,
+        "owner_epoch": lease.owner_epoch,
+        "prior_session_seq": lease.prior_session_seq,
+        "resume_session_seq": lease.resume_session_seq,
+        "mailbox_snapshot": [
+            _recovery_mailbox_entry_payload(entry) for entry in lease.mailbox_snapshot
+        ],
+    }
+
+
+def child_execution_binding_payload(
+    binding: ChildExecutionBinding,
+) -> JSONObject:
+    return {
+        "session_id": binding.session_id,
+        "parent_run_id": binding.parent_run_id,
+        "parent_effect_id": binding.parent_effect_id,
+        "parent_attempt_id": binding.parent_attempt_id,
+        "child_run_id": binding.child_run_id,
+        "authorization_transition_id": binding.authorization_transition_id,
+        "live_parent_settlement_transition_id": (
+            binding.live_parent_settlement_transition_id
+        ),
+        "active_lease": recovered_child_lease_payload(binding.active_lease),
+    }
+
+
+def child_execution_binding_from_payload(
+    payload: Mapping[str, object],
+) -> ChildExecutionBinding:
+    raw_lease = payload.get("active_lease")
+    if raw_lease is not None and not isinstance(raw_lease, Mapping):
+        raise TypeError("child binding active_lease must be an object or null")
+    active_lease = (
+        None if raw_lease is None else recovered_child_lease_from_payload(raw_lease)
+    )
+    return ChildExecutionBinding(
+        session_id=_required_payload_str(
+            payload,
+            "session_id",
+            context="child binding",
+        ),
+        parent_run_id=_required_payload_str(
+            payload,
+            "parent_run_id",
+            context="child binding",
+        ),
+        parent_effect_id=_required_payload_str(
+            payload,
+            "parent_effect_id",
+            context="child binding",
+        ),
+        parent_attempt_id=_required_payload_str(
+            payload,
+            "parent_attempt_id",
+            context="child binding",
+        ),
+        child_run_id=_required_payload_str(
+            payload,
+            "child_run_id",
+            context="child binding",
+        ),
+        authorization_transition_id=_required_payload_str(
+            payload,
+            "authorization_transition_id",
+            context="child binding",
+        ),
+        live_parent_settlement_transition_id=_required_payload_str(
+            payload,
+            "live_parent_settlement_transition_id",
+            context="child binding",
+        ),
+        active_lease=active_lease,
+    )
+
+
+def recovered_child_lease_from_payload(
+    payload: Mapping[str, object],
+) -> RecoveredChildExecutionLease:
+    return RecoveredChildExecutionLease(
+        session_id=_required_payload_str(
+            payload,
+            "session_id",
+            context="child recovery lease",
+        ),
+        child_run_id=_required_payload_str(
+            payload,
+            "child_run_id",
+            context="child recovery lease",
+        ),
+        lease_id=_required_payload_str(
+            payload,
+            "lease_id",
+            context="child recovery lease",
+        ),
+        resume_generation=_required_payload_int(
+            payload,
+            "resume_generation",
+            context="child recovery lease",
+        ),
+        resume_cut=_required_payload_str(
+            payload,
+            "resume_cut",
+            context="child recovery lease",
+        ),
+        owner_epoch=_required_payload_int(
+            payload,
+            "owner_epoch",
+            context="child recovery lease",
+        ),
+        prior_session_seq=(
+            payload.get("prior_session_seq")
+            if isinstance(payload.get("prior_session_seq"), str)
+            else "0"
+        ),
+        resume_session_seq=(
+            payload.get("resume_session_seq")
+            if isinstance(payload.get("resume_session_seq"), str)
+            else "0"
+        ),
+        mailbox_snapshot=_recovery_mailbox_snapshot_from_payload(payload),
+    )
+
+
+def _recovery_mailbox_snapshot_from_payload(
+    payload: Mapping[str, object],
+) -> tuple[CommandMailboxEntry, ...]:
+    raw_snapshot = payload.get("mailbox_snapshot", [])
+    if not isinstance(raw_snapshot, list):
+        raise TypeError("child recovery lease mailbox_snapshot must be an array")
+    entries: list[CommandMailboxEntry] = []
+    for raw_entry in raw_snapshot:
+        if not isinstance(raw_entry, Mapping):
+            raise TypeError("child recovery lease mailbox entry must be an object")
+        command_id = _required_payload_str(
+            raw_entry,
+            "command_id",
+            context="child recovery mailbox entry",
+        )
+        command_kind = _required_payload_str(
+            raw_entry,
+            "command_kind",
+            context="child recovery mailbox entry",
+        )
+        command_payload = raw_entry.get("command_payload")
+        if not isinstance(command_payload, Mapping):
+            raise TypeError("child recovery mailbox command_payload must be an object")
+        entries.append(
+            CommandMailboxEntry(
+                command=RuntimeCommand(
+                    command_id=command_id,
+                    command_kind=command_kind,
+                    payload=command_payload,
+                ),
+                admitted_session_seq=_required_payload_str(
+                    raw_entry,
+                    "admitted_session_seq",
+                    context="child recovery mailbox entry",
+                ),
+                admitted_dispatch_generation=_required_payload_str(
+                    raw_entry,
+                    "admitted_dispatch_generation",
+                    context="child recovery mailbox entry",
+                ),
+                disposition=_required_payload_str(
+                    raw_entry,
+                    "disposition",
+                    context="child recovery mailbox entry",
+                ),
+            )
+        )
+    return tuple(entries)
+
+
+def unstarted_dispatch_closeout_guard_payload(
+    guard: UnstartedDispatchCloseoutGuard | None,
+) -> JSONObject | None:
+    if guard is None:
+        return None
+    return {
+        "effect_id": guard.effect_id,
+        "attempt_id": guard.attempt_id,
+        "authorization_transition_id": guard.authorization_transition_id,
+        "executor_id": guard.executor_id,
+        "evidence_ref": guard.evidence_ref,
+        "closed_at": guard.closed_at.isoformat(),
+    }
+
+
+def recovery_transition_guard_payload(
+    guard: RecoveryTransitionGuard | None,
+) -> JSONObject | None:
+    if guard is None:
+        return None
+    return {
+        "lease_id": guard.lease_id,
+        "child_run_id": guard.child_run_id,
+        "resume_generation": guard.resume_generation,
+        "expected_recovery_cut": guard.expected_recovery_cut,
+        "kind": guard.kind.value,
+    }
+
+
+def assert_recovery_guard_shape(
+    unit: AuthoritativeUnitOfWork,
+    binding: ChildExecutionBinding,
+) -> None:
+    guard = unit.recovery_guard
+    state_cas = unit.state_cas
+    if guard is None or state_cas is None:
+        raise StaleRecoveryGuardError("recovery guard transition is incomplete")
+    if guard.kind is RecoveryGuardKind.CHILD_TERMINAL:
+        mutates_parent_effect = any(
+            mutation.effect_id == binding.parent_effect_id
+            for mutation in unit.normalized_effect_mutations
+        )
+        if (
+            state_cas.run_id != binding.child_run_id
+            or not unit.terminal_action
+            or mutates_parent_effect
+        ):
+            raise StaleRecoveryGuardError("child terminal guard shape is invalid")
+        return
+    terminal_parent_mutations = [
+        mutation
+        for mutation in unit.normalized_effect_mutations
+        if mutation.effect_id == binding.parent_effect_id
+        and mutation.attempt_id == binding.parent_attempt_id
+        and mutation.expected_status is EffectStatus.DISPATCHED
+        and mutation.status
+        in {
+            EffectStatus.COMPLETED,
+            EffectStatus.FAILED,
+            EffectStatus.UNKNOWN,
+        }
+    ]
+    if (
+        state_cas.run_id != binding.parent_run_id
+        or unit.terminal_action
+        or len(unit.normalized_effect_mutations) != 1
+        or len(terminal_parent_mutations) != 1
+    ):
+        raise StaleRecoveryGuardError("parent settlement guard shape is invalid")
+
+
 def transition_mutation_fingerprint(unit: AuthoritativeUnitOfWork) -> str:
     if not unit.is_transition or unit.state_cas is None or unit.state_value is None:
         raise ValueError("mutation fingerprint requires a typed transition")
@@ -1038,7 +1845,19 @@ def transition_mutation_fingerprint(unit: AuthoritativeUnitOfWork) -> str:
             _disposition_fingerprint_value(disposition)
             for disposition in unit.dispositions
         ],
-        "effect_mutation": _effect_fingerprint_value(unit.effect_mutation),
+        "effect_mutations": [
+            _effect_fingerprint_value(mutation)
+            for mutation in unit.normalized_effect_mutations
+        ],
+        "effect_plans": [_effect_plan_payload(plan) for plan in unit.effect_plans],
+        "child_bindings": [
+            child_execution_binding_payload(binding) for binding in unit.child_bindings
+        ],
+        "recovery_guard": recovery_transition_guard_payload(unit.recovery_guard),
+        "terminal_action": unit.terminal_action,
+        "unstarted_dispatch_closeout": unstarted_dispatch_closeout_guard_payload(
+            unit.unstarted_dispatch_closeout
+        ),
         "expected_mailbox_cut": unit.expected_mailbox_cut,
         "expected_reconciliation_authorization_transition_id": (
             unit.expected_reconciliation_authorization_transition_id
@@ -1060,6 +1879,7 @@ def transition_commit_payload(
     state_version: OperationStateVersion,
     facts: tuple[EventRecord, ...],
     raw_cursor: RawCursor,
+    effect_plans: tuple[EffectPlan, ...] = (),
 ) -> JSONObject:
     return {
         "state_version": {
@@ -1085,6 +1905,7 @@ def transition_commit_payload(
             }
             for fact in facts
         ],
+        "effect_plans": [_effect_plan_payload(plan) for plan in effect_plans],
         "raw_cursor": {
             "session_id": raw_cursor.session_id,
             "session_seq": raw_cursor.session_seq,
@@ -1232,6 +2053,59 @@ def transition_commit_from_payload(
         if fact.session_id != session_id:
             raise ValueError("stored transition fact belongs to another session")
         facts.append(fact)
+    raw_effect_plans = payload.get("effect_plans", [])
+    if not isinstance(raw_effect_plans, list):
+        raise TypeError("transition result effect_plans must be a list")
+    effect_plans: list[EffectPlan] = []
+    for raw_plan in raw_effect_plans:
+        if not isinstance(raw_plan, Mapping):
+            raise TypeError("transition result effect_plans must contain objects")
+        plan_payload = _required_mapping(
+            raw_plan,
+            "payload",
+            context="transition effect plan",
+        )
+        idempotency_key = raw_plan.get("idempotency_key")
+        if idempotency_key is not None and not isinstance(idempotency_key, str):
+            raise TypeError(
+                "transition effect plan idempotency_key must be a string or null"
+            )
+        requires_approval = raw_plan.get("requires_approval", False)
+        if not isinstance(requires_approval, bool):
+            raise TypeError(
+                "transition effect plan requires_approval must be a boolean"
+            )
+        approval_request_id = raw_plan.get("approval_request_id")
+        if approval_request_id is not None and not isinstance(
+            approval_request_id,
+            str,
+        ):
+            raise TypeError(
+                "transition effect plan approval_request_id must be a string or null"
+            )
+        effect_plans.append(
+            EffectPlan(
+                effect_id=_required_payload_str(
+                    raw_plan,
+                    "effect_id",
+                    context="transition effect plan",
+                ),
+                attempt_id=_required_payload_str(
+                    raw_plan,
+                    "attempt_id",
+                    context="transition effect plan",
+                ),
+                effect_kind=_required_payload_str(
+                    raw_plan,
+                    "effect_kind",
+                    context="transition effect plan",
+                ),
+                payload=plan_payload,
+                idempotency_key=idempotency_key,
+                requires_approval=requires_approval,
+                approval_request_id=approval_request_id,
+            )
+        )
     raw_cursor_payload = _required_mapping(
         payload,
         "raw_cursor",
@@ -1275,6 +2149,7 @@ def transition_commit_from_payload(
         mutation_fingerprint=mutation_fingerprint,
         state_version=state_version,
         facts=notices,
+        effect_plans=tuple(effect_plans),
     )
     return state_version, tuple(facts), receipt, raw_cursor
 

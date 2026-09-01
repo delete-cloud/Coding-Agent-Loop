@@ -114,6 +114,22 @@ def test_fixture_covers_complete_connected_chat_contract() -> None:
     }
 
 
+def test_connected_chat_contract_includes_targeted_approval_requested() -> None:
+    fixture = _fixture()
+    approvals = [
+        event["data"]
+        for event in fixture["events"]
+        if event["data"]["kind"] == "approval_requested"
+    ]
+
+    assert len(approvals) == 1
+    approval = approvals[0]
+    assert int(approval["session_seq"]) <= 20
+    assert approval["run_id"] == "run-01"
+    assert approval["payload"]["target_run_id"].startswith("session-01:run-01:child:")
+    assert approval["payload"]["target_parent_effect_id"] == "effect-child-01"
+
+
 def test_cursor_fixture_bytes_round_trip_canonically() -> None:
     fixture = _fixture()
     state = _state()
@@ -342,6 +358,17 @@ def test_deterministic_run_ids_use_unambiguous_structured_input() -> None:
         ("progress", {"current": 3, "total": 2, "label": "bad"}),
         ("tool_call", {"tool_name": "bash", "arguments": {}}),
         ("tool_result", {"output": "missing call", "is_error": False}),
+        (
+            "approval_requested",
+            {
+                "approval_request_id": "approval-1",
+                "tool_call_id": "call-1",
+                "tool_name": "bash",
+                "arguments": [],
+                "effect_id": "effect-1",
+                "attempt_id": "attempt-1",
+            },
+        ),
         ("root_terminal", {"outcome": "unknown", "result": None, "error": None}),
     ],
 )
@@ -351,7 +378,7 @@ def test_connected_chat_schema_rejects_malformed_payloads(
     with pytest.raises(ValueError):
         ConnectedChatEventSchema.model_validate(
             {
-                "contract_version": "1.0.0",
+                "contract_version": "1.1.0",
                 "source_event_id": "event-1",
                 "session_seq": "1",
                 "session_id": "session-1",
@@ -394,6 +421,17 @@ def test_chat_event_constructor_rejects_malformed_typed_payload() -> None:
             {"call_id": "call-1", "output": "/repo", "is_error": False},
         ),
         (
+            "approval_requested",
+            {
+                "approval_request_id": "approval-1",
+                "tool_call_id": "call-1",
+                "tool_name": "bash",
+                "arguments": {"command": "pwd"},
+                "effect_id": "effect-1",
+                "attempt_id": "attempt-1",
+            },
+        ),
+        (
             "root_terminal",
             {
                 "outcome": "failed",
@@ -408,7 +446,7 @@ def test_connected_chat_schema_json_preserves_exact_typed_payload(
 ) -> None:
     event = ConnectedChatEventSchema.model_validate(
         {
-            "contract_version": "1.0.0",
+            "contract_version": "1.1.0",
             "source_event_id": "event-1",
             "session_seq": "1",
             "session_id": "session-1",
@@ -425,7 +463,7 @@ def test_connected_chat_schema_json_preserves_exact_typed_payload(
 def test_connected_chat_schema_allows_deliberate_additive_payload_fields() -> None:
     event = ConnectedChatEventSchema.model_validate(
         {
-            "contract_version": "1.0.0",
+            "contract_version": "1.1.0",
             "source_event_id": "event-1",
             "session_seq": "1",
             "session_id": "session-1",
@@ -442,3 +480,51 @@ def test_connected_chat_schema_allows_deliberate_additive_payload_fields() -> No
     )
 
     assert event.payload.vendor_detail == {"duration_ms": 1}
+
+
+def test_approval_requested_payload_requires_root_fields_and_child_targets() -> None:
+    base = {
+        "contract_version": "1.1.0",
+        "source_event_id": "approval-event",
+        "session_seq": "1",
+        "session_id": "session-1",
+        "run_id": "parent-run",
+        "kind": "approval_requested",
+        "created_at": "2026-08-24T00:00:00Z",
+        "payload": {
+            "approval_request_id": "approval-1",
+            "tool_call_id": "call-1",
+            "tool_name": "write_file",
+            "arguments": {"path": "src/file.py"},
+            "effect_id": "child-effect",
+            "attempt_id": "child-attempt",
+        },
+    }
+    root = ConnectedChatEventSchema.model_validate(base)
+    assert root.payload.target_run_id is None
+    assert root.payload.target_parent_effect_id is None
+
+    for lone_target in (
+        {"target_run_id": "child-run"},
+        {"target_parent_effect_id": "parent-effect"},
+    ):
+        with pytest.raises(ValueError):
+            ConnectedChatEventSchema.model_validate(
+                {
+                    **base,
+                    "payload": {**base["payload"], **lone_target},
+                }
+            )
+
+    child = ConnectedChatEventSchema.model_validate(
+        {
+            **base,
+            "payload": {
+                **base["payload"],
+                "target_run_id": "child-run",
+                "target_parent_effect_id": "parent-effect",
+            },
+        }
+    )
+    assert child.payload.target_run_id == "child-run"
+    assert child.payload.target_parent_effect_id == "parent-effect"

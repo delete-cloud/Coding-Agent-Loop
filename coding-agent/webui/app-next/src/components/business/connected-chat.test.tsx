@@ -279,7 +279,7 @@ describe("AppFrame catalog states", () => {
     await waitUntil(() => backend.lists.length === 3, "completed first send to refresh catalog");
     await act(async () => {
       backend.lists[2].resolve({
-        contract_version: "1.0.0",
+        contract_version: "1.1.0",
         sessions: [
           {
             session_id: "session-09",
@@ -330,7 +330,7 @@ describe("AppFrame catalog states", () => {
     );
     await act(async () => {
       backend.lists[1].resolve({
-        contract_version: "1.0.0",
+        contract_version: "1.1.0",
         sessions: [
           {
             session_id: "session-01",
@@ -617,7 +617,7 @@ describe("AppFrame timeline and composer", () => {
     await settle(
       () =>
         backend.cancels[0].resolve({
-          contract_version: "1.0.0",
+          contract_version: "1.1.0",
           session_id: "session-01",
           run_id: "run-01",
           status: "cancelling",
@@ -657,7 +657,7 @@ describe("AppFrame timeline and composer", () => {
         backend.follows[0].push({
           type: "stream_control",
           control: {
-            contract_version: "1.0.0",
+            contract_version: "1.1.0",
             kind: "replay_required",
             reason: "sequence_loss",
             cursor: "cursor-2",
@@ -699,7 +699,7 @@ describe("AppFrame timeline and composer", () => {
         backend.follows[0].push({
           type: "stream_control",
           control: {
-            contract_version: "1.0.0",
+            contract_version: "1.1.0",
             kind: "replay_required",
             reason: "sequence_loss",
             cursor: "cursor-2",
@@ -728,7 +728,7 @@ describe("AppFrame timeline and composer", () => {
         backend.follows[0].push({
           type: "stream_control",
           control: {
-            contract_version: "1.0.0",
+            contract_version: "1.1.0",
             kind: "replay_required",
             reason: "sequence_loss",
             cursor: "cursor-2",

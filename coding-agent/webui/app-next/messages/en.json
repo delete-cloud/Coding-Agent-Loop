@@ -48,6 +48,9 @@
     "toolRole": "tool",
     "toolErrorRole": "tool · error",
     "toolPending": "Running…",
+    "approvalRole": "approval required",
+    "approvalRequired": "Waiting for approval before this tool can run.",
+    "approvalChildTarget": "Requested by a child run",
     "terminalCompletedRole": "terminal · completed",
     "terminalFailedRole": "terminal · failed",
     "terminalCancelledRole": "terminal · cancelled",
@@ -82,7 +85,9 @@
     "replayRequired": "The event stream has a gap — reload the session to continue.",
     "model": "Send model",
     "provider": "Provider",
-    "searchModels": "Search models"
+    "searchModels": "Search models",
+    "modelsLoading": "Loading models…",
+    "modelsEmpty": "No remote models"
   },
   "details": {
     "label": "Details pane",

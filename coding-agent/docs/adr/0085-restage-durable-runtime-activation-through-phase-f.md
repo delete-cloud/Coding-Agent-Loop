@@ -2,6 +2,7 @@
 
 **Status**: Accepted
 **Date**: 2026-09-01
+**Last amended**: 2026-09-01 (Phase E two-watermark recovery and atomic unstarted closeout)
 
 Supersedes ADR-0018, ADR-0083, and ADR-0084. This record re-adopts every retained decision from those records, carries their earlier supersession chain, retains ADR-0010 (synchronize checkpoint restore with active turns), and replaces the D3b-through-F schedule.
 
@@ -90,6 +91,8 @@ When `authorize_dispatch` returns `StaleMailboxCutCommitResult`, the coordinator
 5. Rebuild the same `DispatchAuthorizationRequest` and host UoW with the candidate cut. Do not call `AgentEngine.propose`, do not replay the consumed input into another engine transition, and do not replace the prepared effect plan.
 6. Retry. A second or later stale result repeats this loop; stale never falls through to `_authorized_result` or a terminal failure.
 
+The coding-agent host wraps every new-runtime root and child coordinator call in one `DurableSegmentRunner`. Concrete CommitPorts retain a typed process-local marker when authorization returns exact replay. The runner consumes it, resolves one exact `EffectSettled` from D4 evidence, rebuilds the segment request at current durable state/cut, and re-enters the same coordinator until it obtains a non-marker outcome. No permit is minted and callers never receive `exact_replay_requires_recovery`. A process crash discards the marker. In E, child takeover reconstructs the same recovery under `RecoveredChildExecutionLease`; no new-runtime root is serving. Before F activation, root startup recovery must scan current-owner `DISPATCHED` attempts and apply the same D4 rules.
+
 The authorization proposal `transition_id` remains the permit and receipt identity across pre-commit stale retries. A typed stale refusal writes no state, fact, disposition, effect mutation, or receipt, so it does not establish an identity/cut binding. The first successful receipt binds that identity to the successful cut through the mutation fingerprint. An exact lost-ack retry uses that identity and cut. Once a receipt exists, using a different cut with the same identity is a fingerprint conflict.
 
 `expected_mailbox_cut` is not stored in `EffectMutation.payload`. `authorization_transition_id` remains stable there, preserving permit and settlement validation.
@@ -138,15 +141,15 @@ Child identity and facts:
 
 - Child and parent share `session_id`, session owner/epoch, and the session `EventRecord` sequence.
 - A child has a deterministic `run_id` and durable binding in the parent's prepared subagent plan.
-- `target_run_id` is carried inside frozen `RuntimeCommand.payload`.
-- Child internal facts carry `run_id`, `parent_run_id`, `subagent_child=true`, and `skip_parent_context=true`.
+- Run targeting is carried inside frozen `RuntimeCommand.payload`: nonempty `target_run_id`, or the mutually exclusive explicit `target_scope: "global"` for commands that ADR-0085 permits globally.
+- Child internal facts carry `run_id`, `parent_run_id`, `subagent_child=true`, and `skip_parent_context=true`. A child approval fact projected to the parent wire uses the parent run as envelope owner and retains child identity in target payload fields.
 - Child external effects have their own attempts and permits and obey PM-0028 independently of the parent subagent permit.
 
 Live child lifecycle:
 
 - The parent subagent effect is authorized once and its `EffectExecutor.execute` call remains active while the child is blocked or safe-yielded.
 - A child `BlockedOutcome` or nonterminal safe yield does not settle the parent.
-- The wrapper waits for targeted mailbox/control wake and invokes a new child segment with the legal existing input.
+- The wrapper waits for targeted invalidator generation or all-command session-sequence wake and invokes a new child segment with the legal existing input. Approval allow does not increment `dispatch_generation`.
 - Child `CompletedOutcome` settles the parent completed. Child `FailedOutcome`, `CancelledOutcome`, or `RoundLimitOutcome` settles the parent failed with a stable result.
 - Parent cancel/interrupt signals the child, settles or reconciles every claimed child permit, waits for durable child-executor quiescence, and only then settles the parent permit.
 - Approval denial preserves deny-and-continue: atomically commit `prepared -> rejected` and its disposition, refresh the cut, then continue the child with `ApprovalResolved`. The parent stays `DISPATCHED`.
@@ -155,12 +158,12 @@ Recovery uses a host-private `RecoveredChildExecutionLease`:
 
 - The lease is available only after durable old-executor quiescence, to the current parent session owner, for the deterministic child bound to the retained `DISPATCHED` parent authorization.
 - It is not a generic `EffectExecutor` permit and cannot authorize arbitrary tools.
-- Acquisition locks `session_fact_source`, records `resume_cut`, increments a fenced `resume_generation`, and snapshots mailbox entries admitted since the prior cut by `admitted_dispatch_generation` and target.
-- A pending parent/child cancel or interrupt is processed before continuation. A pending child approval denial is rejected and then continues with a fresh lease/cut.
-- A generation change caused only by sibling commands fences the current lease but does not terminate the child. Under the same fact-source lock the owner rebases to the latest cut and continues.
+- Authorization persists two watermarks: invalidating `dispatch_generation` as `authorization_mailbox_cut`, and all-command `admitted_session_seq` as `authorization_mailbox_session_seq`.
+- Acquisition locks `session_fact_source`, records `resume_cut` plus `prior_session_seq`/`resume_session_seq`, increments a fenced `resume_generation`, and snapshots target-matched mailbox entries in the admitted-session range. Approval allow admitted at an unchanged generation therefore remains recoverable.
+- Pending parent/child/global cancel or interrupt is processed before continuation. Pending denial is rejected and continues with a fresh lease/cut. Approval allow wakes separately, refreshes the all-command snapshot, and validates the waiting plan.
+- A sibling invalidator-generation change fences the lease. Recovery compares newest generation to persisted `resume_cut`; the coordinator request cut is only the desired rebase cut. Exact persisted rebase replay reuses its generation and snapshot.
 - Every child `PREPARED -> DISPATCHED` authorization uses `expected_mailbox_cut=resume_cut`.
-- If authorization stales before commit, no permit exists. If targeted control arrives after authorization, the wrapper invokes no not-yet-started executor, cancels/quiesces a started executor, and settles every claimed child permit before yielding to control.
-- A sibling-only post-authorization admission is `raised=false`; the already committed child authorization precedes that unrelated command and may execute once.
+- If control is observed after authorization but before executor entry, coordinator emits its existing indeterminate settlement. `commit_settlement` loads the exact attempt before constructing the UoW; only an `authorized_unclaimed` row causes it to attach a host-private closeout guard. The same UoW verifies/quiesces the attempt and commits `DISPATCHED -> UNKNOWN` plus receipt. Started execution follows normal cancellation/quiescence. Exact replay adopts the atomic receipt; a crash before commit leaves both unchanged.
 
 Recovery terminal writes carry a distinct host-private `expected_recovery_cut` and lease identity. The field is fingerprinted and valid only for recovery child-terminal or retained-parent-settlement UoWs. Each such transaction locks the fact source and requires `dispatch_generation == expected_recovery_cut` before terminal evidence, parent settlement, or state/fact mutation. Stale refusal writes nothing.
 
@@ -290,6 +293,7 @@ Each phase uses a separate task packet and pull request. No phase may serve new-
 - New-runtime sessions cannot call the legacy terminal writer or write `settled`.
 - Projector crash/takeover replay creates no duplicate interaction, fact, or wire event.
 - Checkpoint capture and restore reject before mutation for new-runtime sessions.
+- Before activation, root startup recovery proves authorization-commit/process-crash recovery from durable attempts without any process-local marker.
 - SQLite/PostgreSQL parity covers approval, child wait/cancel/recovery, reconciliation, projector receipts, activation rollback, and coexistence.
 - PM-0028 focused regression passes:
 

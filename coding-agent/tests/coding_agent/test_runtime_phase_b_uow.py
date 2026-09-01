@@ -28,6 +28,7 @@ from coding_agent.stores.durable_local import SQLiteLocalDurableStore
 from coding_agent.stores.rtstore import harness as rtstore_harness
 from coding_agent.stores.runtime_store import (
     AuthoritativeUnitOfWork,
+    ChildExecutionBinding,
     CommandDispositionConflictError,
     EffectLedgerSlot,
     EffectMutationConflictError,
@@ -38,6 +39,10 @@ from coding_agent.stores.runtime_store import (
     InvalidReconciliationPreconditionError,
     MailboxDispositionSlot,
     StaleMailboxCutError,
+    RecoveryGuardKind,
+    RecoveryLeaseConflictError,
+    RecoveryTransitionGuard,
+    StaleRecoveryGuardError,
     RecoveryEvidenceConflictError,
     StateVersionConflictError,
     TransitionFingerprintMismatchError,
@@ -82,8 +87,12 @@ def _transition(
     dispositions: tuple[object, ...] = (),
     effect_mutation: EffectMutation | None = None,
     expected_mailbox_cut: str | None = None,
+    effect_mutations: tuple[EffectMutation, ...] = (),
+    effect_plans: tuple[EffectPlan, ...] = (),
     expected_reconciliation_authorization_transition_id: str | None = None,
     reconciliation_evidence_ref: str | None = None,
+    child_bindings: tuple[ChildExecutionBinding, ...] = (),
+    recovery_guard: RecoveryTransitionGuard | None = None,
 ) -> AuthoritativeUnitOfWork:
     return AuthoritativeUnitOfWork(
         event=None,
@@ -100,10 +109,14 @@ def _transition(
         facts=facts,
         dispositions=dispositions,
         effect_mutation=effect_mutation,
+        effect_mutations=effect_mutations,
+        effect_plans=effect_plans,
         expected_mailbox_cut=expected_mailbox_cut,
         expected_reconciliation_authorization_transition_id=(
             expected_reconciliation_authorization_transition_id
         ),
+        child_bindings=child_bindings,
+        recovery_guard=recovery_guard,
         reconciliation_evidence_ref=reconciliation_evidence_ref,
     )
 
@@ -184,6 +197,77 @@ def test_mailbox_cut_is_forbidden_outside_dispatch_authorization() -> None:
             revision=0,
             expected_mailbox_cut="0",
         )
+
+
+def test_effect_mutations_reject_simultaneous_singular_and_plural_inputs() -> None:
+    mutation = _prepared_effect()
+    with pytest.raises(ValueError, match="singular and plural"):
+        _transition(
+            "transition-mixed-effect-mutations",
+            revision=0,
+            effect_mutation=mutation,
+            effect_mutations=(mutation,),
+        )
+
+
+def test_effect_mutations_reject_duplicate_effect_ids() -> None:
+    with pytest.raises(ValueError, match="duplicate effect_id"):
+        _transition(
+            "transition-duplicate-effect-mutations",
+            revision=0,
+            effect_mutations=(
+                _prepared_effect("duplicate-effect"),
+                _prepared_effect("duplicate-effect"),
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_multi_plan_preparation_commits_every_effect_atomically(
+    tmp_path: Path,
+) -> None:
+    store, owner = await _open_store(tmp_path)
+    plans = (
+        EffectPlan(
+            effect_id="effect-one",
+            attempt_id="attempt-one",
+            effect_kind="tool",
+            payload={"tool_name": "read", "path": "one"},
+            idempotency_key="idempotency-one",
+        ),
+        EffectPlan(
+            effect_id="effect-two",
+            attempt_id="attempt-two",
+            effect_kind="tool",
+            payload={"tool_name": "read", "path": "two"},
+            requires_approval=True,
+            approval_request_id="approval-two",
+        ),
+    )
+
+    committed = await store.commit_authoritative_uow(
+        owner,
+        _transition(
+            "transition-multi-effect",
+            revision=0,
+            effect_mutations=tuple(EffectMutation.prepare(plan) for plan in plans),
+            effect_plans=plans,
+        ),
+    )
+
+    first = await store.load_effect_slot(SESSION_ID, "effect-one")
+    second = await store.load_effect_slot(SESSION_ID, "effect-two")
+    assert first is not None and first.status == EffectStatus.PREPARED.value
+    assert second is not None and second.status == EffectStatus.PREPARED.value
+    assert committed.transition_receipt is not None
+    assert committed.transition_receipt.effect_plans == plans
+    replay = await store.load_transition_receipt(
+        SESSION_ID,
+        0,
+        "transition-multi-effect",
+    )
+    assert replay is not None
+    assert replay.effect_plans == plans
 
 
 def test_dispatch_authorization_cut_changes_mutation_fingerprint() -> None:
@@ -1957,3 +2041,277 @@ async def test_started_or_mismatched_executor_claim_blocks_takeover(
             executor_id="executor-takeover",
             lease_expires_at=STAMP + timedelta(minutes=10),
         )
+
+
+async def _recoverable_child(
+    tmp_path: Path,
+) -> tuple[
+    SQLiteLocalDurableStore,
+    object,
+    ChildExecutionBinding,
+    object,
+]:
+    store, owner = await _open_store(tmp_path)
+    plan = EffectPlan(
+        effect_id="parent-subagent-effect",
+        attempt_id="parent-subagent-attempt",
+        effect_kind="tool",
+        payload={
+            "tool_call_id": "parent-subagent-call",
+            "tool_name": "subagent",
+            "arguments": {"task": "inspect"},
+        },
+    )
+    prepared_transition_id = "prepare-parent-subagent"
+    authorization_transition_id = (
+        f"{prepared_transition_id}:dispatch:{plan.effect_id}:{plan.attempt_id}"
+    )
+    binding = ChildExecutionBinding(
+        session_id=SESSION_ID,
+        parent_run_id="run-phase-b",
+        parent_effect_id=plan.effect_id,
+        parent_attempt_id=plan.attempt_id,
+        child_run_id=(f"run-phase-b:child:{plan.effect_id}:{plan.attempt_id}"),
+        authorization_transition_id=authorization_transition_id,
+        live_parent_settlement_transition_id=(
+            f"{authorization_transition_id}:parent-settlement"
+        ),
+    )
+    await store.commit_authoritative_uow(
+        owner,
+        _transition(
+            prepared_transition_id,
+            revision=0,
+            effect_mutations=(EffectMutation.prepare(plan),),
+            effect_plans=(plan,),
+            child_bindings=(binding,),
+        ),
+    )
+    await store.commit_authoritative_uow(
+        owner,
+        _transition(
+            authorization_transition_id,
+            revision=1,
+            effect_mutation=EffectMutation(
+                effect_id=plan.effect_id,
+                attempt_id=plan.attempt_id,
+                expected_status=EffectStatus.PREPARED,
+                status=EffectStatus.DISPATCHED,
+                payload={},
+            ),
+            expected_mailbox_cut="0",
+        ),
+    )
+    reserved = await store.reserve_executor_attempt(
+        owner,
+        effect_id=plan.effect_id,
+        attempt_id=plan.attempt_id,
+        authorization_transition_id=authorization_transition_id,
+        executor_id="parent-executor",
+        lease_expires_at=STAMP + timedelta(minutes=5),
+    )
+    await store.mark_executor_attempt_started(
+        owner,
+        effect_id=plan.effect_id,
+        attempt_id=plan.attempt_id,
+        authorization_transition_id=authorization_transition_id,
+        executor_id="parent-executor",
+        claim_generation=reserved.claim_generation,
+        now=STAMP,
+    )
+    await store.mark_executor_attempt_quiescent(
+        owner,
+        effect_id=plan.effect_id,
+        attempt_id=plan.attempt_id,
+        authorization_transition_id=authorization_transition_id,
+        executor_id="parent-executor",
+        claim_generation=reserved.claim_generation,
+        now=STAMP,
+        evidence_ref="parent-executor-quiescent",
+    )
+    await store.renew_owner(owner, lease_seconds=0.001)
+    await asyncio.sleep(0.01)
+    takeover = await store.acquire_owner(SESSION_ID, "owner-child-recovery")
+    return store, takeover, binding, owner
+
+
+@pytest.mark.asyncio
+async def test_recovered_child_lease_rejects_pending_parent_cancel(
+    tmp_path: Path,
+) -> None:
+    store, takeover, binding, _old_owner = await _recoverable_child(tmp_path)
+    await store.admit_runtime_command(
+        takeover,
+        RuntimeCommand(
+            command_id="cancel-parent",
+            command_kind="cancel",
+            payload={"target_run_id": binding.parent_run_id},
+        ),
+    )
+
+    with pytest.raises(
+        RecoveryLeaseConflictError,
+        match="pending targeted control",
+    ):
+        await store.acquire_recovered_child_execution_lease(
+            takeover,
+            child_run_id=binding.child_run_id,
+            lease_id="recovery-lease-cancelled",
+        )
+
+
+@pytest.mark.asyncio
+async def test_recovery_terminal_cut_stale_refusal_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    store, takeover, binding, _old_owner = await _recoverable_child(tmp_path)
+    lease = await store.acquire_recovered_child_execution_lease(
+        takeover,
+        child_run_id=binding.child_run_id,
+        lease_id="recovery-lease-stale",
+    )
+    await store.admit_runtime_command(
+        takeover,
+        RuntimeCommand(
+            command_id="sibling-cancel",
+            command_kind="cancel",
+            payload={"target_run_id": "sibling-run"},
+        ),
+    )
+    unit = AuthoritativeUnitOfWork(
+        event=None,
+        session_state=SESSION_STATE,
+        transition_id="recovery-child-terminal-stale",
+        state_cas=OperationStateCAS(
+            run_id=binding.child_run_id,
+            revision=0,
+            projection_epoch=0,
+        ),
+        state_value={"status": "completed"},
+        facts=(
+            EventRecord(
+                event_id="recovery-terminal-stale-fact",
+                session_id=SESSION_ID,
+                event_kind="assistant_message",
+                payload={"content": "must not persist"},
+                created_at=STAMP,
+            ),
+        ),
+        recovery_guard=RecoveryTransitionGuard(
+            lease_id=lease.lease_id,
+            child_run_id=lease.child_run_id,
+            resume_generation=lease.resume_generation,
+            expected_recovery_cut=lease.resume_cut,
+            kind=RecoveryGuardKind.CHILD_TERMINAL,
+        ),
+    )
+    before = await store.load_session_fact_source(SESSION_ID)
+    assert before is not None
+
+    with pytest.raises(StaleRecoveryGuardError):
+        await store.commit_authoritative_uow(takeover, unit)
+
+    after = await store.load_session_fact_source(SESSION_ID)
+    assert after == before
+    assert await store.load_operation_state(SESSION_ID, binding.child_run_id) is None
+
+
+@pytest.mark.asyncio
+async def test_live_settlement_receipt_is_adopted_before_recovery_write(
+    tmp_path: Path,
+) -> None:
+    store, takeover, binding, _old_owner = await _recoverable_child(tmp_path)
+    lease = await store.acquire_recovered_child_execution_lease(
+        takeover,
+        child_run_id=binding.child_run_id,
+        lease_id="recovery-lease-replay",
+    )
+    unit = _transition(
+        binding.live_parent_settlement_transition_id,
+        revision=2,
+        state_value={"status": "completed"},
+        facts=(
+            EventRecord(
+                event_id="live-parent-settlement-fact",
+                session_id=SESSION_ID,
+                event_kind="tool_result",
+                payload={"content": "child complete"},
+                created_at=STAMP,
+            ),
+        ),
+        effect_mutation=EffectMutation(
+            effect_id=binding.parent_effect_id,
+            attempt_id=binding.parent_attempt_id,
+            expected_status=EffectStatus.DISPATCHED,
+            status=EffectStatus.COMPLETED,
+            payload={"content": "child complete"},
+        ),
+        recovery_guard=RecoveryTransitionGuard(
+            lease_id=lease.lease_id,
+            child_run_id=lease.child_run_id,
+            resume_generation=lease.resume_generation,
+            expected_recovery_cut=lease.resume_cut,
+            kind=RecoveryGuardKind.PARENT_SETTLEMENT,
+        ),
+    )
+    first = await store.commit_authoritative_uow(takeover, unit)
+    await store.admit_runtime_command(
+        takeover,
+        RuntimeCommand(
+            command_id="later-sibling-cancel",
+            command_kind="cancel",
+            payload={"target_run_id": "sibling-run"},
+        ),
+    )
+
+    replay = await store.commit_authoritative_uow(takeover, unit)
+
+    assert replay.idempotent is True
+    assert replay.state_version == first.state_version
+
+
+@pytest.mark.asyncio
+async def test_recovered_child_denial_rejects_then_continues_with_fresh_cut(
+    tmp_path: Path,
+) -> None:
+    store, takeover, binding, _old_owner = await _recoverable_child(tmp_path)
+    denial = await store.admit_runtime_command(
+        takeover,
+        RuntimeCommand(
+            command_id="child-approval-denial",
+            command_kind="approval_decision",
+            payload={
+                "target_run_id": binding.child_run_id,
+                "approved": False,
+                "request_id": "child-approval",
+            },
+        ),
+    )
+    with pytest.raises(RecoveryLeaseConflictError):
+        await store.acquire_recovered_child_execution_lease(
+            takeover,
+            child_run_id=binding.child_run_id,
+            lease_id="recovery-before-denial",
+        )
+
+    await store.commit_authoritative_uow(
+        takeover,
+        _transition(
+            "reject-child-approval-denial",
+            revision=2,
+            dispositions=(
+                RejectedCommandDisposition(
+                    command_id="child-approval-denial",
+                    reason_code="user_denied",
+                ),
+            ),
+        ),
+    )
+    lease = await store.acquire_recovered_child_execution_lease(
+        takeover,
+        child_run_id=binding.child_run_id,
+        lease_id="recovery-after-denial",
+    )
+
+    assert lease.resume_cut == denial.mailbox_cut
+    assert lease.resume_generation == 1

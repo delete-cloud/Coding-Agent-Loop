@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import Final, Literal, TypeAlias
 
+from coding_agent.events.child_projection import include_in_parent_wire
 from coding_agent.stores.rtstore.harness import (
     SessionFactSourceState,
     parse_u64,
@@ -22,7 +23,7 @@ from coding_agent.stores.rtstore.validate import (
     _require_non_empty,
 )
 
-CONNECTED_CHAT_CONTRACT_VERSION: Final[str] = "1.0.0"
+CONNECTED_CHAT_CONTRACT_VERSION: Final[str] = "1.1.0"
 CONNECTED_CHAT_PROJECTION: Final[str] = "connected-chat"
 CHAT_EVENT_KINDS: Final[tuple[str, ...]] = (
     "user_prompt",
@@ -31,6 +32,7 @@ CHAT_EVENT_KINDS: Final[tuple[str, ...]] = (
     "progress",
     "tool_call",
     "tool_result",
+    "approval_requested",
     "root_terminal",
 )
 ChatEventKind: TypeAlias = Literal[
@@ -40,6 +42,7 @@ ChatEventKind: TypeAlias = Literal[
     "progress",
     "tool_call",
     "tool_result",
+    "approval_requested",
     "root_terminal",
 ]
 
@@ -282,9 +285,7 @@ def build_root_settlement(
     settled_session["turn_id"] = run.run_id
     settled_session["turn_in_progress"] = False
     settled_session["turn_status"] = outcome
-    merged_result = {
-        key: value for key, value in run.result.items() if key != "text"
-    }
+    merged_result = {key: value for key, value in run.result.items() if key != "text"}
     if result_payload is not None:
         merged_result.update(
             {key: value for key, value in result_payload.items() if key != "text"}
@@ -336,7 +337,25 @@ def project_chat_event(
     if record.session_seq is None:
         raise ValueError("projected event must include session_seq")
     payload = dict(record.payload)
+    if not include_in_parent_wire(record.event_kind, payload):
+        return None
     payload_run_id = payload.pop("run_id", None)
+    if record.event_kind == "approval_requested":
+        public_fields = (
+            "approval_request_id",
+            "tool_call_id",
+            "tool_name",
+            "arguments",
+            "effect_id",
+            "attempt_id",
+            "target_run_id",
+            "target_parent_effect_id",
+        )
+        payload = {
+            field_name: payload[field_name]
+            for field_name in public_fields
+            if field_name in payload
+        }
     if payload_run_id is not None and not isinstance(payload_run_id, str):
         raise TypeError("chat event run_id must be a string")
     if run is not None:
@@ -396,6 +415,23 @@ def _validate_chat_payload(kind: ChatEventKind, payload: JSONObject) -> None:
         required_string("output", allow_empty=True)
         if not isinstance(payload.get("is_error"), bool):
             raise ValueError("tool_result payload is_error must be a boolean")
+        return
+    if kind == "approval_requested":
+        for field_name in (
+            "approval_request_id",
+            "tool_call_id",
+            "tool_name",
+            "effect_id",
+            "attempt_id",
+        ):
+            required_string(field_name)
+        if not isinstance(payload.get("arguments"), dict):
+            raise ValueError("approval_requested payload arguments must be an object")
+        for field_name in ("target_run_id", "target_parent_effect_id"):
+            if field_name in payload:
+                required_string(field_name)
+        if ("target_run_id" in payload) != ("target_parent_effect_id" in payload):
+            raise ValueError("approval_requested child targets must appear together")
         return
     outcome = payload.get("outcome")
     if outcome not in {"completed", "failed", "cancelled", "interrupted"}:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from collections.abc import Mapping
 from contextlib import suppress
 
@@ -353,52 +354,62 @@ class SegmentCoordinator:
                         state_version=current_state,
                         step_input=step_input,
                     )
-                    authorization_proposal = (
-                        proposal
-                        if defer_commit_to_authorization
-                        else _authorization_proposal(
-                            proposal,
-                            current_state=current_state,
-                        )
+                    authorization_proposal = _authorization_proposal(
+                        proposal,
+                        current_state=current_state,
+                        preserve_pending=defer_commit_to_authorization,
                     )
                     authorization_proposal = _with_active_effect_authorization(
                         authorization_proposal,
                         owner_epoch=request.owner_epoch,
                     )
-                    authorization_result = await self._commit_port.authorize_dispatch(
-                        DispatchAuthorizationRequest(
-                            session_id=request.session_id,
-                            owner_id=request.owner_id,
-                            owner_epoch=request.owner_epoch,
-                            mailbox_cut=mailbox_cut,
-                            engine_request=authorization_engine_request,
-                            proposal=authorization_proposal,
-                            effect_plan=action.effect_plan,
-                            effect_mutation=EffectMutation(
-                                effect_id=action.effect_plan.effect_id,
-                                attempt_id=action.effect_plan.attempt_id,
-                                expected_status=EffectStatus.PREPARED,
-                                status=EffectStatus.DISPATCHED,
-                                payload={
-                                    "authorization_transition_id": (
-                                        authorization_proposal.transition_id
-                                    ),
-                                    "owner_epoch": request.owner_epoch,
-                                    "mailbox_cut": mailbox_cut,
-                                },
-                            ),
-                            approval_settlement=approval_for_authorization,
-                        )
+                    authorization_request = DispatchAuthorizationRequest(
+                        session_id=request.session_id,
+                        owner_id=request.owner_id,
+                        owner_epoch=request.owner_epoch,
+                        mailbox_cut=mailbox_cut,
+                        engine_request=authorization_engine_request,
+                        proposal=authorization_proposal,
+                        effect_plan=action.effect_plan,
+                        effect_mutation=EffectMutation(
+                            effect_id=action.effect_plan.effect_id,
+                            attempt_id=action.effect_plan.attempt_id,
+                            expected_status=EffectStatus.PREPARED,
+                            status=EffectStatus.DISPATCHED,
+                            payload={
+                                "authorization_transition_id": (
+                                    authorization_proposal.transition_id
+                                ),
+                                "owner_epoch": request.owner_epoch,
+                            },
+                        ),
+                        approval_settlement=approval_for_authorization,
                     )
-                    if isinstance(
-                        authorization_result,
-                        StaleMailboxCutCommitResult,
-                    ):
-                        control_probe.observe()
-                        return SafeYieldOutcome(
-                            state_version=current_state,
-                            reason="stale_mailbox_cut",
-                            steps_taken=steps_taken,
+                    while True:
+                        authorization_result = (
+                            await self._commit_port.authorize_dispatch(
+                                authorization_request
+                            )
+                        )
+                        if not isinstance(
+                            authorization_result,
+                            StaleMailboxCutCommitResult,
+                        ):
+                            break
+                        snapshot = control_probe.observe()
+                        if snapshot.raised:
+                            return _safe_yield(
+                                current_state,
+                                snapshot,
+                                steps_taken,
+                            )
+                        mailbox_cut = max(
+                            authorization_result.current_mailbox_cut,
+                            snapshot.generation.value,
+                        )
+                        authorization_request = replace(
+                            authorization_request,
+                            mailbox_cut=mailbox_cut,
                         )
                     authorized = _authorized_result(authorization_result)
                     if isinstance(authorized, FailedOutcome):
@@ -821,11 +832,22 @@ def _authorization_proposal(
     prepared: TransitionProposal,
     *,
     current_state: OperationStateVersion,
+    preserve_pending: bool = False,
 ) -> TransitionProposal:
+    action = prepared.next_action
+    if not isinstance(action, PreparedEffectAction):
+        raise ValueError("dispatch authorization requires a prepared effect action")
+    plan = action.effect_plan
+    prepared_transition_id = current_state.commit_ref.transition_id
     return TransitionProposal(
-        transition_id=f"{prepared.transition_id}:dispatch:{current_state.revision + 1}",
-        state_value=current_state.value,
-        next_action=prepared.next_action,
+        transition_id=(
+            f"{prepared_transition_id}:dispatch:{plan.effect_id}:{plan.attempt_id}"
+        ),
+        state_value=prepared.state_value if preserve_pending else current_state.value,
+        next_action=action,
+        pending_facts=prepared.pending_facts if preserve_pending else (),
+        dispositions=prepared.dispositions if preserve_pending else (),
+        effect_plans=prepared.effect_plans if preserve_pending else (),
     )
 
 

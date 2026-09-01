@@ -11,6 +11,7 @@ import pytest
 
 from agentkit.checkpoint.models import CheckpointMeta, CheckpointSnapshot
 from agentkit.runtime.contracts import (
+    ApprovalSettlement,
     AppliedCommandDisposition,
     EffectMutation,
     EffectPlan,
@@ -20,6 +21,10 @@ from agentkit.runtime.contracts import (
     ReconciliationRecord,
     RejectedCommandDisposition,
     RuntimeCommand,
+)
+from coding_agent.runs.child_execution import (
+    RecoveredChildCommitPort,
+    TargetAwareChildControlProbe,
 )
 
 from coding_agent.server.stores.session_owner_store import (
@@ -31,6 +36,7 @@ from coding_agent.stores.durable_pg import PGDurableStore
 from coding_agent.stores.runtime_store import (
     AgentRunRecord,
     AuthoritativeUnitOfWork,
+    ChildExecutionBinding,
     CommandDispositionConflictError,
     RuntimeCommandAdmissionConflictError,
     AuthoritativeWriteRefusedError,
@@ -48,8 +54,13 @@ from coding_agent.stores.runtime_store import (
     ProjectionCursor,
     RawCursor,
     TrustedHandoff,
+    RecoveredChildExecutionLease,
+    RecoveryGuardKind,
+    RecoveryTransitionGuard,
+    RecoveryLeaseConflictError,
     RecoveryEvidenceConflictError,
     StaleMailboxCutError,
+    StaleRecoveryGuardError,
     StateVersionConflictError,
     TransitionFingerprintMismatchError,
     state_value_with_reconciled_effect,
@@ -135,6 +146,8 @@ class HarnessFakePGConnection:
         self.effects: dict[tuple[str, str], dict[str, object]] = {}
         self.reconciliation_evidence: dict[tuple[str, str], dict[str, object]] = {}
         self.executor_attempts: dict[tuple[str, str, str, str], dict[str, object]] = {}
+        self.child_bindings: dict[tuple[str, str], dict[str, object]] = {}
+        self.recovery_leases: dict[tuple[str, str], dict[str, object]] = {}
         self.receipts: dict[tuple[str, str], dict[str, object]] = {}
         self.operation_states: dict[tuple[str, str], dict[str, object]] = {}
         self.transition_receipts: dict[tuple[str, int, str], dict[str, object]] = {}
@@ -157,6 +170,8 @@ class HarnessFakePGConnection:
                 "effects": self.effects,
                 "reconciliation_evidence": self.reconciliation_evidence,
                 "executor_attempts": self.executor_attempts,
+                "child_bindings": self.child_bindings,
+                "recovery_leases": self.recovery_leases,
                 "receipts": self.receipts,
                 "agent_runs": self.agent_runs,
                 "checkpoints": self.checkpoints,
@@ -385,6 +400,39 @@ class HarnessFakePGConnection:
                 "payload": args[6],
             }
             return "INSERT"
+        if "INSERT INTO session_child_bindings" in query:
+            self.child_bindings[(cast(str, args[0]), cast(str, args[1]))] = {
+                "session_id": args[0],
+                "parent_effect_id": args[1],
+                "child_run_id": args[2],
+                "payload": args[3],
+            }
+            return "INSERT"
+        if "INSERT INTO session_recovery_leases" in query:
+            self.recovery_leases[(cast(str, args[0]), cast(str, args[1]))] = {
+                "session_id": args[0],
+                "lease_id": args[1],
+                "child_run_id": args[2],
+                "status": "active",
+                "payload": args[3],
+            }
+            return "INSERT"
+        if "UPDATE session_recovery_leases SET status" in query:
+            row = self.recovery_leases[(cast(str, args[0]), cast(str, args[1]))]
+            row["status"] = "superseded"
+            return "UPDATE"
+        if "UPDATE session_recovery_leases SET payload" in query:
+            row = self.recovery_leases[(cast(str, args[1]), cast(str, args[2]))]
+            row["payload"] = args[0]
+            return "UPDATE"
+        if "UPDATE session_child_bindings SET payload" in query:
+            session_id = cast(str, args[1])
+            child_run_id = cast(str, args[2])
+            for key, row in self.child_bindings.items():
+                if key[0] == session_id and row["child_run_id"] == child_run_id:
+                    row["payload"] = args[0]
+                    return "UPDATE"
+            return "UPDATE 0"
         if "UPDATE session_executor_attempts" in query:
             key = (
                 cast(str, args[0]),
@@ -492,6 +540,32 @@ class HarnessFakePGConnection:
                     cast(str, args[3]),
                 )
             )
+        if "FROM session_recovery_leases" in query:
+            return self.recovery_leases.get((cast(str, args[0]), cast(str, args[1])))
+        if "FROM session_child_bindings" in query:
+            session_id = cast(str, args[0])
+            identity = cast(str, args[1])
+            for key, row in self.child_bindings.items():
+                if key[0] != session_id:
+                    continue
+                if (
+                    (
+                        "parent_effect_id = $2" in query
+                        and row["parent_effect_id"] == identity
+                    )
+                    or (
+                        "child_run_id = $2" in query and row["child_run_id"] == identity
+                    )
+                    or (
+                        "OR child_run_id = $3" in query
+                        and (
+                            row["parent_effect_id"] == args[1]
+                            or row["child_run_id"] == args[2]
+                        )
+                    )
+                ):
+                    return row
+            return None
         if "FROM session_receipt_slots" in query:
             return self.receipts.get((cast(str, args[0]), cast(str, args[1])))
         if "FROM session_operation_states" in query:
@@ -593,6 +667,22 @@ class HarnessFakePGConnection:
 
     async def fetch(self, query: str, *args: object) -> list[dict[str, object]]:
         self.calls.append(("fetch", query))
+        if (
+            "FROM session_mailbox_slots" in query
+            and "disposition IN ('pending', 'admitted')" in query
+        ):
+            session_id = cast(str, args[0])
+            lower_bound = int(args[1]) if len(args) > 1 else -1
+            upper_bound = int(args[2]) if len(args) > 2 else 2**64 - 1
+            return [
+                dict(row)
+                for (row_session_id, _), row in self.mailbox.items()
+                if row_session_id == session_id
+                and row.get("disposition") in {"pending", "admitted"}
+                and lower_bound
+                < int(cast(int, row["admitted_session_seq"]))
+                <= upper_bound
+            ]
         if (
             "FROM session_fact_source AS source" in query
             and "LEFT JOIN session_mailbox_slots" in query
@@ -2431,3 +2521,1171 @@ async def test_takeover_waits_for_authoritative_executor_quiescence_row(
     committed = await store.commit_authoritative_uow(takeover, unit)
     assert committed.state_version is not None
     assert committed.state_version.revision == 4
+
+
+async def _recoverable_child_contract(
+    store_kind: str,
+    tmp_path: Path,
+) -> tuple[
+    Any,
+    OwnerAuthority,
+    ChildExecutionBinding,
+    RecoveredChildExecutionLease,
+]:
+    store, owner = await _open_store(store_kind, tmp_path)
+    plan = EffectPlan(
+        effect_id="matrix-parent-effect",
+        attempt_id="matrix-parent-attempt",
+        effect_kind="tool",
+        payload={
+            "tool_call_id": "matrix-parent-call",
+            "tool_name": "subagent",
+            "arguments": {"task": "inspect"},
+        },
+    )
+    prepared_transition_id = "matrix-parent-prepared"
+    authorization_transition_id = (
+        f"{prepared_transition_id}:dispatch:{plan.effect_id}:{plan.attempt_id}"
+    )
+    binding = ChildExecutionBinding(
+        session_id=SESSION_ID,
+        parent_run_id="matrix-parent-run",
+        parent_effect_id=plan.effect_id,
+        parent_attempt_id=plan.attempt_id,
+        child_run_id="matrix-child-run",
+        authorization_transition_id=authorization_transition_id,
+        live_parent_settlement_transition_id=(
+            f"{authorization_transition_id}:parent-settlement"
+        ),
+    )
+    await store.commit_authoritative_uow(
+        owner,
+        AuthoritativeUnitOfWork(
+            event=None,
+            session_state=SESSION_PAYLOAD,
+            transition_id=prepared_transition_id,
+            state_cas=OperationStateCAS(
+                run_id=binding.parent_run_id,
+                revision=0,
+                projection_epoch=0,
+            ),
+            state_value={"phase": "prepared"},
+            effect_mutations=(EffectMutation.prepare(plan),),
+            effect_plans=(plan,),
+            child_bindings=(binding,),
+        ),
+    )
+    await store.commit_authoritative_uow(
+        owner,
+        AuthoritativeUnitOfWork(
+            event=None,
+            session_state=SESSION_PAYLOAD,
+            transition_id=authorization_transition_id,
+            state_cas=OperationStateCAS(
+                run_id=binding.parent_run_id,
+                revision=1,
+                projection_epoch=0,
+            ),
+            state_value={"phase": "dispatched"},
+            effect_mutation=EffectMutation(
+                effect_id=plan.effect_id,
+                attempt_id=plan.attempt_id,
+                expected_status=EffectStatus.PREPARED,
+                status=EffectStatus.DISPATCHED,
+                payload={},
+            ),
+            expected_mailbox_cut="0",
+        ),
+    )
+    reserved = await store.reserve_executor_attempt(
+        owner,
+        effect_id=plan.effect_id,
+        attempt_id=plan.attempt_id,
+        authorization_transition_id=authorization_transition_id,
+        executor_id="matrix-parent-executor",
+        lease_expires_at=datetime.now(UTC) + timedelta(minutes=1),
+    )
+    await store.mark_executor_attempt_started(
+        owner,
+        effect_id=plan.effect_id,
+        attempt_id=plan.attempt_id,
+        authorization_transition_id=authorization_transition_id,
+        executor_id="matrix-parent-executor",
+        claim_generation=reserved.claim_generation,
+        now=datetime.now(UTC),
+    )
+    await store.mark_executor_attempt_quiescent(
+        owner,
+        effect_id=plan.effect_id,
+        attempt_id=plan.attempt_id,
+        authorization_transition_id=authorization_transition_id,
+        executor_id="matrix-parent-executor",
+        claim_generation=reserved.claim_generation,
+        now=datetime.now(UTC),
+        evidence_ref="matrix-parent-quiescent",
+    )
+    if isinstance(store, SQLiteLocalDurableStore):
+        await store.renew_owner(owner, lease_seconds=0.001)
+        await asyncio.sleep(0.01)
+        takeover = await store.acquire_owner(SESSION_ID, "matrix-recovery-owner")
+    else:
+        takeover = OwnerAuthority(
+            session_id=SESSION_ID,
+            owner_id="matrix-recovery-owner",
+            epoch=owner.epoch + 1,
+        )
+        store._harness_pool.seed_owner(takeover)
+    lease = await store.acquire_recovered_child_execution_lease(
+        takeover,
+        child_run_id=binding.child_run_id,
+        lease_id="matrix-recovery-lease",
+    )
+    return store, takeover, binding, lease
+
+
+@pytest.mark.asyncio
+async def test_child_binding_and_lease_contract_matrix(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store, _takeover, binding, lease = await _recoverable_child_contract(
+        store_kind,
+        tmp_path,
+    )
+
+    loaded = await store.load_child_execution_binding(
+        SESSION_ID,
+        child_run_id=binding.child_run_id,
+    )
+
+    assert loaded is not None
+    assert loaded.active_lease == lease
+    assert lease.resume_cut == "0"
+    assert lease.resume_generation == 1
+
+
+@pytest.mark.asyncio
+async def test_recovery_guard_stale_zero_write_contract_matrix(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store, takeover, binding, lease = await _recoverable_child_contract(
+        store_kind,
+        tmp_path,
+    )
+    await store.admit_runtime_command(
+        takeover,
+        RuntimeCommand(
+            command_id="matrix-sibling-cancel",
+            command_kind="cancel",
+            payload={"target_run_id": "matrix-sibling-run"},
+        ),
+    )
+    unit = AuthoritativeUnitOfWork(
+        event=None,
+        session_state=SESSION_PAYLOAD,
+        transition_id="matrix-stale-terminal",
+        state_cas=OperationStateCAS(
+            run_id=binding.child_run_id,
+            revision=0,
+            projection_epoch=0,
+        ),
+        state_value={"phase": "terminal"},
+        terminal_action=True,
+        facts=(
+            EventRecord(
+                event_id="matrix-stale-terminal-fact",
+                session_id=SESSION_ID,
+                event_kind="assistant_message",
+                payload={"content": "must not write"},
+                created_at=datetime.now(UTC),
+            ),
+        ),
+        recovery_guard=RecoveryTransitionGuard(
+            lease_id=lease.lease_id,
+            child_run_id=lease.child_run_id,
+            resume_generation=lease.resume_generation,
+            expected_recovery_cut=lease.resume_cut,
+            kind=RecoveryGuardKind.CHILD_TERMINAL,
+        ),
+    )
+    before = await store.load_session_fact_source(SESSION_ID)
+
+    with pytest.raises(StaleRecoveryGuardError):
+        await store.commit_authoritative_uow(takeover, unit)
+
+    assert await store.load_session_fact_source(SESSION_ID) == before
+    assert await store.load_operation_state(SESSION_ID, binding.child_run_id) is None
+
+
+@pytest.mark.asyncio
+async def test_parent_settlement_guard_rejects_child_transition_contract_matrix(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store, takeover, binding, lease = await _recoverable_child_contract(
+        store_kind,
+        tmp_path,
+    )
+    unit = AuthoritativeUnitOfWork(
+        event=None,
+        session_state=SESSION_PAYLOAD,
+        transition_id="matrix-invalid-parent-settlement",
+        state_cas=OperationStateCAS(
+            run_id=binding.child_run_id,
+            revision=0,
+            projection_epoch=0,
+        ),
+        state_value={"phase": "terminal"},
+        recovery_guard=RecoveryTransitionGuard(
+            lease_id=lease.lease_id,
+            child_run_id=lease.child_run_id,
+            resume_generation=lease.resume_generation,
+            expected_recovery_cut=lease.resume_cut,
+            kind=RecoveryGuardKind.PARENT_SETTLEMENT,
+        ),
+    )
+
+    with pytest.raises(
+        StaleRecoveryGuardError,
+        match="parent settlement guard shape is invalid",
+    ):
+        await store.commit_authoritative_uow(takeover, unit)
+
+    assert await store.load_operation_state(SESSION_ID, binding.child_run_id) is None
+
+
+@pytest.mark.asyncio
+async def test_child_projection_payload_contract_matrix(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store, takeover, binding, _lease = await _recoverable_child_contract(
+        store_kind,
+        tmp_path,
+    )
+    committed = await store.commit_authoritative_uow(
+        takeover,
+        AuthoritativeUnitOfWork(
+            event=None,
+            session_state=SESSION_PAYLOAD,
+            transition_id="matrix-child-approval",
+            state_cas=OperationStateCAS(
+                run_id=binding.child_run_id,
+                revision=0,
+                projection_epoch=0,
+            ),
+            state_value={"phase": "approval"},
+            facts=(
+                EventRecord(
+                    event_id="matrix-child-approval-fact",
+                    session_id=SESSION_ID,
+                    event_kind="approval_requested",
+                    payload={
+                        "approval_request_id": "matrix-child-approval",
+                        "tool_call_id": "matrix-child-call",
+                        "tool_name": "bash",
+                        "arguments": {"command": "pwd"},
+                        "effect_id": "matrix-child-effect",
+                        "attempt_id": "matrix-child-attempt",
+                    },
+                    created_at=datetime.now(UTC),
+                ),
+            ),
+        ),
+    )
+
+    assert committed.facts[0].payload == {
+        "approval_request_id": "matrix-child-approval",
+        "tool_call_id": "matrix-child-call",
+        "tool_name": "bash",
+        "arguments": {"command": "pwd"},
+        "effect_id": "matrix-child-effect",
+        "attempt_id": "matrix-child-attempt",
+        "run_id": binding.parent_run_id,
+        "parent_run_id": binding.parent_run_id,
+        "parent_effect_id": binding.parent_effect_id,
+        "subagent_child": True,
+        "skip_parent_context": True,
+        "target_run_id": binding.child_run_id,
+        "target_parent_effect_id": binding.parent_effect_id,
+    }
+
+
+@pytest.mark.asyncio
+async def test_child_approval_projects_under_parent_run_without_child_run_record(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store, takeover, binding, _lease = await _recoverable_child_contract(
+        store_kind,
+        tmp_path,
+    )
+    await store.create_agent_run(
+        takeover,
+        _run(binding.parent_run_id, started_at=datetime.now(UTC)),
+    )
+    committed = await store.commit_authoritative_uow(
+        takeover,
+        AuthoritativeUnitOfWork(
+            event=None,
+            session_state=SESSION_PAYLOAD,
+            transition_id="project-child-approval",
+            state_cas=OperationStateCAS(binding.child_run_id, 0, 0),
+            state_value={"phase": "approval"},
+            facts=(
+                EventRecord(
+                    event_id="private-child-message",
+                    session_id=SESSION_ID,
+                    event_kind="assistant_message",
+                    payload={"text": "private"},
+                    created_at=datetime.now(UTC),
+                ),
+                EventRecord(
+                    event_id="public-child-approval",
+                    session_id=SESSION_ID,
+                    event_kind="approval_requested",
+                    payload={
+                        "approval_request_id": "approval-1",
+                        "tool_call_id": "call-1",
+                        "tool_name": "write_file",
+                        "arguments": {"path": "src/file.py"},
+                        "effect_id": "child-effect",
+                        "attempt_id": "child-attempt",
+                    },
+                    created_at=datetime.now(UTC),
+                ),
+            ),
+        ),
+    )
+
+    assert all(fact.session_seq is not None for fact in committed.facts)
+    snapshot = await store.snapshot_chat_events(SESSION_ID, None, 10)
+    assert [event.source_event_id for event in snapshot.events] == [
+        "public-child-approval"
+    ]
+    assert snapshot.events[0].run_id == binding.parent_run_id
+    assert snapshot.events[0].payload["target_run_id"] == binding.child_run_id
+    assert (
+        snapshot.events[0].payload["target_parent_effect_id"]
+        == binding.parent_effect_id
+    )
+
+
+@pytest.mark.asyncio
+async def test_publish_chat_commit_emits_targeted_child_approval_fact(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    from coding_agent.server.session.manager import SessionManager
+
+    store, takeover, binding, _lease = await _recoverable_child_contract(
+        store_kind,
+        tmp_path,
+    )
+    parent = _run(binding.parent_run_id, started_at=datetime.now(UTC))
+    await store.create_agent_run(takeover, parent)
+    committed = await store.commit_authoritative_uow(
+        takeover,
+        AuthoritativeUnitOfWork(
+            event=None,
+            session_state=SESSION_PAYLOAD,
+            transition_id="publish-child-approval",
+            state_cas=OperationStateCAS(binding.child_run_id, 0, 0),
+            state_value={"phase": "approval"},
+            facts=(
+                EventRecord(
+                    event_id="publish-child-approval-fact",
+                    session_id=SESSION_ID,
+                    event_kind="approval_requested",
+                    payload={
+                        "approval_request_id": "publish-approval",
+                        "tool_call_id": "publish-call",
+                        "tool_name": "write_file",
+                        "arguments": {"path": "src/file.py"},
+                        "effect_id": "publish-effect",
+                        "attempt_id": "publish-attempt",
+                    },
+                    created_at=datetime.now(UTC),
+                ),
+            ),
+        ),
+    )
+
+    class Subscriber:
+        def __init__(self) -> None:
+            self.events: list[Any] = []
+
+        def publish(self, event: Any) -> None:
+            self.events.append(event)
+
+    subscriber = Subscriber()
+
+    class RunLoader:
+        async def load_agent_run(self, run_id: str):
+            return parent if run_id == parent.run_id else None
+
+    class PublishingManager:
+        _chat_subscribers = {SESSION_ID: {subscriber}}
+
+        def _require_runtime_store(self):
+            return RunLoader()
+
+    await SessionManager._publish_chat_commit(PublishingManager(), committed)
+
+    assert len(subscriber.events) == 1
+    assert subscriber.events[0].source_event_id == "publish-child-approval-fact"
+    assert subscriber.events[0].run_id == binding.parent_run_id
+    assert subscriber.events[0].payload["target_run_id"] == binding.child_run_id
+
+
+@pytest.mark.asyncio
+async def test_active_child_lease_replay_rechecks_targeted_control_matrix(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store, takeover, binding, lease = await _recoverable_child_contract(
+        store_kind,
+        tmp_path,
+    )
+    await store.admit_runtime_command(
+        takeover,
+        RuntimeCommand(
+            command_id="matrix-parent-cancel-after-lease",
+            command_kind="cancel",
+            payload={"target_run_id": binding.parent_run_id},
+        ),
+    )
+
+    with pytest.raises(RecoveryLeaseConflictError):
+        await store.acquire_recovered_child_execution_lease(
+            takeover,
+            child_run_id=binding.child_run_id,
+            lease_id=lease.lease_id,
+        )
+
+
+async def _next_recovery_owner(
+    store: Any,
+    authority: OwnerAuthority,
+    owner_id: str,
+) -> OwnerAuthority:
+    if isinstance(store, SQLiteLocalDurableStore):
+        await store.renew_owner(authority, lease_seconds=0.001)
+        await asyncio.sleep(0.01)
+        return await store.acquire_owner(SESSION_ID, owner_id)
+    takeover = OwnerAuthority(
+        session_id=SESSION_ID,
+        owner_id=owner_id,
+        epoch=authority.epoch + 1,
+    )
+    store._harness_pool.seed_owner(takeover)
+    return takeover
+
+
+@pytest.mark.asyncio
+async def test_recovery_snapshot_keeps_targeted_child_approval_and_validates_waiting_plan(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store, takeover, binding, lease = await _recoverable_child_contract(
+        store_kind,
+        tmp_path,
+    )
+    state_value = {
+        "_agentkit_runtime": {
+            "pending_effect_plans": [
+                {
+                    "effect_id": "child-effect",
+                    "attempt_id": "child-attempt",
+                    "approval_request_id": "approval-allow",
+                    "payload": {
+                        "tool_call_id": "child-call",
+                        "tool_name": "write_file",
+                    },
+                }
+            ]
+        }
+    }
+    await store.commit_authoritative_uow(
+        takeover,
+        AuthoritativeUnitOfWork(
+            event=None,
+            session_state=SESSION_PAYLOAD,
+            transition_id="child-waiting-plan",
+            state_cas=OperationStateCAS(binding.child_run_id, 0, 0),
+            state_value=state_value,
+        ),
+    )
+    durable_state = await store.load_operation_state(
+        SESSION_ID,
+        binding.child_run_id,
+    )
+    assert durable_state is not None
+    admission = await store.admit_new_runtime_command(
+        takeover,
+        RuntimeCommand(
+            command_id="allow-at-prior-generation",
+            command_kind="approval_decision",
+            payload={
+                "approved": True,
+                "request_id": "approval-allow",
+                "target_run_id": binding.child_run_id,
+            },
+        ),
+    )
+    approval = ApprovalSettlement(
+        input_id="approval-allow",
+        command_id="allow-at-prior-generation",
+        tool_call_id="child-call",
+        tool_name="write_file",
+        effect_id="child-effect",
+        attempt_id="child-attempt",
+        transition_id="child-waiting-plan",
+        owner_epoch=takeover.epoch,
+        approved=True,
+    )
+
+    with pytest.raises(
+        RecoveryLeaseConflictError,
+        match="validated recovery refresh",
+    ):
+        await store.rebase_recovered_child_execution_lease(
+            takeover,
+            lease=lease,
+        )
+    updated = await store.refresh_recovered_child_execution_lease_for_approval(
+        takeover,
+        lease=lease,
+        state_version=durable_state,
+        approval=approval,
+        expected_dispatch_cut=lease.resume_cut,
+    )
+    replay = await store.refresh_recovered_child_execution_lease_for_approval(
+        takeover,
+        lease=updated,
+        state_version=durable_state,
+        approval=approval,
+        expected_dispatch_cut=updated.resume_cut,
+    )
+    loaded = await store.load_child_execution_binding(
+        SESSION_ID,
+        child_run_id=binding.child_run_id,
+    )
+
+    assert admission.entry.admitted_dispatch_generation == lease.resume_cut
+    assert updated.resume_cut == lease.resume_cut
+    assert updated.resume_session_seq == admission.entry.admitted_session_seq
+    assert updated.mailbox_snapshot == (admission.entry,)
+    assert replay == updated
+    assert loaded is not None and loaded.active_lease == updated
+
+
+@pytest.mark.asyncio
+async def test_recovered_child_sibling_stale_rebases_lease_before_authorization(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store, takeover, binding, lease = await _recoverable_child_contract(
+        store_kind,
+        tmp_path,
+    )
+    sibling = await store.admit_new_runtime_command(
+        takeover,
+        RuntimeCommand(
+            command_id="interrupt-sibling-child",
+            command_kind="interrupt",
+            payload={"target_run_id": "sibling-child-run"},
+        ),
+    )
+
+    rebased = await store.rebase_recovered_child_execution_lease(
+        takeover,
+        lease=lease,
+    )
+    current_binding = await store.load_child_execution_binding(
+        SESSION_ID,
+        child_run_id=binding.child_run_id,
+    )
+    port = RecoveredChildCommitPort(
+        cast(Any, object()),
+        store=store,
+        owner_id=takeover.owner_id,
+        lease=rebased,
+    )
+    guard = port.recovery_guard(RecoveryGuardKind.CHILD_TERMINAL)
+
+    assert sibling.mailbox_cut == rebased.resume_cut
+    assert rebased.resume_generation == lease.resume_generation + 1
+    assert current_binding is not None
+    assert current_binding.active_lease == rebased
+    assert guard.expected_recovery_cut == rebased.resume_cut
+    assert guard.resume_generation == rebased.resume_generation
+    assert guard.child_run_id == binding.child_run_id
+
+
+@pytest.mark.asyncio
+async def test_sibling_denial_rebases_without_indeterminate_child_settlement(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store, takeover, binding, lease = await _recoverable_child_contract(
+        store_kind,
+        tmp_path,
+    )
+    sibling_denial = await store.admit_new_runtime_command(
+        takeover,
+        RuntimeCommand(
+            command_id="deny-sibling-child",
+            command_kind="approval_decision",
+            payload={
+                "approved": False,
+                "request_id": "sibling-approval",
+                "target_run_id": "sibling-child-run",
+            },
+        ),
+    )
+
+    rebased = await store.rebase_recovered_child_execution_lease(
+        takeover,
+        lease=lease,
+    )
+    current_binding = await store.load_child_execution_binding(
+        SESSION_ID,
+        child_run_id=binding.child_run_id,
+    )
+    parent_effect = await store.load_effect_slot(
+        SESSION_ID,
+        binding.parent_effect_id,
+    )
+
+    assert rebased.resume_cut == sibling_denial.mailbox_cut
+    assert rebased.resume_generation == lease.resume_generation + 1
+    assert rebased.mailbox_snapshot == ()
+    assert current_binding is not None
+    assert current_binding.active_lease == rebased
+    assert await store.load_operation_state(SESSION_ID, binding.child_run_id) is None
+    assert parent_effect is not None and parent_effect.status == "dispatched"
+
+
+@pytest.mark.asyncio
+async def test_recovery_snapshot_uses_admitted_session_seq_and_keeps_allow_at_prior_generation(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store, takeover, binding, lease = await _recoverable_child_contract(
+        store_kind,
+        tmp_path,
+    )
+    admission = await store.admit_new_runtime_command(
+        takeover,
+        RuntimeCommand(
+            command_id="allow-session-watermark",
+            command_kind="approval_decision",
+            payload={
+                "approved": True,
+                "request_id": "approval-session-watermark",
+                "target_run_id": binding.child_run_id,
+            },
+        ),
+    )
+
+    state = await store.load_recovered_child_control_state(
+        takeover,
+        lease=lease,
+    )
+
+    assert state.dispatch_generation == lease.resume_cut
+    assert state.session_seq == admission.entry.admitted_session_seq
+    assert state.mailbox_snapshot == (admission.entry,)
+
+
+@pytest.mark.asyncio
+async def test_approval_allow_wakes_without_dispatch_generation_change(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store, takeover, binding, lease = await _recoverable_child_contract(
+        store_kind,
+        tmp_path,
+    )
+    before = await store.load_session_fact_source(SESSION_ID)
+    admission = await store.admit_new_runtime_command(
+        takeover,
+        RuntimeCommand(
+            command_id="allow-wake",
+            command_kind="approval_decision",
+            payload={
+                "approved": True,
+                "request_id": "approval-wake",
+                "target_run_id": binding.child_run_id,
+            },
+        ),
+    )
+    after = await store.load_session_fact_source(SESSION_ID)
+
+    assert after.dispatch_generation == before.dispatch_generation
+    assert admission.entry.admitted_session_seq == after.session_seq
+    assert int(after.session_seq) == int(before.session_seq) + 1
+    assert lease.resume_cut == after.dispatch_generation
+
+
+@pytest.mark.asyncio
+async def test_exact_rebase_replay_reuses_generation_and_snapshot(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store, takeover, binding, lease = await _recoverable_child_contract(
+        store_kind,
+        tmp_path,
+    )
+    await store.admit_new_runtime_command(
+        takeover,
+        RuntimeCommand(
+            command_id="sibling-rebase",
+            command_kind="cancel",
+            payload={"target_run_id": "sibling-run"},
+        ),
+    )
+    first = await store.rebase_recovered_child_execution_lease(
+        takeover,
+        lease=lease,
+    )
+    replay = await store.rebase_recovered_child_execution_lease(
+        takeover,
+        lease=first,
+    )
+
+    assert replay == first
+    assert replay.resume_generation == lease.resume_generation + 1
+    assert replay.mailbox_snapshot == ()
+    loaded = await store.load_child_execution_binding(
+        SESSION_ID,
+        child_run_id=binding.child_run_id,
+    )
+    assert loaded is not None and loaded.active_lease == replay
+
+
+@pytest.mark.asyncio
+async def test_recovery_lease_id_collision_across_children_conflicts(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store, takeover, _binding, lease = await _recoverable_child_contract(
+        store_kind,
+        tmp_path,
+    )
+    second_plan = EffectPlan(
+        effect_id="second-parent-effect",
+        attempt_id="second-parent-attempt",
+        effect_kind="tool",
+        payload={"tool_name": "subagent", "arguments": {"task": "second"}},
+    )
+    second_binding = ChildExecutionBinding(
+        session_id=SESSION_ID,
+        parent_run_id="second-parent-run",
+        parent_effect_id=second_plan.effect_id,
+        parent_attempt_id=second_plan.attempt_id,
+        child_run_id="second-child-run",
+        authorization_transition_id="second-authorization",
+        live_parent_settlement_transition_id="second-live-settlement",
+    )
+    await store.commit_authoritative_uow(
+        takeover,
+        AuthoritativeUnitOfWork(
+            event=None,
+            session_state=SESSION_PAYLOAD,
+            transition_id="prepare-second-child",
+            state_cas=OperationStateCAS("second-parent-run", 0, 0),
+            state_value={"phase": "prepared"},
+            effect_mutations=(EffectMutation.prepare(second_plan),),
+            effect_plans=(second_plan,),
+            child_bindings=(second_binding,),
+        ),
+    )
+
+    with pytest.raises(RecoveryLeaseConflictError, match="already issued"):
+        await store.acquire_recovered_child_execution_lease(
+            takeover,
+            child_run_id=second_binding.child_run_id,
+            lease_id=lease.lease_id,
+        )
+
+
+@pytest.mark.asyncio
+async def test_recovery_lease_ledger_prevents_superseded_id_reuse(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store, takeover, binding, lease = await _recoverable_child_contract(
+        store_kind,
+        tmp_path,
+    )
+    next_owner = await _next_recovery_owner(
+        store,
+        takeover,
+        "matrix-recovery-owner-next",
+    )
+    replacement = await store.acquire_recovered_child_execution_lease(
+        next_owner,
+        child_run_id=binding.child_run_id,
+        lease_id="matrix-recovery-lease-next",
+    )
+    assert replacement.resume_generation == lease.resume_generation + 1
+
+    with pytest.raises(RecoveryLeaseConflictError, match="already issued"):
+        await store.acquire_recovered_child_execution_lease(
+            next_owner,
+            child_run_id=binding.child_run_id,
+            lease_id=lease.lease_id,
+        )
+
+
+@pytest.mark.asyncio
+async def test_new_runtime_command_admission_rejects_missing_malformed_or_dual_targeting(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store, owner = await _open_store(store_kind, tmp_path)
+    invalid = (
+        RuntimeCommand("missing", "cancel", {}),
+        RuntimeCommand(
+            "malformed",
+            "interrupt",
+            {"target_run_id": ""},
+        ),
+        RuntimeCommand(
+            "dual",
+            "cancel",
+            {"target_run_id": "run", "target_scope": "global"},
+        ),
+    )
+    before = await store.load_session_fact_source(SESSION_ID)
+    for command in invalid:
+        with pytest.raises((TypeError, ValueError)):
+            await store.admit_new_runtime_command(owner, command)
+    assert await store.load_session_fact_source(SESSION_ID) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command_kind", "payload"),
+    (
+        ("cancel", {"target_scope": "global"}),
+        ("interrupt", {"target_scope": "global"}),
+        (
+            "approval_decision",
+            {
+                "approved": False,
+                "request_id": "global-denial",
+                "target_scope": "global",
+            },
+        ),
+    ),
+)
+async def test_global_cancel_interrupt_and_denial_fence_recovered_child_on_sqlite_and_pg(
+    store_kind: str,
+    tmp_path: Path,
+    command_kind: str,
+    payload: dict[str, object],
+) -> None:
+    store, takeover, _binding, lease = await _recoverable_child_contract(
+        store_kind,
+        tmp_path,
+    )
+    admission = await store.admit_new_runtime_command(
+        takeover,
+        RuntimeCommand(
+            command_id=f"global-{command_kind}",
+            command_kind=command_kind,
+            payload=payload,
+        ),
+    )
+    state = await store.load_recovered_child_control_state(
+        takeover,
+        lease=lease,
+    )
+    probe = TargetAwareChildControlProbe()
+    probe.publish(state)
+
+    assert state.mailbox_snapshot == (admission.entry,)
+    assert probe.observe().raised
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command_kind", "payload"),
+    (
+        ("cancel", {"target_scope": "global"}),
+        ("interrupt", {"target_scope": "global"}),
+        (
+            "approval_decision",
+            {
+                "approved": False,
+                "request_id": "global-live-denial",
+                "target_scope": "global",
+            },
+        ),
+    ),
+)
+async def test_global_cancel_interrupt_and_denial_fence_live_child_on_sqlite_and_pg(
+    store_kind: str,
+    tmp_path: Path,
+    command_kind: str,
+    payload: dict[str, object],
+) -> None:
+    store, takeover, binding, lease = await _recoverable_child_contract(
+        store_kind,
+        tmp_path,
+    )
+    admission = await store.admit_new_runtime_command(
+        takeover,
+        RuntimeCommand(
+            command_id=f"global-live-{command_kind}",
+            command_kind=command_kind,
+            payload=payload,
+        ),
+    )
+    state = await store.load_live_child_control_state(
+        takeover,
+        child_run_id=binding.child_run_id,
+        after_session_seq=lease.resume_session_seq,
+    )
+    probe = TargetAwareChildControlProbe()
+    probe.publish(state)
+
+    assert state.mailbox_snapshot == (admission.entry,)
+    assert probe.observe().raised
+
+
+def _parent_settlement_units(
+    binding: ChildExecutionBinding,
+    lease: RecoveredChildExecutionLease,
+) -> tuple[
+    AuthoritativeUnitOfWork,
+    AuthoritativeUnitOfWork,
+    str,
+]:
+    recovery_id = (
+        f"{binding.live_parent_settlement_transition_id}:recovery:"
+        f"{lease.lease_id}:{lease.resume_generation}:{lease.resume_cut}"
+    )
+    mutation = EffectMutation(
+        effect_id=binding.parent_effect_id,
+        attempt_id=binding.parent_attempt_id,
+        expected_status=EffectStatus.DISPATCHED,
+        status=EffectStatus.COMPLETED,
+        payload={"content": "child complete"},
+    )
+    fact = EventRecord(
+        event_id="matrix-parent-settlement-fact",
+        session_id=SESSION_ID,
+        event_kind="tool_result",
+        payload={"content": "child complete"},
+        created_at=datetime(2026, 9, 1, tzinfo=UTC),
+    )
+    common = {
+        "event": None,
+        "session_state": SESSION_PAYLOAD,
+        "state_cas": OperationStateCAS(binding.parent_run_id, 2, 0),
+        "state_value": {"phase": "settled"},
+        "facts": (fact,),
+        "effect_mutations": (mutation,),
+    }
+    live = AuthoritativeUnitOfWork(
+        **common,
+        transition_id=binding.live_parent_settlement_transition_id,
+        adopt_transition_ids=(recovery_id,),
+    )
+    recovery = AuthoritativeUnitOfWork(
+        **common,
+        transition_id=recovery_id,
+        adopt_transition_ids=(binding.live_parent_settlement_transition_id,),
+        recovery_guard=RecoveryTransitionGuard(
+            lease_id=lease.lease_id,
+            child_run_id=lease.child_run_id,
+            resume_generation=lease.resume_generation,
+            expected_recovery_cut=lease.resume_cut,
+            kind=RecoveryGuardKind.PARENT_SETTLEMENT,
+        ),
+    )
+    return live, recovery, recovery_id
+
+
+@pytest.mark.asyncio
+async def test_recovery_parent_settlement_id_includes_lease_generation_and_cut(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    _store, _takeover, binding, lease = await _recoverable_child_contract(
+        store_kind,
+        tmp_path,
+    )
+    _live, recovery, recovery_id = _parent_settlement_units(binding, lease)
+
+    assert recovery.transition_id == recovery_id
+    assert f":{lease.resume_generation}:{lease.resume_cut}" in recovery_id
+    assert lease.lease_id in recovery_id
+
+
+@pytest.mark.asyncio
+async def test_live_retry_adopts_precommitted_recovery_receipt(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store, takeover, binding, lease = await _recoverable_child_contract(
+        store_kind,
+        tmp_path,
+    )
+    live, recovery, recovery_id = _parent_settlement_units(binding, lease)
+    first = await store.commit_authoritative_uow(takeover, recovery)
+    adopted = await store.commit_authoritative_uow(takeover, live)
+
+    assert first.transition_receipt is not None
+    assert first.transition_receipt.transition_id == recovery_id
+    assert adopted.idempotent
+    assert adopted.transition_receipt == first.transition_receipt
+
+
+@pytest.mark.asyncio
+async def test_concurrent_live_recovery_parent_settlement_commits_once(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store, takeover, binding, lease = await _recoverable_child_contract(
+        store_kind,
+        tmp_path,
+    )
+    live, recovery, _recovery_id = _parent_settlement_units(binding, lease)
+
+    results = await asyncio.gather(
+        store.commit_authoritative_uow(takeover, live),
+        store.commit_authoritative_uow(takeover, recovery),
+    )
+
+    assert sorted(commit.idempotent for commit in results) == [False, True]
+    receipts = [commit.transition_receipt for commit in results]
+    assert receipts[0] == receipts[1]
+    effect = await store.load_effect_slot(
+        SESSION_ID,
+        binding.parent_effect_id,
+    )
+    assert effect is not None and effect.status == "completed"
+
+
+async def _clone_transition_receipt(
+    store: Any,
+    *,
+    source_id: str,
+    dest_id: str,
+    projection_epoch: int = 0,
+) -> None:
+    if isinstance(store, SQLiteLocalDurableStore):
+        with store._lock, store._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT mutation_fingerprint, result
+                FROM session_transition_receipts
+                WHERE session_id = ? AND projection_epoch = ? AND transition_id = ?
+                """,
+                (SESSION_ID, projection_epoch, source_id),
+            ).fetchone()
+            if row is None:
+                raise AssertionError("source transition receipt is missing")
+            connection.execute(
+                """
+                INSERT INTO session_transition_receipts (
+                    session_id, projection_epoch, transition_id,
+                    mutation_fingerprint, result
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    SESSION_ID,
+                    projection_epoch,
+                    dest_id,
+                    row["mutation_fingerprint"],
+                    row["result"],
+                ),
+            )
+        return
+
+    async def body(connection: Any) -> None:
+        row = await connection.fetchrow(
+            store._SELECT_TRANSITION_RECEIPT_SQL,
+            SESSION_ID,
+            projection_epoch,
+            source_id,
+        )
+        if row is None:
+            raise AssertionError("source transition receipt is missing")
+        await connection.execute(
+            store._INSERT_TRANSITION_RECEIPT_SQL,
+            SESSION_ID,
+            projection_epoch,
+            dest_id,
+            row["mutation_fingerprint"],
+            row["result"],
+        )
+
+    await store._with_transaction(body)
+
+
+async def _force_effect_status(store: Any, effect_id: str, status: str) -> None:
+    if isinstance(store, SQLiteLocalDurableStore):
+        with store._lock, store._connect() as connection:
+            connection.execute(
+                """
+                UPDATE session_effect_slots SET status = ?
+                WHERE session_id = ? AND effect_id = ?
+                """,
+                (status, SESSION_ID, effect_id),
+            )
+        return
+    row = store._harness_pool.connection.effects.get((SESSION_ID, effect_id))
+    if row is None:
+        raise AssertionError("effect slot is missing")
+    row["status"] = status
+
+
+@pytest.mark.asyncio
+async def test_parent_settlement_dual_receipts_are_corruption(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store, takeover, binding, lease = await _recoverable_child_contract(
+        store_kind,
+        tmp_path,
+    )
+    live, recovery, recovery_id = _parent_settlement_units(binding, lease)
+    await store.commit_authoritative_uow(takeover, recovery)
+    await _clone_transition_receipt(
+        store,
+        source_id=recovery_id,
+        dest_id=binding.live_parent_settlement_transition_id,
+    )
+
+    with pytest.raises(
+        EffectMutationConflictError,
+        match="live and recovery parent settlement receipts both exist",
+    ):
+        await store.commit_authoritative_uow(takeover, live)
+
+
+@pytest.mark.asyncio
+async def test_terminal_parent_effect_without_settlement_receipt_is_corruption(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store, takeover, binding, lease = await _recoverable_child_contract(
+        store_kind,
+        tmp_path,
+    )
+    live, _recovery, _recovery_id = _parent_settlement_units(binding, lease)
+    await _force_effect_status(store, binding.parent_effect_id, "completed")
+
+    with pytest.raises(
+        EffectMutationConflictError,
+        match="terminal parent effect has no live or recovery settlement receipt",
+    ):
+        await store.commit_authoritative_uow(takeover, live)

@@ -1,3 +1,9 @@
+from .durable import (
+    DurableEffectExecutor,
+    DurableEffectInvocation,
+    LocalToolEffectBackend,
+    RemoteEffectBackend,
+)
 from .local_daemon import (
     LocalDaemonExecutor,
     LocalDaemonRuntimeBinding,
@@ -14,6 +20,8 @@ from .local_daemon import (
 )
 
 __all__ = [
+    "DurableEffectExecutor",
+    "DurableEffectInvocation",
     "LocalDaemonExecutor",
     "LocalDaemonRuntimeBinding",
     "LocalDaemonRuntimeExecution",
@@ -21,6 +29,8 @@ __all__ = [
     "LocalDaemonRuntimeProvider",
     "LocalDaemonRuntimeResult",
     "LocalDaemonRuntimeSession",
+    "LocalToolEffectBackend",
+    "RemoteEffectBackend",
     "LocalDaemonSessionRuntimeProvider",
     "RuntimeTurnCompletedHook",
     "RuntimeTurnFailedHook",

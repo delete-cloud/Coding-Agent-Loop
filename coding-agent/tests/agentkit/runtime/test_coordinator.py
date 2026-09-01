@@ -52,6 +52,7 @@ from agentkit.runtime import (
     StreamFrame,
     StreamFrameKind,
     TransitionReceipt,
+    StaleMailboxCutCommitResult,
 )
 from agentkit.runtime.coordinator import (
     _reconcile_and_run_segment,
@@ -98,11 +99,16 @@ def _model_result(
     )
 
 
-def _tool_call(*, approval: bool = False) -> ModelToolCall:
+def _tool_call(
+    *,
+    approval: bool = False,
+    name: str = "read",
+    arguments: dict[str, object] | None = None,
+) -> ModelToolCall:
     return ModelToolCall(
         tool_call_id="call-1",
-        name="read",
-        arguments={"path": "README.md"},
+        name=name,
+        arguments=arguments or {"path": "README.md"},
         requires_approval=approval,
         approval_request_id="approval-1" if approval else None,
     )
@@ -376,6 +382,114 @@ async def test_segment_coordinator_sequences_commit_port_and_effect_executor() -
     settlement_index = timeline.index("commit_settlement")
     assert prepared_index < authorization_index < execute_index < settlement_index
     assert len(executor.calls) == 1
+
+
+async def unrelated_stale_cut_retries_same_prepared_authorization() -> None:
+    class StaleThenCommittedPort(RecordingCommitPort):
+        async def authorize_dispatch(self, request: DispatchAuthorizationRequest):
+            if not self.authorization_requests:
+                self.timeline.append("authorize_dispatch")
+                self.authorization_requests.append(request)
+                return StaleMailboxCutCommitResult(
+                    expected_mailbox_cut=request.mailbox_cut,
+                    current_mailbox_cut=12,
+                )
+            return await super().authorize_dispatch(request)
+
+    class GenerationProbe(QuietControlProbe):
+        def observe(self) -> ControlSnapshot:
+            self.observe_count += 1
+            return ControlSnapshot(
+                generation=ControlGeneration(13),
+                raised=False,
+            )
+
+    commits = StaleThenCommittedPort()
+    executor = RecordingEffectExecutor()
+    model = SequenceModelAdapter(
+        [
+            _model_result("result-tool", content="", tool_calls=(_tool_call(),)),
+            _model_result("result-done", content="done"),
+        ]
+    )
+
+    outcome = await _coordinator(model, commits, executor).run(
+        _initial_request(),
+        control_probe=GenerationProbe(),
+        frame_sink=RecordingFrameSink(),
+        committed_fact_sink=RecordingFactSink(),
+    )
+
+    assert isinstance(outcome, CompletedOutcome)
+    assert [request.mailbox_cut for request in commits.authorization_requests] == [
+        11,
+        13,
+    ]
+    first, retried = commits.authorization_requests
+    assert retried.engine_request == first.engine_request
+    assert retried.proposal == first.proposal
+    assert retried.effect_plan == first.effect_plan
+    assert retried.effect_mutation == first.effect_mutation
+    assert "mailbox_cut" not in retried.effect_mutation.payload
+    assert len(executor.calls) == 1
+    assert len(model.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_unrelated_stale_mailbox_cut_retries_same_prepared_authorization() -> (
+    None
+):
+    await unrelated_stale_cut_retries_same_prepared_authorization()
+
+
+async def targeted_stale_cut_safe_yields_without_dispatch() -> None:
+    class AlwaysStalePort(RecordingCommitPort):
+        async def authorize_dispatch(self, request: DispatchAuthorizationRequest):
+            self.timeline.append("authorize_dispatch")
+            self.authorization_requests.append(request)
+            return StaleMailboxCutCommitResult(
+                expected_mailbox_cut=request.mailbox_cut,
+                current_mailbox_cut=12,
+            )
+
+    class TargetedProbe(QuietControlProbe):
+        def __init__(self, commits: AlwaysStalePort) -> None:
+            super().__init__()
+            self._commits = commits
+
+        def observe(self) -> ControlSnapshot:
+            self.observe_count += 1
+            raised = bool(self._commits.authorization_requests)
+            return ControlSnapshot(
+                generation=ControlGeneration(12 if raised else 11),
+                raised=raised,
+                reason="targeted_cancel" if raised else None,
+            )
+
+    commits = AlwaysStalePort()
+    executor = RecordingEffectExecutor()
+    outcome = await _coordinator(
+        SequenceModelAdapter(
+            [_model_result("result-tool", content="", tool_calls=(_tool_call(),))]
+        ),
+        commits,
+        executor,
+    ).run(
+        _initial_request(),
+        control_probe=TargetedProbe(commits),
+        frame_sink=RecordingFrameSink(),
+        committed_fact_sink=RecordingFactSink(),
+    )
+
+    assert isinstance(outcome, SafeYieldOutcome)
+    assert outcome.reason == "targeted_cancel"
+    assert len(commits.authorization_requests) == 1
+    assert executor.calls == []
+
+
+@pytest.mark.asyncio
+async def test_targeted_stale_mailbox_cut_safe_yields_without_dispatch() -> None:
+    await targeted_stale_cut_safe_yields_without_dispatch()
 
 
 @pytest.mark.asyncio
@@ -676,6 +790,75 @@ async def _blocked_approval_state() -> tuple[BlockedOutcome, RecordingCommitPort
     )
     assert isinstance(outcome, BlockedOutcome)
     return outcome, commits
+
+
+@pytest.mark.asyncio
+async def test_approval_gated_parent_subagent_reuses_prepared_settlement_identity() -> (
+    None
+):
+    commits = RecordingCommitPort()
+    coordinator = _coordinator(
+        SequenceModelAdapter(
+            [
+                _model_result(
+                    "result-subagent-approval",
+                    content="",
+                    tool_calls=(
+                        _tool_call(
+                            approval=True,
+                            name="subagent",
+                            arguments={"task": "inspect repository"},
+                        ),
+                    ),
+                ),
+                _model_result(
+                    "result-subagent-complete",
+                    content="child complete",
+                ),
+            ]
+        ),
+        commits,
+        RecordingEffectExecutor(),
+    )
+    blocked = await coordinator.run(
+        _initial_request(),
+        control_probe=QuietControlProbe(),
+        frame_sink=RecordingFrameSink(),
+        committed_fact_sink=RecordingFactSink(),
+    )
+    assert isinstance(blocked, BlockedOutcome)
+    assert blocked.effect is not None
+    prepared_transition_id = blocked.state_version.commit_ref.transition_id
+
+    completed = await coordinator.run(
+        RunSegmentRequest(
+            session_id="session-1",
+            owner_id="owner-1",
+            owner_epoch=3,
+            state_version=blocked.state_version,
+            step_input=ApprovalResolved(
+                settlement=_approval_settlement(
+                    blocked,
+                    approved=True,
+                    tool_name="subagent",
+                )
+            ),
+            max_rounds=2,
+        ),
+        control_probe=QuietControlProbe(),
+        frame_sink=RecordingFrameSink(),
+        committed_fact_sink=RecordingFactSink(),
+    )
+    assert isinstance(completed, CompletedOutcome)
+    authorization = commits.authorization_requests[-1]
+    expected_identity = (
+        f"{prepared_transition_id}:dispatch:"
+        f"{blocked.effect.effect_id}:{blocked.effect.attempt_id}"
+    )
+    assert authorization.proposal.transition_id == expected_identity
+    assert commits.settlement_requests[-1].settlement.authorization_transition_id == (
+        expected_identity
+    )
 
 
 def _approval_settlement(
@@ -1968,3 +2151,13 @@ async def test_reconciliation_cas_reloads_and_retries_same_record() -> None:
     assert port.reconciliation_requests[1].state_version.revision == 9
     assert executor.calls == []
     assert [notice.fact_kind for notice in facts.notices].count("tool_result") == 1
+
+
+@pytest.mark.asyncio
+async def test_unrelated_stale_cut_retries_same_prepared_authorization() -> None:
+    await unrelated_stale_cut_retries_same_prepared_authorization()
+
+
+@pytest.mark.asyncio
+async def test_targeted_stale_cut_safe_yields_without_dispatch() -> None:
+    await targeted_stale_cut_safe_yields_without_dispatch()

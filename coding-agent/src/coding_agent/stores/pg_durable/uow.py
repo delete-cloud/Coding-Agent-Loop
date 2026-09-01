@@ -7,8 +7,10 @@ from datetime import datetime
 from typing import Any, cast
 
 from agentkit.runtime.contracts import (
+    ApprovalSettlement,
     CommitRef,
     CommittedFactNotice,
+    EffectStatus,
     OperationStateVersion,
     RuntimeCommand,
     TransitionReceipt,
@@ -26,21 +28,28 @@ from coding_agent.stores.runtime_store import (
     AuthoritativeCommit,
     AuthoritativeUnitOfWork,
     CommandMailboxEntry,
+    ChildBindingConflictError,
+    ChildExecutionBinding,
     CommandDispositionConflictError,
     RuntimeCommandAdmission,
     RuntimeCommandAdmissionConflictError,
+    EffectLedgerSlot,
     EffectMutationConflictError,
     EffectReconciliationEvidence,
     ExecutorAttemptConflictError,
     ExecutorAttemptRecord,
-    EventRecord,
     JSONObject,
     RawCursor,
     RecoveryEvidenceConflictError,
+    RecoveredChildExecutionLease,
+    RecoveredChildControlState,
+    RecoveryLeaseConflictError,
+    StaleRecoveryGuardError,
     effect_status_may_replace,
     format_u64,
     runtime_command_from_mailbox_payload,
     runtime_command_invalidates_dispatch,
+    runtime_command_targets,
     runtime_command_mailbox_payload,
     parse_u64,
     receipt_generation_may_replace,
@@ -49,13 +58,21 @@ from coding_agent.stores.runtime_store import (
     TransitionFingerprintMismatchError,
     _operation_state_from_row,
     runtime_command_mailbox_payloads_equal,
+    validate_new_runtime_command_target,
+    validate_recovery_approval_refresh,
+    adopt_parent_settlement_receipt,
     _plain_json,
     _transition_receipt_from_row,
     _require_non_empty,
     effect_slot_from_mutation,
+    child_execution_binding_from_payload,
+    child_execution_binding_payload,
+    assert_recovery_guard_shape,
     mailbox_slot_from_disposition,
     transition_commit_from_payload,
     transition_commit_payload,
+    recovered_child_lease_from_payload,
+    recovered_child_lease_payload,
     transition_mutation_fingerprint,
     state_value_with_reconciled_effect,
     snapshot_transition_unit,
@@ -276,6 +293,83 @@ class PgUnitOfWorkMixin:
             evidence_ref=evidence_ref,
         )
 
+    async def quiesce_claimed_executor_attempt(
+        self,
+        authority: OwnerAuthority,
+        *,
+        effect_id: str,
+        attempt_id: str,
+        authorization_transition_id: str,
+        executor_id: str,
+        now: datetime,
+        evidence_ref: str,
+    ) -> ExecutorAttemptRecord:
+        await self._ensure_schema()
+
+        async def body(connection: Any) -> ExecutorAttemptRecord:
+            await self._require_owner(connection, authority)
+            row = await connection.fetchrow(
+                self._SELECT_EXECUTOR_ATTEMPT_SQL,
+                authority.session_id,
+                effect_id,
+                attempt_id,
+                authorization_transition_id,
+            )
+            if row is None:
+                raise ExecutorAttemptConflictError("executor attempt does not exist")
+            current = _executor_attempt_from_pg_row(dict(row))
+            if current.status == "quiescent":
+                if (
+                    current.executor_id == executor_id
+                    and current.quiescence_evidence_ref == evidence_ref
+                ):
+                    return current
+                raise ExecutorAttemptConflictError(
+                    "executor quiescence replay changed content"
+                )
+            if current.status not in {
+                "authorized_unclaimed",
+                "reserved",
+                "started",
+            }:
+                raise ExecutorAttemptConflictError(
+                    "executor attempt cannot be quiesced"
+                )
+            if current.dispatch_owner_epoch > authority.epoch:
+                raise ExecutorAttemptConflictError(
+                    "executor attempt belongs to a newer owner"
+                )
+            if current.status != "authorized_unclaimed" and (
+                current.executor_id != executor_id
+            ):
+                raise ExecutorAttemptConflictError("executor claim identity mismatch")
+            updated = replace(
+                current,
+                status="quiescent",
+                executor_id=executor_id,
+                claim_generation=max(1, current.claim_generation),
+                reservation_lease_expires_at=(
+                    now
+                    if current.reservation_lease_expires_at is None
+                    else current.reservation_lease_expires_at
+                ),
+                quiescence_evidence_ref=evidence_ref,
+            )
+            updated_row = await connection.fetchrow(
+                self._UPDATE_EXECUTOR_ATTEMPT_SQL,
+                authority.session_id,
+                effect_id,
+                attempt_id,
+                authorization_transition_id,
+                updated.status,
+                updated.payload(),
+            )
+            if updated_row is None:
+                raise RuntimeError("executor attempt update returned no row")
+            return updated
+
+        return cast(ExecutorAttemptRecord, await self._with_transaction(body))
+
     async def revoke_expired_executor_reservation(
         self,
         authority: OwnerAuthority,
@@ -395,6 +489,607 @@ class PgUnitOfWorkMixin:
 
         return cast(ExecutorAttemptRecord, await self._with_transaction(body))
 
+    async def load_child_execution_binding(
+        self,
+        session_id: str,
+        *,
+        parent_effect_id: str | None = None,
+        child_run_id: str | None = None,
+    ) -> ChildExecutionBinding | None:
+        if (parent_effect_id is None) == (child_run_id is None):
+            raise ValueError("exactly one child binding identity must be provided")
+        await self._ensure_schema()
+        pool = await self._pool.get_pool()
+        if parent_effect_id is not None:
+            row = await pool.fetchrow(
+                """
+                SELECT payload FROM session_child_bindings
+                WHERE session_id = $1 AND parent_effect_id = $2
+                """,
+                session_id,
+                parent_effect_id,
+            )
+        else:
+            row = await pool.fetchrow(
+                """
+                SELECT payload FROM session_child_bindings
+                WHERE session_id = $1 AND child_run_id = $2
+                """,
+                session_id,
+                child_run_id,
+            )
+        if row is None:
+            return None
+        payload = _required_dict(dict(row), "payload")
+        return child_execution_binding_from_payload(payload)
+
+    async def acquire_recovered_child_execution_lease(
+        self,
+        authority: OwnerAuthority,
+        *,
+        child_run_id: str,
+        lease_id: str,
+    ) -> RecoveredChildExecutionLease:
+        await self._ensure_schema()
+
+        async def body(connection: Any) -> RecoveredChildExecutionLease:
+            await self._require_owner(connection, authority)
+            fact_source = await self._ensure_fact_source(
+                connection,
+                authority.session_id,
+            )
+            binding_row = await connection.fetchrow(
+                """
+                SELECT payload FROM session_child_bindings
+                WHERE session_id = $1 AND child_run_id = $2
+                FOR UPDATE
+                """,
+                authority.session_id,
+                child_run_id,
+            )
+            if binding_row is None:
+                raise RecoveryLeaseConflictError(
+                    "recovered child binding does not exist"
+                )
+            binding = child_execution_binding_from_payload(
+                _required_dict(dict(binding_row), "payload")
+            )
+            ledger_row = await connection.fetchrow(
+                """
+                SELECT child_run_id, payload FROM session_recovery_leases
+                WHERE session_id = $1 AND lease_id = $2
+                FOR UPDATE
+                """,
+                authority.session_id,
+                lease_id,
+            )
+            if ledger_row is not None:
+                ledger = dict(ledger_row)
+                stored_lease = recovered_child_lease_from_payload(
+                    _required_dict(ledger, "payload")
+                )
+                current_snapshot = await self._matched_child_mailbox_snapshot(
+                    connection,
+                    binding,
+                    prior_session_seq=stored_lease.prior_session_seq,
+                    resume_session_seq=format_u64(fact_source.session_seq_int),
+                )
+                self._assert_no_pending_child_control(current_snapshot)
+                if (
+                    ledger.get("child_run_id") != child_run_id
+                    or binding.active_lease != stored_lease
+                    or stored_lease.owner_epoch != authority.epoch
+                ):
+                    raise RecoveryLeaseConflictError(
+                        "recovery lease identity was already issued"
+                    )
+                return stored_lease
+            active_lease = binding.active_lease
+            if (
+                active_lease is not None
+                and active_lease.lease_id != lease_id
+                and active_lease.owner_epoch >= authority.epoch
+            ):
+                raise RecoveryLeaseConflictError(
+                    "another active recovery lease owns this child"
+                )
+            effect_row = await connection.fetchrow(
+                """
+                SELECT status, payload FROM session_effect_slots
+                WHERE session_id = $1 AND effect_id = $2
+                FOR UPDATE
+                """,
+                authority.session_id,
+                binding.parent_effect_id,
+            )
+            if effect_row is None or dict(effect_row).get("status") != "dispatched":
+                raise RecoveryLeaseConflictError(
+                    "parent effect is not retained as dispatched"
+                )
+            effect_payload = _required_dict(dict(effect_row), "payload")
+            if (
+                effect_payload.get("attempt_id") != binding.parent_attempt_id
+                or effect_payload.get("authorization_transition_id")
+                != binding.authorization_transition_id
+            ):
+                raise RecoveryLeaseConflictError(
+                    "parent dispatch authorization does not match child binding"
+                )
+            attempt_row = await connection.fetchrow(
+                self._SELECT_EXECUTOR_ATTEMPT_SQL,
+                authority.session_id,
+                binding.parent_effect_id,
+                binding.parent_attempt_id,
+                binding.authorization_transition_id,
+            )
+            if attempt_row is None:
+                raise RecoveryLeaseConflictError(
+                    "parent executor attempt does not exist"
+                )
+            attempt = _executor_attempt_from_pg_row(dict(attempt_row))
+            if (
+                attempt.status != "quiescent"
+                or attempt.dispatch_owner_epoch >= authority.epoch
+            ):
+                raise RecoveryLeaseConflictError(
+                    "parent executor attempt is not quiescent under an older owner"
+                )
+            prior_session_seq = attempt.authorization_mailbox_session_seq
+            resume_session_seq = format_u64(fact_source.session_seq_int)
+            mailbox_snapshot = await self._matched_child_mailbox_snapshot(
+                connection,
+                binding,
+                prior_session_seq=prior_session_seq,
+                resume_session_seq=resume_session_seq,
+            )
+            self._assert_no_pending_child_control(mailbox_snapshot)
+            lease = RecoveredChildExecutionLease(
+                session_id=authority.session_id,
+                child_run_id=binding.child_run_id,
+                lease_id=lease_id,
+                resume_generation=(
+                    1 if active_lease is None else active_lease.resume_generation + 1
+                ),
+                resume_cut=format_u64(fact_source.dispatch_generation_int),
+                owner_epoch=authority.epoch,
+                prior_session_seq=prior_session_seq,
+                resume_session_seq=resume_session_seq,
+                mailbox_snapshot=mailbox_snapshot,
+            )
+            if active_lease is not None:
+                await connection.execute(
+                    """
+                    UPDATE session_recovery_leases SET status = 'superseded'
+                    WHERE session_id = $1 AND lease_id = $2
+                    """,
+                    authority.session_id,
+                    active_lease.lease_id,
+                )
+            await connection.execute(
+                """
+                UPDATE session_child_bindings SET payload = $1
+                WHERE session_id = $2 AND child_run_id = $3
+                """,
+                child_execution_binding_payload(replace(binding, active_lease=lease)),
+                authority.session_id,
+                child_run_id,
+            )
+            await connection.execute(
+                """
+                INSERT INTO session_recovery_leases (
+                    session_id, lease_id, child_run_id, status, payload
+                )
+                VALUES ($1, $2, $3, 'active', $4)
+                """,
+                authority.session_id,
+                lease.lease_id,
+                lease.child_run_id,
+                recovered_child_lease_payload(lease),
+            )
+            return lease
+
+        return cast(
+            RecoveredChildExecutionLease,
+            await self._with_transaction(body),
+        )
+
+    async def rebase_recovered_child_execution_lease(
+        self,
+        authority: OwnerAuthority,
+        lease: RecoveredChildExecutionLease,
+    ) -> RecoveredChildExecutionLease:
+        if (
+            lease.session_id != authority.session_id
+            or lease.owner_epoch != authority.epoch
+        ):
+            raise RecoveryLeaseConflictError(
+                "recovery lease does not match current authority"
+            )
+        await self._ensure_schema()
+
+        async def body(connection: Any) -> RecoveredChildExecutionLease:
+            await self._require_owner(connection, authority)
+            fact_source = await self._ensure_fact_source(
+                connection,
+                authority.session_id,
+            )
+            binding_row = await connection.fetchrow(
+                """
+                SELECT payload FROM session_child_bindings
+                WHERE session_id = $1 AND child_run_id = $2
+                FOR UPDATE
+                """,
+                authority.session_id,
+                lease.child_run_id,
+            )
+            if binding_row is None:
+                raise RecoveryLeaseConflictError(
+                    "recovered child binding does not exist"
+                )
+            binding = child_execution_binding_from_payload(
+                _required_dict(dict(binding_row), "payload")
+            )
+            if binding.active_lease != lease:
+                raise RecoveryLeaseConflictError(
+                    "recovery lease identity or generation is stale"
+                )
+            effect_row = await connection.fetchrow(
+                """
+                SELECT status, payload FROM session_effect_slots
+                WHERE session_id = $1 AND effect_id = $2
+                FOR UPDATE
+                """,
+                authority.session_id,
+                binding.parent_effect_id,
+            )
+            if effect_row is None or dict(effect_row).get("status") != "dispatched":
+                raise RecoveryLeaseConflictError(
+                    "parent effect is no longer dispatched"
+                )
+            effect_payload = _required_dict(dict(effect_row), "payload")
+            if (
+                effect_payload.get("authorization_transition_id")
+                != binding.authorization_transition_id
+            ):
+                raise RecoveryLeaseConflictError(
+                    "parent dispatch authorization changed"
+                )
+            desired_session_seq = format_u64(fact_source.session_seq_int)
+            mailbox_snapshot = await self._matched_child_mailbox_snapshot(
+                connection,
+                binding,
+                prior_session_seq=lease.prior_session_seq,
+                resume_session_seq=desired_session_seq,
+            )
+            self._assert_no_pending_child_control(mailbox_snapshot)
+            if any(
+                entry.command.command_kind == "approval_decision"
+                for entry in mailbox_snapshot
+            ):
+                raise RecoveryLeaseConflictError(
+                    "approval commands require validated recovery refresh"
+                )
+            desired_cut = format_u64(fact_source.dispatch_generation_int)
+            if (
+                lease.resume_cut == desired_cut
+                and lease.resume_session_seq == desired_session_seq
+                and lease.mailbox_snapshot == mailbox_snapshot
+            ):
+                return lease
+            updated_lease = replace(
+                lease,
+                resume_generation=lease.resume_generation + 1,
+                resume_cut=desired_cut,
+                resume_session_seq=desired_session_seq,
+                mailbox_snapshot=mailbox_snapshot,
+            )
+            await connection.execute(
+                """
+                UPDATE session_child_bindings SET payload = $1
+                WHERE session_id = $2 AND child_run_id = $3
+                """,
+                child_execution_binding_payload(
+                    replace(binding, active_lease=updated_lease)
+                ),
+                authority.session_id,
+                lease.child_run_id,
+            )
+            await connection.execute(
+                """
+                UPDATE session_recovery_leases SET payload = $1
+                WHERE session_id = $2 AND lease_id = $3 AND status = 'active'
+                """,
+                recovered_child_lease_payload(updated_lease),
+                authority.session_id,
+                updated_lease.lease_id,
+            )
+            return updated_lease
+
+        return cast(
+            RecoveredChildExecutionLease,
+            await self._with_transaction(body),
+        )
+
+    async def refresh_recovered_child_execution_lease_for_approval(
+        self,
+        authority: OwnerAuthority,
+        *,
+        lease: RecoveredChildExecutionLease,
+        state_version: OperationStateVersion,
+        approval: ApprovalSettlement,
+        expected_dispatch_cut: str,
+    ) -> RecoveredChildExecutionLease:
+        if (
+            lease.session_id != authority.session_id
+            or lease.owner_epoch != authority.epoch
+        ):
+            raise RecoveryLeaseConflictError(
+                "recovery lease does not match current authority"
+            )
+        await self._ensure_schema()
+
+        async def body(connection: Any) -> RecoveredChildExecutionLease:
+            await self._require_owner(connection, authority)
+            fact_source = await self._ensure_fact_source(
+                connection,
+                authority.session_id,
+            )
+            current_cut = format_u64(fact_source.dispatch_generation_int)
+            if current_cut != expected_dispatch_cut:
+                raise RecoveryLeaseConflictError(
+                    "approval refresh dispatch cut is stale"
+                )
+            binding_row = await connection.fetchrow(
+                """
+                SELECT payload FROM session_child_bindings
+                WHERE session_id = $1 AND child_run_id = $2
+                FOR UPDATE
+                """,
+                authority.session_id,
+                lease.child_run_id,
+            )
+            if binding_row is None:
+                raise RecoveryLeaseConflictError("child binding does not exist")
+            binding = child_execution_binding_from_payload(
+                _required_dict(dict(binding_row), "payload")
+            )
+            if binding.active_lease != lease:
+                raise RecoveryLeaseConflictError(
+                    "recovery lease identity or generation is stale"
+                )
+            state_row = await connection.fetchrow(
+                """
+                SELECT * FROM session_operation_states
+                WHERE session_id = $1 AND run_id = $2
+                FOR UPDATE
+                """,
+                authority.session_id,
+                lease.child_run_id,
+            )
+            if state_row is None:
+                raise RecoveryLeaseConflictError(
+                    "recovered child operation state does not exist"
+                )
+            durable_state = _operation_state_from_row(dict(state_row))
+            if durable_state != state_version:
+                raise RecoveryLeaseConflictError(
+                    "approval refresh child state is stale"
+                )
+            desired_session_seq = format_u64(fact_source.session_seq_int)
+            mailbox_snapshot = await self._matched_child_mailbox_snapshot(
+                connection,
+                binding,
+                prior_session_seq=lease.prior_session_seq,
+                resume_session_seq=desired_session_seq,
+            )
+            self._assert_no_pending_child_control(mailbox_snapshot)
+            validate_recovery_approval_refresh(
+                lease=lease,
+                state_version=durable_state,
+                approval=approval,
+                mailbox_snapshot=mailbox_snapshot,
+            )
+            if current_cut != lease.resume_cut:
+                raise RecoveryLeaseConflictError(
+                    "approval refresh must keep resume_cut unchanged"
+                )
+            if (
+                lease.resume_cut == current_cut
+                and lease.resume_session_seq == desired_session_seq
+                and lease.mailbox_snapshot == mailbox_snapshot
+            ):
+                return lease
+            updated_lease = replace(
+                lease,
+                resume_generation=lease.resume_generation + 1,
+                resume_session_seq=desired_session_seq,
+                mailbox_snapshot=mailbox_snapshot,
+            )
+            await connection.execute(
+                """
+                UPDATE session_child_bindings SET payload = $1
+                WHERE session_id = $2 AND child_run_id = $3
+                """,
+                child_execution_binding_payload(
+                    replace(binding, active_lease=updated_lease)
+                ),
+                authority.session_id,
+                lease.child_run_id,
+            )
+            await connection.execute(
+                """
+                UPDATE session_recovery_leases SET payload = $1
+                WHERE session_id = $2 AND lease_id = $3 AND status = 'active'
+                """,
+                recovered_child_lease_payload(updated_lease),
+                authority.session_id,
+                updated_lease.lease_id,
+            )
+            return updated_lease
+
+        return cast(
+            RecoveredChildExecutionLease,
+            await self._with_transaction(body),
+        )
+
+    async def load_recovered_child_control_state(
+        self,
+        authority: OwnerAuthority,
+        *,
+        lease: RecoveredChildExecutionLease,
+    ) -> RecoveredChildControlState:
+        await self._ensure_schema()
+
+        async def body(connection: Any) -> RecoveredChildControlState:
+            await self._require_owner(connection, authority)
+            fact_source = await self._ensure_fact_source(
+                connection,
+                authority.session_id,
+            )
+            binding_row = await connection.fetchrow(
+                """
+                SELECT payload FROM session_child_bindings
+                WHERE session_id = $1 AND child_run_id = $2
+                FOR UPDATE
+                """,
+                authority.session_id,
+                lease.child_run_id,
+            )
+            if binding_row is None:
+                raise RecoveryLeaseConflictError(
+                    "recovered child binding does not exist"
+                )
+            binding = child_execution_binding_from_payload(
+                _required_dict(dict(binding_row), "payload")
+            )
+            if binding.active_lease != lease:
+                raise RecoveryLeaseConflictError(
+                    "recovery lease identity or generation is stale"
+                )
+            session_seq = format_u64(fact_source.session_seq_int)
+            return RecoveredChildControlState(
+                dispatch_generation=format_u64(fact_source.dispatch_generation_int),
+                session_seq=session_seq,
+                mailbox_snapshot=await self._matched_child_mailbox_snapshot(
+                    connection,
+                    binding,
+                    prior_session_seq=lease.prior_session_seq,
+                    resume_session_seq=session_seq,
+                ),
+            )
+
+        return cast(
+            RecoveredChildControlState,
+            await self._with_transaction(body),
+        )
+
+    async def load_live_child_control_state(
+        self,
+        authority: OwnerAuthority,
+        *,
+        child_run_id: str,
+        after_session_seq: str,
+    ) -> RecoveredChildControlState:
+        await self._ensure_schema()
+
+        async def body(connection: Any) -> RecoveredChildControlState:
+            await self._require_owner(connection, authority)
+            fact_source = await self._ensure_fact_source(
+                connection,
+                authority.session_id,
+            )
+            binding_row = await connection.fetchrow(
+                """
+                SELECT payload FROM session_child_bindings
+                WHERE session_id = $1 AND child_run_id = $2
+                FOR UPDATE
+                """,
+                authority.session_id,
+                child_run_id,
+            )
+            if binding_row is None:
+                raise RecoveryLeaseConflictError("live child binding does not exist")
+            binding = child_execution_binding_from_payload(
+                _required_dict(dict(binding_row), "payload")
+            )
+            session_seq = format_u64(fact_source.session_seq_int)
+            return RecoveredChildControlState(
+                dispatch_generation=format_u64(fact_source.dispatch_generation_int),
+                session_seq=session_seq,
+                mailbox_snapshot=await self._matched_child_mailbox_snapshot(
+                    connection,
+                    binding,
+                    prior_session_seq=after_session_seq,
+                    resume_session_seq=session_seq,
+                ),
+            )
+
+        return cast(
+            RecoveredChildControlState,
+            await self._with_transaction(body),
+        )
+
+    @staticmethod
+    async def _matched_child_mailbox_snapshot(
+        connection: Any,
+        binding: ChildExecutionBinding,
+        *,
+        prior_session_seq: str,
+        resume_session_seq: str,
+    ) -> tuple[CommandMailboxEntry, ...]:
+        prior = parse_u64(prior_session_seq, field_name="prior_session_seq")
+        resume = parse_u64(resume_session_seq, field_name="resume_session_seq")
+        rows = await connection.fetch(
+            """
+            SELECT slot_id, disposition, admitted_session_seq,
+                   admitted_dispatch_generation, payload
+            FROM session_mailbox_slots
+            WHERE session_id = $1
+              AND disposition IN ('pending', 'admitted')
+              AND admitted_session_seq > $2
+              AND admitted_session_seq <= $3
+            ORDER BY admitted_session_seq, slot_id
+            FOR UPDATE
+            """,
+            binding.session_id,
+            prior,
+            resume,
+        )
+        entries: list[CommandMailboxEntry] = []
+        run_ids = frozenset({binding.parent_run_id, binding.child_run_id})
+        for row in rows:
+            values = dict(row)
+            payload = _required_dict(values, "payload")
+            command = runtime_command_from_mailbox_payload(
+                command_id=_required_str(values, "slot_id"),
+                payload=payload,
+            )
+            if not runtime_command_targets(command, run_ids=run_ids):
+                continue
+            entries.append(
+                CommandMailboxEntry(
+                    command=command,
+                    admitted_session_seq=format_u64(
+                        _required_int(values, "admitted_session_seq")
+                    ),
+                    admitted_dispatch_generation=format_u64(
+                        _required_int(values, "admitted_dispatch_generation")
+                    ),
+                    disposition=_required_str(values, "disposition"),
+                )
+            )
+        return tuple(entries)
+
+    @staticmethod
+    def _assert_no_pending_child_control(
+        entries: tuple[CommandMailboxEntry, ...],
+    ) -> None:
+        for entry in entries:
+            if runtime_command_invalidates_dispatch(entry.command):
+                raise RecoveryLeaseConflictError(
+                    "pending targeted control prevents child recovery"
+                )
+
     async def settle_root_run(
         self,
         authority: OwnerAuthority,
@@ -453,6 +1148,14 @@ class PgUnitOfWorkMixin:
             session_seq=commit.event.session_seq,
             idempotent=commit.idempotent,
         )
+
+    async def admit_new_runtime_command(
+        self,
+        authority: OwnerAuthority,
+        command: RuntimeCommand,
+    ) -> RuntimeCommandAdmission:
+        validate_new_runtime_command_target(command)
+        return await self.admit_runtime_command(authority, command)
 
     async def admit_runtime_command(
         self,
@@ -601,8 +1304,15 @@ class PgUnitOfWorkMixin:
     ) -> None:
         if unit.reconciliation_evidence_ref is None:
             return
-        mutation = unit.effect_mutation
-        if mutation is None or mutation.reconciliation is None:
+        mutation = next(
+            (
+                candidate
+                for candidate in unit.normalized_effect_mutations
+                if candidate.reconciliation is not None
+            ),
+            None,
+        )
+        if mutation is None:
             raise EffectMutationConflictError("reconciliation mutation is missing")
         current_effect_row = await connection.fetchrow(
             self._SELECT_EFFECT_SLOT_FOR_UPDATE_SQL,
@@ -736,15 +1446,16 @@ class PgUnitOfWorkMixin:
                 raise SessionOwnershipConflictError(
                     "transition fact belongs to another session"
                 )
-        reconciliation = (
-            None
-            if unit.effect_mutation is None
-            else unit.effect_mutation.reconciliation
-        )
-        if reconciliation is not None and reconciliation.owner_epoch != authority.epoch:
-            raise SessionOwnershipConflictError(
-                "reconciliation owner epoch does not match authority"
-            )
+        mutations = unit.normalized_effect_mutations
+        for mutation in mutations:
+            reconciliation = mutation.reconciliation
+            if (
+                reconciliation is not None
+                and reconciliation.owner_epoch != authority.epoch
+            ):
+                raise SessionOwnershipConflictError(
+                    "reconciliation owner epoch does not match authority"
+                )
         mutation_fingerprint = transition_mutation_fingerprint(unit)
 
         async def body(connection: Any) -> AuthoritativeCommit:
@@ -763,7 +1474,70 @@ class PgUnitOfWorkMixin:
                 state_cas.projection_epoch,
                 transition_id,
             )
-            if receipt_row is not None:
+            if unit.adopt_transition_ids:
+                adopted_loaded = []
+                for adopt_transition_id in unit.adopt_transition_ids:
+                    adopted_loaded.append(
+                        (
+                            adopt_transition_id,
+                            await connection.fetchrow(
+                                self._SELECT_TRANSITION_RECEIPT_SQL,
+                                authority.session_id,
+                                state_cas.projection_epoch,
+                                adopt_transition_id,
+                            ),
+                        )
+                    )
+                parent_effect_status = None
+                if mutations:
+                    parent_effect = await connection.fetchrow(
+                        """
+                        SELECT status FROM session_effect_slots
+                        WHERE session_id = $1 AND effect_id = $2
+                        """,
+                        authority.session_id,
+                        mutations[0].effect_id,
+                    )
+                    if parent_effect is not None:
+                        parent_effect_status = parent_effect["status"]
+                adopted = adopt_parent_settlement_receipt(
+                    current_id=transition_id,
+                    current_row=receipt_row,
+                    adopted_rows=tuple(adopted_loaded),
+                    parent_effect_status=parent_effect_status,
+                )
+                if adopted is not None:
+                    adopted_id, adopted_row = adopted
+                    stored_fingerprint, result_payload = _transition_receipt_from_row(
+                        dict(adopted_row)
+                    )
+                    if (
+                        adopted_id == transition_id
+                        and stored_fingerprint != mutation_fingerprint
+                    ):
+                        raise TransitionFingerprintMismatchError(
+                            "transition mutation fingerprint mismatch"
+                        )
+                    state_version, facts, receipt, raw_cursor = (
+                        transition_commit_from_payload(
+                            session_id=authority.session_id,
+                            transition_id=adopted_id,
+                            projection_epoch=state_cas.projection_epoch,
+                            mutation_fingerprint=stored_fingerprint,
+                            payload=result_payload,
+                        )
+                    )
+                    return AuthoritativeCommit(
+                        event=None,
+                        projection=fact_source.projection,
+                        projection_epoch=format_u64(fact_source.projection_epoch_int),
+                        raw_cursor=raw_cursor,
+                        idempotent=True,
+                        state_version=state_version,
+                        facts=facts,
+                        transition_receipt=receipt,
+                    )
+            elif receipt_row is not None:
                 stored_fingerprint, result_payload = _transition_receipt_from_row(
                     dict(receipt_row)
                 )
@@ -790,6 +1564,158 @@ class PgUnitOfWorkMixin:
                     facts=facts,
                     transition_receipt=receipt,
                 )
+
+            if unit.recovery_guard is not None:
+                guard = unit.recovery_guard
+                binding_row = await connection.fetchrow(
+                    """
+                    SELECT payload FROM session_child_bindings
+                    WHERE session_id = $1 AND child_run_id = $2
+                    FOR UPDATE
+                    """,
+                    authority.session_id,
+                    guard.child_run_id,
+                )
+                if binding_row is None:
+                    raise StaleRecoveryGuardError(
+                        "recovery guard child binding does not exist"
+                    )
+                guarded_binding = child_execution_binding_from_payload(
+                    _required_dict(dict(binding_row), "payload")
+                )
+                assert_recovery_guard_shape(unit, guarded_binding)
+                lease = guarded_binding.active_lease
+                if (
+                    lease is None
+                    or lease.lease_id != guard.lease_id
+                    or lease.resume_generation != guard.resume_generation
+                    or lease.resume_cut != guard.expected_recovery_cut
+                    or lease.owner_epoch != authority.epoch
+                    or fact_source.dispatch_generation_int
+                    != parse_u64(
+                        guard.expected_recovery_cut,
+                        field_name="expected_recovery_cut",
+                    )
+                ):
+                    raise StaleRecoveryGuardError(
+                        "recovery guard no longer owns the exact fact cut"
+                    )
+            closeout_attempt: ExecutorAttemptRecord | None = None
+            if unit.unstarted_dispatch_closeout is not None:
+                closeout = unit.unstarted_dispatch_closeout
+                closeout_row = await connection.fetchrow(
+                    self._SELECT_EXECUTOR_ATTEMPT_SQL,
+                    authority.session_id,
+                    closeout.effect_id,
+                    closeout.attempt_id,
+                    closeout.authorization_transition_id,
+                )
+                if closeout_row is None:
+                    raise ExecutorAttemptConflictError(
+                        "unstarted closeout executor attempt does not exist"
+                    )
+                current_closeout = _executor_attempt_from_pg_row(dict(closeout_row))
+                if (
+                    current_closeout.status != "authorized_unclaimed"
+                    or current_closeout.dispatch_owner_epoch > authority.epoch
+                ):
+                    raise ExecutorAttemptConflictError(
+                        "unstarted closeout requires authorized_unclaimed attempt"
+                    )
+                closeout_attempt = replace(
+                    current_closeout,
+                    status="quiescent",
+                    executor_id=closeout.executor_id,
+                    claim_generation=1,
+                    reservation_lease_expires_at=closeout.closed_at,
+                    quiescence_evidence_ref=closeout.evidence_ref,
+                )
+
+            child_projection_row = await connection.fetchrow(
+                """
+                SELECT payload FROM session_child_bindings
+                WHERE session_id = $1 AND child_run_id = $2
+                """,
+                authority.session_id,
+                state_cas.run_id,
+            )
+            child_projection_binding = (
+                None
+                if child_projection_row is None
+                else child_execution_binding_from_payload(
+                    _required_dict(dict(child_projection_row), "payload")
+                )
+            )
+            facts_to_commit = tuple(
+                (
+                    fact
+                    if child_projection_binding is None
+                    else replace(
+                        fact,
+                        payload={
+                            **fact.payload,
+                            "run_id": (
+                                child_projection_binding.parent_run_id
+                                if fact.event_kind == "approval_requested"
+                                else child_projection_binding.child_run_id
+                            ),
+                            "parent_run_id": (child_projection_binding.parent_run_id),
+                            "parent_effect_id": (
+                                child_projection_binding.parent_effect_id
+                            ),
+                            "subagent_child": True,
+                            "skip_parent_context": True,
+                            **(
+                                {
+                                    "target_run_id": (
+                                        child_projection_binding.child_run_id
+                                    ),
+                                    "target_parent_effect_id": (
+                                        child_projection_binding.parent_effect_id
+                                    ),
+                                }
+                                if fact.event_kind == "approval_requested"
+                                else {}
+                            ),
+                        },
+                    )
+                )
+                for fact in unit.facts
+            )
+
+            for binding in unit.child_bindings:
+                if binding.session_id != authority.session_id:
+                    raise SessionOwnershipConflictError(
+                        "child binding belongs to another session"
+                    )
+                existing_binding_row = await connection.fetchrow(
+                    """
+                    SELECT payload FROM session_child_bindings
+                    WHERE session_id = $1
+                      AND (
+                        parent_effect_id = $2
+                        OR child_run_id = $3
+                      )
+                    FOR UPDATE
+                    """,
+                    authority.session_id,
+                    binding.parent_effect_id,
+                    binding.child_run_id,
+                )
+                if existing_binding_row is not None:
+                    stored_binding = child_execution_binding_from_payload(
+                        _required_dict(
+                            dict(existing_binding_row),
+                            "payload",
+                        )
+                    )
+                    if stored_binding != binding:
+                        raise ChildBindingConflictError(
+                            "child binding identity changed content"
+                        )
+                    raise ChildBindingConflictError(
+                        "child binding exists without a transition receipt"
+                    )
 
             if unit.expected_mailbox_cut is not None:
                 expected_mailbox_cut = parse_u64(
@@ -852,24 +1778,24 @@ class PgUnitOfWorkMixin:
                     payload={**existing_payload, **slot.payload},
                 )
 
-            effect_slot = (
-                None
-                if unit.effect_mutation is None
-                else effect_slot_from_mutation(unit.effect_mutation)
+            effect_slots: dict[str, EffectLedgerSlot] = {}
+            dispatch_mutation = next(
+                (
+                    mutation
+                    for mutation in mutations
+                    if mutation.expected_status is EffectStatus.PREPARED
+                    and mutation.status is EffectStatus.DISPATCHED
+                ),
+                None,
             )
-            is_dispatch_authorization = (
-                unit.effect_mutation is not None
-                and unit.effect_mutation.expected_status is not None
-                and unit.effect_mutation.expected_status.value == "prepared"
-                and unit.effect_mutation.status.value == "dispatched"
-            )
-            if unit.effect_mutation is not None:
+            for mutation in mutations:
+                effect_slot = effect_slot_from_mutation(mutation)
                 current_effect_row = await connection.fetchrow(
                     self._SELECT_EFFECT_SLOT_FOR_UPDATE_SQL,
                     authority.session_id,
-                    unit.effect_mutation.effect_id,
+                    mutation.effect_id,
                 )
-                expected_status = unit.effect_mutation.expected_status
+                expected_status = mutation.expected_status
                 if expected_status is None:
                     if current_effect_row is not None:
                         raise EffectMutationConflictError("effect already exists")
@@ -884,61 +1810,64 @@ class PgUnitOfWorkMixin:
                     current_payload = current_effect.get("payload")
                     if not isinstance(current_payload, dict):
                         raise TypeError("effect slot payload must be an object")
-                    if (
-                        current_payload.get("attempt_id")
-                        != unit.effect_mutation.attempt_id
-                    ):
+                    if current_payload.get("attempt_id") != mutation.attempt_id:
                         raise EffectMutationConflictError(
                             "effect attempt precondition failed"
                         )
-                    if effect_slot is None:
-                        raise RuntimeError("effect mutation slot was not built")
                     effect_slot = replace(
                         effect_slot,
                         payload={**current_payload, **effect_slot.payload},
                     )
-            if is_dispatch_authorization:
-                if effect_slot is None:
-                    raise RuntimeError("dispatch effect slot was not built")
-                effect_slot = replace(
-                    effect_slot,
-                    payload={
-                        **effect_slot.payload,
-                        "authorization_transition_id": transition_id,
-                        "dispatch_owner_epoch": authority.epoch,
-                    },
+                if mutation is dispatch_mutation:
+                    effect_slot = replace(
+                        effect_slot,
+                        payload={
+                            **effect_slot.payload,
+                            "authorization_transition_id": transition_id,
+                            "dispatch_owner_epoch": authority.epoch,
+                        },
+                    )
+                effect_slots[effect_slot.effect_id] = effect_slot
+            executor_attempt: ExecutorAttemptRecord | None = None
+            if dispatch_mutation is not None:
+                existing_executor = await connection.fetchrow(
+                    self._SELECT_EXECUTOR_ATTEMPT_SQL,
+                    authority.session_id,
+                    dispatch_mutation.effect_id,
+                    dispatch_mutation.attempt_id,
+                    transition_id,
+                )
+                if existing_executor is not None:
+                    raise ExecutorAttemptConflictError(
+                        "dispatch executor attempt already exists without a receipt"
+                    )
+                executor_attempt = ExecutorAttemptRecord(
+                    session_id=authority.session_id,
+                    effect_id=dispatch_mutation.effect_id,
+                    attempt_id=dispatch_mutation.attempt_id,
+                    authorization_transition_id=transition_id,
+                    dispatch_owner_epoch=authority.epoch,
+                    status="authorized_unclaimed",
+                    authorization_mailbox_cut=unit.expected_mailbox_cut or "0",
+                    authorization_mailbox_session_seq=format_u64(
+                        fact_source.session_seq_int
+                    ),
                 )
 
-            first_seq = fact_source.session_seq_int + 1 if unit.facts else None
-            committed_facts: list[EventRecord] = []
-            for offset, fact in enumerate(unit.facts):
-                session_seq = fact_source.session_seq_int + offset + 1
-                event_row = await connection.fetchrow(
-                    self._INSERT_SESSION_EVENT_SQL,
-                    authority.session_id,
-                    session_seq,
-                    fact.event_id,
-                    fact.event_kind,
-                    fact.payload,
-                    fact.created_at,
-                    fact_source.projection_epoch_int,
+            first_seq = fact_source.session_seq_int + 1 if facts_to_commit else None
+            committed_facts = [
+                replace(
+                    fact,
+                    session_seq=format_u64(fact_source.session_seq_int + offset + 1),
+                    projection_epoch=format_u64(fact_source.projection_epoch_int),
                 )
-                committed_facts.append(
-                    _event_record_from_pg_row(
-                        _required_row(event_row, "transition fact insert")
-                    )
-                )
+                for offset, fact in enumerate(facts_to_commit)
+            ]
             last_seq = (
                 fact_source.session_seq_int + len(committed_facts)
                 if committed_facts
                 else None
             )
-            if last_seq is not None:
-                _ = await connection.fetchrow(
-                    self._UPDATE_FACT_SOURCE_SEQ_SQL,
-                    authority.session_id,
-                    last_seq,
-                )
             raw_cursor = RawCursor(
                 session_id=authority.session_id,
                 session_seq=format_u64(
@@ -957,6 +1886,59 @@ class PgUnitOfWorkMixin:
                 commit_ref=commit_ref,
                 value=state_value,
             )
+            notices = tuple(
+                CommittedFactNotice(
+                    fact_id=fact.event_id,
+                    fact_kind=fact.event_kind,
+                    payload=fact.payload,
+                    session_seq=fact.session_seq,
+                    projection_epoch=state_cas.projection_epoch,
+                )
+                for fact in committed_facts
+            )
+            receipt = TransitionReceipt(
+                session_id=authority.session_id,
+                projection_epoch=state_cas.projection_epoch,
+                transition_id=transition_id,
+                mutation_fingerprint=mutation_fingerprint,
+                state_version=state_version,
+                facts=notices,
+                effect_plans=unit.effect_plans,
+            )
+            result_payload = transition_commit_payload(
+                state_version=state_version,
+                facts=tuple(committed_facts),
+                raw_cursor=raw_cursor,
+                effect_plans=unit.effect_plans,
+            )
+            receipt_inserted = await connection.fetchrow(
+                self._INSERT_TRANSITION_RECEIPT_SQL,
+                authority.session_id,
+                state_cas.projection_epoch,
+                transition_id,
+                mutation_fingerprint,
+                result_payload,
+            )
+            if receipt_inserted is None:
+                raise RuntimeError("transition receipt insert returned no row")
+            for fact in committed_facts:
+                event_row = await connection.fetchrow(
+                    self._INSERT_SESSION_EVENT_SQL,
+                    authority.session_id,
+                    parse_u64(fact.session_seq, field_name="session_seq"),
+                    fact.event_id,
+                    fact.event_kind,
+                    fact.payload,
+                    fact.created_at,
+                    fact_source.projection_epoch_int,
+                )
+                _required_row(event_row, "transition fact insert")
+            if last_seq is not None:
+                _ = await connection.fetchrow(
+                    self._UPDATE_FACT_SOURCE_SEQ_SQL,
+                    authority.session_id,
+                    last_seq,
+                )
             state_row = await connection.fetchrow(
                 self._UPSERT_OPERATION_STATE_SQL,
                 authority.session_id,
@@ -980,7 +1962,7 @@ class PgUnitOfWorkMixin:
                     slot.disposition,
                     slot.payload,
                 )
-            if effect_slot is not None:
+            for effect_slot in effect_slots.values():
                 _ = await connection.fetchrow(
                     self._UPSERT_EFFECT_SLOT_SQL,
                     authority.session_id,
@@ -988,28 +1970,32 @@ class PgUnitOfWorkMixin:
                     effect_slot.status,
                     effect_slot.payload,
                 )
-            if is_dispatch_authorization:
-                if unit.effect_mutation is None:
-                    raise RuntimeError("dispatch effect mutation is missing")
-                existing_executor = await connection.fetchrow(
-                    self._SELECT_EXECUTOR_ATTEMPT_SQL,
-                    authority.session_id,
-                    unit.effect_mutation.effect_id,
-                    unit.effect_mutation.attempt_id,
-                    transition_id,
+            if closeout_attempt is not None:
+                updated_closeout = await connection.fetchrow(
+                    self._UPDATE_EXECUTOR_ATTEMPT_SQL,
+                    closeout_attempt.session_id,
+                    closeout_attempt.effect_id,
+                    closeout_attempt.attempt_id,
+                    closeout_attempt.authorization_transition_id,
+                    closeout_attempt.status,
+                    closeout_attempt.payload(),
                 )
-                if existing_executor is not None:
-                    raise ExecutorAttemptConflictError(
-                        "dispatch executor attempt already exists without a receipt"
+                if updated_closeout is None:
+                    raise RuntimeError("unstarted closeout update returned no row")
+            for binding in unit.child_bindings:
+                await connection.execute(
+                    """
+                    INSERT INTO session_child_bindings (
+                        session_id, parent_effect_id, child_run_id, payload
                     )
-                executor_attempt = ExecutorAttemptRecord(
-                    session_id=authority.session_id,
-                    effect_id=unit.effect_mutation.effect_id,
-                    attempt_id=unit.effect_mutation.attempt_id,
-                    authorization_transition_id=transition_id,
-                    dispatch_owner_epoch=authority.epoch,
-                    status="authorized_unclaimed",
+                    VALUES ($1, $2, $3, $4)
+                    """,
+                    authority.session_id,
+                    binding.parent_effect_id,
+                    binding.child_run_id,
+                    child_execution_binding_payload(binding),
                 )
+            if executor_attempt is not None:
                 inserted_executor = await connection.fetchrow(
                     self._INSERT_EXECUTOR_ATTEMPT_SQL,
                     executor_attempt.session_id,
@@ -1022,39 +2008,6 @@ class PgUnitOfWorkMixin:
                 )
                 if inserted_executor is None:
                     raise RuntimeError("executor attempt insert returned no row")
-            notices = tuple(
-                CommittedFactNotice(
-                    fact_id=fact.event_id,
-                    fact_kind=fact.event_kind,
-                    payload=fact.payload,
-                    session_seq=fact.session_seq,
-                    projection_epoch=state_cas.projection_epoch,
-                )
-                for fact in committed_facts
-            )
-            receipt = TransitionReceipt(
-                session_id=authority.session_id,
-                projection_epoch=state_cas.projection_epoch,
-                transition_id=transition_id,
-                mutation_fingerprint=mutation_fingerprint,
-                state_version=state_version,
-                facts=notices,
-            )
-            result_payload = transition_commit_payload(
-                state_version=state_version,
-                facts=tuple(committed_facts),
-                raw_cursor=raw_cursor,
-            )
-            receipt_inserted = await connection.fetchrow(
-                self._INSERT_TRANSITION_RECEIPT_SQL,
-                authority.session_id,
-                state_cas.projection_epoch,
-                transition_id,
-                mutation_fingerprint,
-                result_payload,
-            )
-            if receipt_inserted is None:
-                raise RuntimeError("transition receipt insert returned no row")
             return AuthoritativeCommit(
                 event=None,
                 projection=fact_source.projection,
@@ -1409,6 +2362,16 @@ def _executor_attempt_from_pg_row(row: dict[str, object]) -> ExecutorAttemptReco
         ),
         dispatch_owner_epoch=_required_int(payload, "dispatch_owner_epoch"),
         status=_required_str(payload, "status"),
+        authorization_mailbox_cut=(
+            _optional_pg_str(payload, "authorization_mailbox_cut") or "0"
+        ),
+        authorization_mailbox_session_seq=(
+            _optional_pg_str(
+                payload,
+                "authorization_mailbox_session_seq",
+            )
+            or "0"
+        ),
         executor_id=_optional_pg_str(payload, "executor_id"),
         claim_generation=_required_int(payload, "claim_generation"),
         reservation_lease_expires_at=(

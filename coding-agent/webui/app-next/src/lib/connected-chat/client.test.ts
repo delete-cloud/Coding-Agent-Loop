@@ -454,7 +454,7 @@ describe("ConnectedChatClient.follow SSE framing", () => {
   it("joins multiline data fields with newlines", async () => {
     const raw =
       "event: chat_event\n" +
-      'data: {"contract_version":"1.0.0",\n' +
+      'data: {"contract_version":"1.1.0",\n' +
       'data: "source_event_id":"evt-x","session_seq":"30","session_id":"session-01","run_id":null,\n' +
       'data: "kind":"thinking","created_at":"2026-08-24T00:00:01Z","payload":{"text":"hi"}}\n\n';
     const { client } = followClient(raw);
