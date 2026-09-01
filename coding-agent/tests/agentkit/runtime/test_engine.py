@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import inspect
+import pytest
 
 from agentkit.runtime import (
     AgentEngine,
     ApprovalResolved,
     ApprovalSettlement,
     CommitRef,
+    BlockedAction,
     EffectSettled,
     EffectSettlement,
+    EffectSettlementOutcome,
     EngineStepRequest,
     Initial,
     ModelGenerationAction,
@@ -40,6 +43,29 @@ def _state(
 
 def _committed(proposal, *, revision: int) -> OperationStateVersion:
     return _state(revision=revision, value=dict(proposal.state_value))
+
+
+def _authorized_effect_state(
+    proposal,
+    *,
+    revision: int,
+    authorization_transition_id: str,
+    owner_epoch: int,
+) -> OperationStateVersion:
+    plan = proposal.effect_plans[0]
+    runtime = dict(proposal.state_value["_agentkit_runtime"])
+    runtime["active_effect_authorization"] = {
+        "effect_id": plan.effect_id,
+        "attempt_id": plan.attempt_id,
+        "tool_call_id": plan.payload["tool_call_id"],
+        "tool_name": plan.payload["tool_name"],
+        "authorization_transition_id": authorization_transition_id,
+        "dispatch_owner_epoch": owner_epoch,
+    }
+    return _state(
+        revision=revision,
+        value={**proposal.state_value, "_agentkit_runtime": runtime},
+    )
 
 
 def _model_result(
@@ -254,7 +280,12 @@ def test_engine_step_reentry_effect_settlement_commits_tool_result_fact_and_next
 
     proposal = engine.propose(
         EngineStepRequest(
-            state_version=_committed(prepared, revision=2),
+            state_version=_authorized_effect_state(
+                prepared,
+                revision=2,
+                authorization_transition_id="commit-2",
+                owner_epoch=3,
+            ),
             step_input=EffectSettled(settlement=settlement),
         )
     )
@@ -264,6 +295,44 @@ def test_engine_step_reentry_effect_settlement_commits_tool_result_fact_and_next
     assert proposal.pending_facts[0].payload["tool_call_id"] == "call-1"
     assert proposal.pending_facts[0].payload["result"] == {"content": "file contents"}
     assert isinstance(proposal.next_action, ModelGenerationAction)
+
+
+def test_effect_settlement_rejects_missing_retained_authorization() -> None:
+    engine = AgentEngine()
+    initial = _initial_proposal(engine)
+    prepared = engine.propose(
+        EngineStepRequest(
+            state_version=_committed(initial, revision=1),
+            step_input=ModelGenerationCompleted(
+                result=_model_result(
+                    ModelToolCall(
+                        tool_call_id="call-missing-authorization",
+                        name="read",
+                        arguments={"path": "README.md"},
+                    )
+                )
+            ),
+        )
+    )
+    plan = prepared.effect_plans[0]
+    with pytest.raises(ValueError, match="retained authorization"):
+        engine.propose(
+            EngineStepRequest(
+                state_version=_committed(prepared, revision=2),
+                step_input=EffectSettled(
+                    settlement=EffectSettlement.completed(
+                        input_id="settlement-missing-authorization",
+                        tool_call_id="call-missing-authorization",
+                        tool_name="read",
+                        effect_id=plan.effect_id,
+                        attempt_id=plan.attempt_id,
+                        authorization_transition_id="commit-2",
+                        owner_epoch=3,
+                        result={"content": "file contents"},
+                    )
+                ),
+            )
+        )
 
 
 def test_engine_step_reentry_approval_denial_commits_tool_result_fact_and_continues_loop() -> (
@@ -331,7 +400,12 @@ def test_next_model_request_contains_committed_assistant_tool_and_result() -> No
     plan = prepared.effect_plans[0]
     settled = engine.propose(
         EngineStepRequest(
-            state_version=_committed(prepared, revision=2),
+            state_version=_authorized_effect_state(
+                prepared,
+                revision=2,
+                authorization_transition_id="commit-2",
+                owner_epoch=3,
+            ),
             step_input=EffectSettled(
                 settlement=EffectSettlement.completed(
                     input_id="settlement-conversation-1",
@@ -387,3 +461,227 @@ def test_transition_identity_is_stable_for_same_consume_once_input() -> None:
     )
 
     assert first.transition_id == replay_after_other_commits.transition_id
+
+
+def _prepared_effect_state() -> tuple[AgentEngine, object, object]:
+    engine = AgentEngine()
+    initial = _initial_proposal(engine)
+    prepared = engine.propose(
+        EngineStepRequest(
+            state_version=_committed(initial, revision=1),
+            step_input=ModelGenerationCompleted(
+                result=_model_result(
+                    ModelToolCall(
+                        tool_call_id="call-recovery",
+                        name="read",
+                        arguments={"path": "README.md"},
+                    )
+                )
+            ),
+        )
+    )
+    plan = prepared.effect_plans[0]
+    runtime = dict(prepared.state_value["_agentkit_runtime"])
+    runtime["active_effect_authorization"] = {
+        "effect_id": plan.effect_id,
+        "attempt_id": plan.attempt_id,
+        "tool_call_id": "call-recovery",
+        "tool_name": "read",
+        "authorization_transition_id": "authorization-recovery",
+        "dispatch_owner_epoch": 3,
+    }
+    state = _state(
+        revision=3,
+        value={**prepared.state_value, "_agentkit_runtime": runtime},
+    )
+    return engine, plan, state
+
+
+def test_indeterminate_settlement_keeps_pending_plan_and_commits_no_final_tool_fact() -> (
+    None
+):
+    engine, plan, state = _prepared_effect_state()
+    settlement = EffectSettlement(
+        input_id="indeterminate-recovery",
+        tool_call_id="call-recovery",
+        tool_name="read",
+        effect_id=plan.effect_id,
+        attempt_id=plan.attempt_id,
+        authorization_transition_id="authorization-recovery",
+        owner_epoch=3,
+        outcome=EffectSettlementOutcome.INDETERMINATE,
+        result={"evidence_ref": "evidence-pending"},
+        reason_code="executor_uncertain",
+        reason_message="executor outcome is unknown",
+    )
+
+    proposal = engine.propose(
+        EngineStepRequest(
+            state_version=state,
+            step_input=EffectSettled(settlement=settlement),
+        )
+    )
+
+    assert isinstance(proposal.next_action, BlockedAction)
+    assert proposal.pending_facts == ()
+    runtime = proposal.state_value["_agentkit_runtime"]
+    assert len(runtime["pending_effect_plans"]) == 1
+    assert runtime["unknown_effect"] == {
+        "effect_id": plan.effect_id,
+        "attempt_id": plan.attempt_id,
+        "tool_call_id": "call-recovery",
+        "tool_name": "read",
+        "authorization_transition_id": "authorization-recovery",
+        "dispatch_owner_epoch": 3,
+        "indeterminate_input_id": "indeterminate-recovery",
+    }
+    assert len(proposal.state_value["context"]["messages"]) == 1
+
+
+def test_terminal_unknown_settlement_requires_committed_reconciliation() -> None:
+    engine, plan, state = _prepared_effect_state()
+    indeterminate = engine.propose(
+        EngineStepRequest(
+            state_version=state,
+            step_input=EffectSettled(
+                settlement=EffectSettlement(
+                    input_id="indeterminate-without-reconciliation",
+                    tool_call_id="call-recovery",
+                    tool_name="read",
+                    effect_id=plan.effect_id,
+                    attempt_id=plan.attempt_id,
+                    authorization_transition_id="authorization-recovery",
+                    owner_epoch=3,
+                    outcome=EffectSettlementOutcome.INDETERMINATE,
+                    result=None,
+                    reason_code="executor_uncertain",
+                    reason_message="executor outcome is unknown",
+                )
+            ),
+        )
+    )
+
+    with pytest.raises(ValueError, match="requires committed reconciliation"):
+        engine.propose(
+            EngineStepRequest(
+                state_version=_state(revision=4, value=dict(indeterminate.state_value)),
+                step_input=EffectSettled(
+                    settlement=EffectSettlement.completed(
+                        input_id="terminal-without-reconciliation",
+                        tool_call_id="call-recovery",
+                        tool_name="read",
+                        effect_id=plan.effect_id,
+                        attempt_id=plan.attempt_id,
+                        authorization_transition_id="authorization-recovery",
+                        owner_epoch=3,
+                        result={"content": "late"},
+                    )
+                ),
+            )
+        )
+
+
+def test_reconciled_effect_commits_exactly_one_final_tool_result_fact() -> None:
+    engine, plan, state = _prepared_effect_state()
+    runtime = dict(state.value["_agentkit_runtime"])
+    runtime["unknown_effect"] = {
+        **runtime["active_effect_authorization"],
+        "indeterminate_input_id": "indeterminate-recovery",
+    }
+    runtime["reconciled_effect"] = {
+        **runtime["unknown_effect"],
+        "reconciliation_transition_id": "reconciliation-1",
+        "evidence_ref": "evidence-1",
+        "reconciliation_owner_epoch": 4,
+        "reconciled_input_id": "reconciled-recovery",
+        "outcome": "completed",
+        "result": {"content": "recovered contents"},
+        "reason_code": None,
+        "reason_message": None,
+    }
+    reconciled_state = _state(
+        revision=5,
+        value={**state.value, "_agentkit_runtime": runtime},
+    )
+    settlement = EffectSettlement.completed(
+        input_id="reconciled-recovery",
+        tool_call_id="call-recovery",
+        tool_name="read",
+        effect_id=plan.effect_id,
+        attempt_id=plan.attempt_id,
+        authorization_transition_id="authorization-recovery",
+        owner_epoch=5,
+        result={"content": "recovered contents"},
+    )
+
+    proposal = engine.propose(
+        EngineStepRequest(
+            state_version=reconciled_state,
+            step_input=EffectSettled(settlement=settlement),
+        )
+    )
+
+    assert [fact.fact_kind for fact in proposal.pending_facts] == ["tool_result"]
+    assert proposal.pending_facts[0].payload["result"] == {
+        "content": "recovered contents"
+    }
+    committed_runtime = proposal.state_value["_agentkit_runtime"]
+    assert committed_runtime["pending_effect_plans"] == ()
+    assert "active_effect_authorization" not in committed_runtime
+    assert "unknown_effect" not in committed_runtime
+    assert "reconciled_effect" not in committed_runtime
+
+
+def test_reconciled_marker_is_consumed_and_later_initial_is_accepted() -> None:
+    engine, plan, state = _prepared_effect_state()
+    runtime = dict(state.value["_agentkit_runtime"])
+    unknown = {
+        **runtime["active_effect_authorization"],
+        "indeterminate_input_id": "indeterminate-recovery",
+    }
+    runtime["unknown_effect"] = unknown
+    runtime["reconciled_effect"] = {
+        **unknown,
+        "reconciliation_transition_id": "reconciliation-1",
+        "evidence_ref": "evidence-1",
+        "reconciliation_owner_epoch": 4,
+        "reconciled_input_id": "reconciled-recovery",
+        "outcome": "completed",
+        "result": {"content": "recovered contents"},
+        "reason_code": None,
+        "reason_message": None,
+    }
+    reconciled_state = _state(
+        revision=5,
+        value={**state.value, "_agentkit_runtime": runtime},
+    )
+    settlement = EffectSettlement.completed(
+        input_id="reconciled-recovery",
+        tool_call_id="call-recovery",
+        tool_name="read",
+        effect_id=plan.effect_id,
+        attempt_id=plan.attempt_id,
+        authorization_transition_id="authorization-recovery",
+        owner_epoch=5,
+        result={"content": "recovered contents"},
+    )
+    finalized = engine.propose(
+        EngineStepRequest(
+            state_version=reconciled_state,
+            step_input=EffectSettled(settlement=settlement),
+        )
+    )
+    finalized_state = _state(revision=6, value=finalized.state_value)
+
+    proposal = engine.propose(
+        EngineStepRequest(
+            state_version=finalized_state,
+            step_input=Initial(
+                input_id="later-initial",
+                command_batch=(),
+                mailbox_cut=12,
+            ),
+        )
+    )
+
+    assert isinstance(proposal.next_action, ModelGenerationAction)

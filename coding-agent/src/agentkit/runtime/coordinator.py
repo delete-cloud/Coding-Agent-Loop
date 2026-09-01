@@ -14,6 +14,7 @@ from .contracts import (
     BlockedOutcome,
     CASConflictCommitResult,
     CommitPort,
+    CommitReconciliationRequest,
     CommitSettlementRequest,
     CommitTransitionRequest,
     CommittedCommitResult,
@@ -51,6 +52,7 @@ from .contracts import (
     OperationStateVersion,
     PreparedEffectAction,
     PreparedEffectActionKind,
+    ReconciliationRecord,
     RoundLimitOutcome,
     RunSegmentRequest,
     SafeYieldAction,
@@ -214,17 +216,31 @@ class SegmentCoordinator:
 
                     if isinstance(step_input, (EffectSettled, ApprovalResolved)):
                         settlement = _settlement(step_input)
-                        result = await self._commit_port.commit_settlement(
-                            CommitSettlementRequest(
-                                session_id=request.session_id,
-                                owner_id=request.owner_id,
-                                owner_epoch=request.owner_epoch,
-                                engine_request=engine_request,
-                                proposal=proposal,
-                                settlement=settlement,
-                                effect_mutation=_settlement_mutation(settlement),
+                        if _is_post_reconciliation_settlement(
+                            current_state,
+                            settlement,
+                        ):
+                            result = await self._commit_port.commit_transition(
+                                CommitTransitionRequest(
+                                    session_id=request.session_id,
+                                    owner_id=request.owner_id,
+                                    owner_epoch=request.owner_epoch,
+                                    engine_request=engine_request,
+                                    proposal=proposal,
+                                )
                             )
-                        )
+                        else:
+                            result = await self._commit_port.commit_settlement(
+                                CommitSettlementRequest(
+                                    session_id=request.session_id,
+                                    owner_id=request.owner_id,
+                                    owner_epoch=request.owner_epoch,
+                                    engine_request=engine_request,
+                                    proposal=proposal,
+                                    settlement=settlement,
+                                    effect_mutation=_settlement_mutation(settlement),
+                                )
+                            )
                     else:
                         result = await self._commit_port.commit_transition(
                             CommitTransitionRequest(
@@ -235,6 +251,9 @@ class SegmentCoordinator:
                                 proposal=proposal,
                             )
                         )
+                    if isinstance(result, CASConflictCommitResult):
+                        current_state = result.current_state
+                        continue
                     committed = _committed_result(result)
                     if isinstance(committed, FailedOutcome):
                         return _with_steps(
@@ -342,6 +361,10 @@ class SegmentCoordinator:
                             current_state=current_state,
                         )
                     )
+                    authorization_proposal = _with_active_effect_authorization(
+                        authorization_proposal,
+                        owner_epoch=request.owner_epoch,
+                    )
                     authorization_result = await self._commit_port.authorize_dispatch(
                         DispatchAuthorizationRequest(
                             session_id=request.session_id,
@@ -438,6 +461,7 @@ class SegmentCoordinator:
                         )
                     )
                     continue
+
                 raise TypeError("unsupported next action")
         except Exception as exc:
             return FailedOutcome(
@@ -493,6 +517,158 @@ class SegmentCoordinator:
                 generate_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await generate_task
+
+
+async def _reconcile_and_run_segment(
+    coordinator: SegmentCoordinator,
+    *,
+    session_id: str,
+    owner_id: str,
+    owner_epoch: int,
+    state_version: OperationStateVersion,
+    record: ReconciliationRecord,
+    max_rounds: int,
+    control_probe: ControlProbe,
+    frame_sink: FrameSink,
+    committed_fact_sink: CommittedFactSink,
+) -> SegmentOutcome:
+    current_state = state_version
+    while True:
+        try:
+            reconciliation_request = CommitReconciliationRequest(
+                session_id=session_id,
+                owner_id=owner_id,
+                owner_epoch=owner_epoch,
+                state_version=current_state,
+                record=record,
+            )
+        except (TypeError, ValueError) as exc:
+            return FailedOutcome(
+                state_version=current_state,
+                error=FailureReport(
+                    code="invalid_reconciliation_state",
+                    message=_exception_message(exc),
+                ),
+                steps_taken=0,
+            )
+        result = await coordinator._commit_port.commit_reconciliation(
+            reconciliation_request
+        )
+        if isinstance(result, CASConflictCommitResult):
+            current_state = result.current_state
+            continue
+        committed = _committed_result(result)
+        if isinstance(committed, FailedOutcome):
+            return committed
+        current_state = committed.state_version
+        emitter = _GuardedCommittedFactSink(
+            committed_fact_sink,
+            coordinator._delivery_failures,
+        )
+        await emitter.emit_all(committed.notices)
+        break
+
+    try:
+        step_input = _reconciled_effect_input(
+            current_state,
+            record=record,
+            owner_epoch=owner_epoch,
+        )
+        request = RunSegmentRequest(
+            session_id=session_id,
+            owner_id=owner_id,
+            owner_epoch=owner_epoch,
+            state_version=current_state,
+            step_input=step_input,
+            max_rounds=max_rounds,
+        )
+    except (TypeError, ValueError) as exc:
+        return FailedOutcome(
+            state_version=current_state,
+            error=FailureReport(
+                code="invalid_reconciled_effect",
+                message=_exception_message(exc),
+            ),
+            steps_taken=0,
+        )
+    return await coordinator.run(
+        request,
+        control_probe=control_probe,
+        frame_sink=frame_sink,
+        committed_fact_sink=committed_fact_sink,
+    )
+
+
+def _reconciled_effect_input(
+    state_version: OperationStateVersion,
+    *,
+    record: ReconciliationRecord,
+    owner_epoch: int,
+) -> EffectSettled:
+    runtime_state = state_version.value.get("_agentkit_runtime")
+    if not isinstance(runtime_state, Mapping):
+        raise ValueError("reconciled state is missing runtime metadata")
+    marker = runtime_state.get("reconciled_effect")
+    if not isinstance(marker, Mapping):
+        raise ValueError("reconciled state is missing the reconciled effect")
+    if (
+        marker.get("effect_id") != record.effect_id
+        or marker.get("attempt_id") != record.attempt_id
+        or marker.get("evidence_ref") != record.evidence_ref
+        or marker.get("reconciliation_owner_epoch") != record.owner_epoch
+        or marker.get("reconciliation_transition_id") != record.transition_id
+        or marker.get("outcome") != record.observed_outcome.value
+        or state_version.commit_ref.transition_id != record.transition_id
+    ):
+        raise ValueError("reconciled effect does not match reconciliation record")
+    input_id = _required_reconciled_marker_str(marker, "reconciled_input_id")
+    indeterminate_input_id = _required_reconciled_marker_str(
+        marker,
+        "indeterminate_input_id",
+    )
+    if input_id == indeterminate_input_id:
+        raise ValueError("reconciled input must differ from indeterminate input")
+    settlement = EffectSettlement(
+        input_id=input_id,
+        tool_call_id=_required_reconciled_marker_str(marker, "tool_call_id"),
+        tool_name=_required_reconciled_marker_str(marker, "tool_name"),
+        effect_id=record.effect_id,
+        attempt_id=record.attempt_id,
+        authorization_transition_id=_required_reconciled_marker_str(
+            marker,
+            "authorization_transition_id",
+        ),
+        owner_epoch=owner_epoch,
+        outcome=EffectSettlementOutcome(marker["outcome"]),
+        result=marker.get("result"),
+        reason_code=_optional_reconciled_marker_str(marker, "reason_code"),
+        reason_message=_optional_reconciled_marker_str(marker, "reason_message"),
+    )
+    return EffectSettled(settlement=settlement)
+
+
+def _required_reconciled_marker_str(
+    marker: Mapping[str, object],
+    field_name: str,
+) -> str:
+    value = marker.get(field_name)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"reconciled effect {field_name} must be a non-empty string")
+    return value
+
+
+def _optional_reconciled_marker_str(
+    marker: Mapping[str, object],
+    field_name: str,
+) -> str | None:
+    value = marker.get(field_name)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ValueError(
+            f"reconciled effect {field_name} must be a non-empty string or None"
+        )
+    return value
 
 
 def _mailbox_cut(request: RunSegmentRequest) -> int:
@@ -560,6 +736,12 @@ def _settlement_mutation(
 def _committed_result(result):
     if isinstance(result, CommittedCommitResult):
         return result
+    if isinstance(result, ExactReplayCommitResult):
+        return CommittedCommitResult(
+            state_version=result.state_version,
+            notices=result.receipt.facts,
+            receipt=result.receipt,
+        )
     return _commit_failure(result)
 
 
@@ -644,6 +826,61 @@ def _authorization_proposal(
         transition_id=f"{prepared.transition_id}:dispatch:{current_state.revision + 1}",
         state_value=current_state.value,
         next_action=prepared.next_action,
+    )
+
+
+def _with_active_effect_authorization(
+    proposal: TransitionProposal,
+    *,
+    owner_epoch: int,
+) -> TransitionProposal:
+    action = proposal.next_action
+    if not isinstance(action, PreparedEffectAction):
+        raise ValueError("dispatch authorization requires a prepared effect action")
+    plan = action.effect_plan
+    tool_call_id = plan.payload.get("tool_call_id")
+    tool_name = plan.payload.get("tool_name")
+    if not isinstance(tool_call_id, str) or not tool_call_id:
+        raise ValueError("effect plan is missing tool_call_id")
+    if not isinstance(tool_name, str) or not tool_name:
+        raise ValueError("effect plan is missing tool_name")
+    state_value = dict(proposal.state_value)
+    raw_runtime = state_value.get("_agentkit_runtime", {})
+    if not isinstance(raw_runtime, Mapping):
+        raise TypeError("engine runtime state must be a mapping")
+    runtime_state = dict(raw_runtime)
+    runtime_state["active_effect_authorization"] = {
+        "effect_id": plan.effect_id,
+        "attempt_id": plan.attempt_id,
+        "tool_call_id": tool_call_id,
+        "tool_name": tool_name,
+        "authorization_transition_id": proposal.transition_id,
+        "dispatch_owner_epoch": owner_epoch,
+    }
+    state_value["_agentkit_runtime"] = runtime_state
+    return TransitionProposal(
+        transition_id=proposal.transition_id,
+        state_value=state_value,
+        next_action=proposal.next_action,
+        pending_facts=proposal.pending_facts,
+        dispositions=proposal.dispositions,
+        effect_plans=proposal.effect_plans,
+    )
+
+
+def _is_post_reconciliation_settlement(
+    state_version: OperationStateVersion,
+    settlement: EffectSettlement | ApprovalSettlement,
+) -> bool:
+    if not isinstance(settlement, EffectSettlement):
+        return False
+    runtime_state = state_version.value.get("_agentkit_runtime")
+    if not isinstance(runtime_state, Mapping):
+        return False
+    marker = runtime_state.get("reconciled_effect")
+    return (
+        isinstance(marker, Mapping)
+        and marker.get("reconciled_input_id") == settlement.input_id
     )
 
 

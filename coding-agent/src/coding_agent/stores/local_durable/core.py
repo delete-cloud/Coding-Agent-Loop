@@ -86,6 +86,31 @@ class LocalCoreMixin:
         payload TEXT NOT NULL,
         PRIMARY KEY (session_id, effect_id)
     );
+    CREATE TABLE IF NOT EXISTS session_effect_reconciliation_evidence (
+        session_id TEXT NOT NULL,
+        evidence_ref TEXT NOT NULL,
+        effect_id TEXT NOT NULL,
+        attempt_id TEXT NOT NULL,
+        authorization_transition_id TEXT NOT NULL,
+        reconciliation_owner_epoch INTEGER NOT NULL,
+        payload TEXT NOT NULL,
+        PRIMARY KEY (session_id, evidence_ref),
+        UNIQUE (
+            session_id, effect_id, attempt_id, authorization_transition_id
+        )
+    );
+    CREATE TABLE IF NOT EXISTS session_executor_attempts (
+        session_id TEXT NOT NULL,
+        effect_id TEXT NOT NULL,
+        attempt_id TEXT NOT NULL,
+        authorization_transition_id TEXT NOT NULL,
+        dispatch_owner_epoch INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        PRIMARY KEY (
+            session_id, effect_id, attempt_id, authorization_transition_id
+        )
+    );
     CREATE TABLE IF NOT EXISTS session_receipt_slots (
         session_id TEXT NOT NULL,
         receipt_id TEXT NOT NULL,

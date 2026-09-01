@@ -12,6 +12,7 @@ from .contracts import (
     EffectReference,
     EffectPlan,
     EffectSettled,
+    EffectSettlement,
     EffectSettlementOutcome,
     EngineStepRequest,
     Initial,
@@ -183,14 +184,7 @@ class AgentEngine:
         transition_id = _transition_id(request)
         runtime_state = _runtime_state(request.state_version.value)
         plans = _pending_effect_plans(runtime_state)
-        if (
-            settlement.authorization_transition_id
-            != request.state_version.commit_ref.transition_id
-        ):
-            raise ValueError(
-                "effect settlement authorization_transition_id must match "
-                "owning committed transition"
-            )
+        _validate_effect_settlement_authorization(runtime_state, settlement)
         _require_next_effect(
             plans,
             effect_id=settlement.effect_id,
@@ -198,15 +192,52 @@ class AgentEngine:
             tool_call_id=settlement.tool_call_id,
             tool_name=settlement.tool_name,
         )
+
+        reconciled = runtime_state.get("reconciled_effect")
+        if reconciled is not None:
+            _validate_reconciled_settlement(reconciled, settlement)
+        if (
+            settlement.outcome is not EffectSettlementOutcome.INDETERMINATE
+            and runtime_state.get("unknown_effect") is not None
+            and reconciled is None
+        ):
+            raise ValueError(
+                "terminal UNKNOWN settlement requires committed reconciliation"
+            )
+        if (
+            settlement.outcome is EffectSettlementOutcome.INDETERMINATE
+            and reconciled is not None
+        ):
+            raise ValueError("reconciled effect cannot become indeterminate")
+
+        updated_runtime = dict(runtime_state)
+        if settlement.outcome is EffectSettlementOutcome.INDETERMINATE:
+            active = _active_effect_authorization(runtime_state)
+            updated_runtime["unknown_effect"] = {
+                **active,
+                "indeterminate_input_id": settlement.input_id,
+            }
+            state_value = _with_runtime_state(
+                request.state_version.value,
+                updated_runtime,
+            )
+            return TransitionProposal(
+                transition_id=transition_id,
+                state_value=state_value,
+                next_action=BlockedAction(
+                    reason="indeterminate_dispatch",
+                    effect=_effect_reference(plans[0]),
+                ),
+            )
+
         remaining = plans[1:]
-        is_error = settlement.outcome is not EffectSettlementOutcome.COMPLETED
         payload: dict[str, Any] = {
             "tool_call_id": settlement.tool_call_id,
             "tool_name": settlement.tool_name,
             "effect_id": settlement.effect_id,
             "attempt_id": settlement.attempt_id,
             "result": settlement.result,
-            "is_error": is_error,
+            "is_error": settlement.outcome is not EffectSettlementOutcome.COMPLETED,
             "outcome": settlement.outcome.value,
         }
         if settlement.reason_code is not None:
@@ -214,10 +245,12 @@ class AgentEngine:
         if settlement.reason_message is not None:
             payload["reason_message"] = settlement.reason_message
 
-        updated_runtime = dict(runtime_state)
         updated_runtime["pending_effect_plans"] = tuple(
             _effect_plan_value(plan) for plan in remaining
         )
+        updated_runtime.pop("active_effect_authorization", None)
+        updated_runtime.pop("unknown_effect", None)
+        updated_runtime.pop("reconciled_effect", None)
         state_value = _with_runtime_state(request.state_version.value, updated_runtime)
         state_value = _append_conversation_messages(
             state_value,
@@ -227,16 +260,11 @@ class AgentEngine:
                     "tool_call_id": settlement.tool_call_id,
                     "name": settlement.tool_name,
                     "content": settlement.result,
-                    "is_error": is_error,
+                    "is_error": payload["is_error"],
                 },
             ),
         )
-        if settlement.outcome is EffectSettlementOutcome.INDETERMINATE:
-            next_action = BlockedAction(
-                reason="indeterminate_dispatch",
-                effect=_effect_reference(plans[0]),
-            )
-        elif remaining:
+        if remaining:
             next_action = _prepared_action(remaining[0])
         else:
             state_value, model_request = _activate_model_request(
@@ -388,6 +416,91 @@ def _runtime_state(state_value: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise TypeError("engine runtime state must be a mapping")
     return dict(value)
+
+
+def _marker_mapping(
+    runtime_state: Mapping[str, Any], key: str
+) -> Mapping[str, Any] | None:
+    marker = runtime_state.get(key)
+    if marker is None:
+        return None
+    if not isinstance(marker, Mapping):
+        raise TypeError(f"engine runtime {key} must be a mapping")
+    return marker
+
+
+def _active_effect_authorization(
+    runtime_state: Mapping[str, Any],
+) -> dict[str, Any]:
+    marker = _marker_mapping(runtime_state, "active_effect_authorization")
+    if marker is None:
+        raise ValueError(
+            "indeterminate effect settlement requires retained authorization"
+        )
+    return dict(marker)
+
+
+def _validate_effect_settlement_authorization(
+    runtime_state: Mapping[str, Any],
+    settlement: EffectSettlement,
+) -> None:
+    marker = _marker_mapping(runtime_state, "reconciled_effect")
+    if marker is None:
+        marker = _marker_mapping(runtime_state, "active_effect_authorization")
+    if marker is None:
+        marker = _marker_mapping(runtime_state, "unknown_effect")
+    if marker is None:
+        raise ValueError("effect settlement requires retained authorization")
+    expected = {
+        "effect_id": marker.get("effect_id"),
+        "attempt_id": marker.get("attempt_id"),
+        "tool_call_id": marker.get("tool_call_id"),
+        "tool_name": marker.get("tool_name"),
+        "authorization_transition_id": marker.get("authorization_transition_id"),
+    }
+    actual = {
+        "effect_id": settlement.effect_id,
+        "attempt_id": settlement.attempt_id,
+        "tool_call_id": settlement.tool_call_id,
+        "tool_name": settlement.tool_name,
+        "authorization_transition_id": settlement.authorization_transition_id,
+    }
+    if actual != expected:
+        raise ValueError("effect settlement must match retained authorization")
+
+
+def _validate_reconciled_settlement(
+    marker: object,
+    settlement: EffectSettlement,
+) -> None:
+    if not isinstance(marker, Mapping):
+        raise TypeError("engine runtime reconciled_effect must be a mapping")
+    expected = {
+        "input_id": marker.get("reconciled_input_id"),
+        "effect_id": marker.get("effect_id"),
+        "attempt_id": marker.get("attempt_id"),
+        "tool_call_id": marker.get("tool_call_id"),
+        "tool_name": marker.get("tool_name"),
+        "authorization_transition_id": marker.get("authorization_transition_id"),
+        "outcome": marker.get("outcome"),
+        "result": marker.get("result"),
+        "reason_code": marker.get("reason_code"),
+        "reason_message": marker.get("reason_message"),
+    }
+    actual = {
+        "input_id": settlement.input_id,
+        "effect_id": settlement.effect_id,
+        "attempt_id": settlement.attempt_id,
+        "tool_call_id": settlement.tool_call_id,
+        "tool_name": settlement.tool_name,
+        "authorization_transition_id": settlement.authorization_transition_id,
+        "outcome": settlement.outcome.value,
+        "result": settlement.result,
+        "reason_code": settlement.reason_code,
+        "reason_message": settlement.reason_message,
+    }
+    if actual != expected:
+        raise ValueError("effect settlement must match reconciled effect")
 
 
 def _runtime_int(runtime_state: Mapping[str, Any], key: str) -> int:

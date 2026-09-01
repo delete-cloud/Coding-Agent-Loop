@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from datetime import datetime
 
 from agentkit.runtime.contracts import (
     CommitRef,
@@ -31,8 +32,12 @@ from coding_agent.stores.runtime_store import (
     RuntimeCommandAdmissionConflictError,
     EventRecord,
     EffectMutationConflictError,
+    EffectReconciliationEvidence,
+    ExecutorAttemptConflictError,
+    ExecutorAttemptRecord,
     JSONObject,
     RawCursor,
+    RecoveryEvidenceConflictError,
     _agent_run_sqlite_values,
     _datetime_to_json,
     _json_object_from_sql,
@@ -57,6 +62,7 @@ from coding_agent.stores.runtime_store import (
     transition_commit_from_payload,
     transition_commit_payload,
     transition_mutation_fingerprint,
+    state_value_with_reconciled_effect,
     snapshot_transition_unit,
     receipt_generation_may_replace,
 )
@@ -74,6 +80,371 @@ from coding_agent.stores.local_durable.helpers import (
 
 
 class LocalUnitOfWorkMixin:
+    async def record_effect_reconciliation_evidence(
+        self,
+        authority: OwnerAuthority,
+        evidence: EffectReconciliationEvidence,
+    ) -> EffectReconciliationEvidence:
+        if evidence.session_id != authority.session_id:
+            raise SessionOwnershipConflictError(
+                "reconciliation evidence belongs to another session"
+            )
+        if evidence.reconciliation_owner_epoch != authority.epoch:
+            raise SessionOwnershipConflictError(
+                "reconciliation evidence owner epoch does not match authority"
+            )
+        payload = evidence.payload()
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._assert_authority(connection, authority)
+            row = connection.execute(
+                """
+                SELECT payload
+                FROM session_effect_reconciliation_evidence
+                WHERE session_id = ? AND evidence_ref = ?
+                """,
+                (authority.session_id, evidence.evidence_ref),
+            ).fetchone()
+            if row is not None:
+                stored = _json_object_from_sql(
+                    row["payload"],
+                    context="effect reconciliation evidence",
+                )
+                if stored != payload:
+                    raise RecoveryEvidenceConflictError(
+                        "reconciliation evidence identity changed content"
+                    )
+                return evidence
+            identity_row = connection.execute(
+                """
+                SELECT evidence_ref, payload
+                FROM session_effect_reconciliation_evidence
+                WHERE session_id = ? AND effect_id = ? AND attempt_id = ?
+                  AND authorization_transition_id = ?
+                """,
+                (
+                    authority.session_id,
+                    evidence.effect_id,
+                    evidence.attempt_id,
+                    evidence.authorization_transition_id,
+                ),
+            ).fetchone()
+            if identity_row is not None:
+                raise RecoveryEvidenceConflictError(
+                    "reconciliation identity already has different evidence"
+                )
+            connection.execute(
+                """
+                INSERT INTO session_effect_reconciliation_evidence (
+                    session_id, evidence_ref, effect_id, attempt_id,
+                    authorization_transition_id, reconciliation_owner_epoch,
+                    payload
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    evidence.session_id,
+                    evidence.evidence_ref,
+                    evidence.effect_id,
+                    evidence.attempt_id,
+                    evidence.authorization_transition_id,
+                    evidence.reconciliation_owner_epoch,
+                    _json_to_sql(payload),
+                ),
+            )
+        return evidence
+
+    async def load_effect_reconciliation_evidence(
+        self,
+        session_id: str,
+        evidence_ref: str,
+    ) -> EffectReconciliationEvidence | None:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT payload
+                FROM session_effect_reconciliation_evidence
+                WHERE session_id = ? AND evidence_ref = ?
+                """,
+                (session_id, evidence_ref),
+            ).fetchone()
+        if row is None:
+            return None
+        return _reconciliation_evidence_from_payload(
+            _json_object_from_sql(
+                row["payload"],
+                context="effect reconciliation evidence",
+            )
+        )
+
+    async def load_executor_attempt(
+        self,
+        session_id: str,
+        effect_id: str,
+        attempt_id: str,
+        authorization_transition_id: str,
+    ) -> ExecutorAttemptRecord | None:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT payload FROM session_executor_attempts
+                WHERE session_id = ? AND effect_id = ? AND attempt_id = ?
+                  AND authorization_transition_id = ?
+                """,
+                (
+                    session_id,
+                    effect_id,
+                    attempt_id,
+                    authorization_transition_id,
+                ),
+            ).fetchone()
+        if row is None:
+            return None
+        return _executor_attempt_from_payload(
+            _json_object_from_sql(
+                row["payload"],
+                context="executor attempt",
+            )
+        )
+
+    async def reserve_executor_attempt(
+        self,
+        authority: OwnerAuthority,
+        *,
+        effect_id: str,
+        attempt_id: str,
+        authorization_transition_id: str,
+        executor_id: str,
+        lease_expires_at: datetime,
+    ) -> ExecutorAttemptRecord:
+        key = (
+            authority.session_id,
+            effect_id,
+            attempt_id,
+            authorization_transition_id,
+        )
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._assert_authority(connection, authority)
+            row = connection.execute(
+                """
+                SELECT payload FROM session_executor_attempts
+                WHERE session_id = ? AND effect_id = ? AND attempt_id = ?
+                  AND authorization_transition_id = ?
+                """,
+                key,
+            ).fetchone()
+            if row is None:
+                raise ExecutorAttemptConflictError("executor attempt does not exist")
+            current = _executor_attempt_from_payload(
+                _json_object_from_sql(row["payload"], context="executor attempt")
+            )
+            if current.status == "reserved":
+                if (
+                    current.executor_id == executor_id
+                    and current.reservation_lease_expires_at == lease_expires_at
+                ):
+                    return current
+                raise ExecutorAttemptConflictError(
+                    "executor reservation replay changed content"
+                )
+            reserved = ExecutorAttemptRecord(
+                session_id=current.session_id,
+                effect_id=current.effect_id,
+                attempt_id=current.attempt_id,
+                authorization_transition_id=current.authorization_transition_id,
+                dispatch_owner_epoch=current.dispatch_owner_epoch,
+                status="reserved",
+                executor_id=executor_id,
+                claim_generation=current.claim_generation + 1,
+                reservation_lease_expires_at=lease_expires_at,
+            )
+            if (
+                current.status != "authorized_unclaimed"
+                or current.dispatch_owner_epoch != authority.epoch
+            ):
+                raise ExecutorAttemptConflictError(
+                    "executor attempt cannot be reserved"
+                )
+            connection.execute(
+                """
+                UPDATE session_executor_attempts SET status = ?, payload = ?
+                WHERE session_id = ? AND effect_id = ? AND attempt_id = ?
+                  AND authorization_transition_id = ?
+                """,
+                ("reserved", _json_to_sql(reserved.payload()), *key),
+            )
+        return reserved
+
+    async def mark_executor_attempt_started(
+        self,
+        authority: OwnerAuthority,
+        *,
+        effect_id: str,
+        attempt_id: str,
+        authorization_transition_id: str,
+        executor_id: str,
+        claim_generation: int,
+        now: datetime,
+    ) -> ExecutorAttemptRecord:
+        return self._transition_executor_attempt(
+            authority,
+            effect_id=effect_id,
+            attempt_id=attempt_id,
+            authorization_transition_id=authorization_transition_id,
+            executor_id=executor_id,
+            claim_generation=claim_generation,
+            now=now,
+            target_status="started",
+            evidence_ref=None,
+        )
+
+    async def mark_executor_attempt_quiescent(
+        self,
+        authority: OwnerAuthority,
+        *,
+        effect_id: str,
+        attempt_id: str,
+        authorization_transition_id: str,
+        executor_id: str,
+        claim_generation: int,
+        now: datetime,
+        evidence_ref: str,
+    ) -> ExecutorAttemptRecord:
+        return self._transition_executor_attempt(
+            authority,
+            effect_id=effect_id,
+            attempt_id=attempt_id,
+            authorization_transition_id=authorization_transition_id,
+            executor_id=executor_id,
+            claim_generation=claim_generation,
+            now=now,
+            target_status="quiescent",
+            evidence_ref=evidence_ref,
+        )
+
+    async def revoke_expired_executor_reservation(
+        self,
+        authority: OwnerAuthority,
+        *,
+        effect_id: str,
+        attempt_id: str,
+        authorization_transition_id: str,
+        executor_id: str,
+        claim_generation: int,
+        now: datetime,
+        evidence_ref: str,
+    ) -> ExecutorAttemptRecord:
+        return self._transition_executor_attempt(
+            authority,
+            effect_id=effect_id,
+            attempt_id=attempt_id,
+            authorization_transition_id=authorization_transition_id,
+            executor_id=executor_id,
+            claim_generation=claim_generation,
+            now=now,
+            target_status="quiescent",
+            evidence_ref=evidence_ref,
+            require_fenced_expired_reservation=True,
+        )
+
+    def _transition_executor_attempt(
+        self,
+        authority: OwnerAuthority,
+        *,
+        effect_id: str,
+        attempt_id: str,
+        authorization_transition_id: str,
+        executor_id: str,
+        claim_generation: int,
+        now: datetime,
+        target_status: str,
+        evidence_ref: str | None,
+        require_fenced_expired_reservation: bool = False,
+    ) -> ExecutorAttemptRecord:
+        key = (
+            authority.session_id,
+            effect_id,
+            attempt_id,
+            authorization_transition_id,
+        )
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._assert_authority(connection, authority)
+            row = connection.execute(
+                """
+                SELECT payload FROM session_executor_attempts
+                WHERE session_id = ? AND effect_id = ? AND attempt_id = ?
+                  AND authorization_transition_id = ?
+                """,
+                key,
+            ).fetchone()
+            if row is None:
+                raise ExecutorAttemptConflictError("executor attempt does not exist")
+            current = _executor_attempt_from_payload(
+                _json_object_from_sql(row["payload"], context="executor attempt")
+            )
+            if current.status == target_status:
+                if (
+                    current.executor_id == executor_id
+                    and current.claim_generation == claim_generation
+                    and current.quiescence_evidence_ref == evidence_ref
+                ):
+                    return current
+                raise ExecutorAttemptConflictError(
+                    "executor transition replay changed content"
+                )
+            if (
+                current.executor_id != executor_id
+                or current.claim_generation != claim_generation
+            ):
+                raise ExecutorAttemptConflictError("executor claim identity mismatch")
+            if require_fenced_expired_reservation:
+                if (
+                    current.status != "reserved"
+                    or current.reservation_lease_expires_at is None
+                    or current.reservation_lease_expires_at > now
+                    or current.dispatch_owner_epoch >= authority.epoch
+                ):
+                    raise ExecutorAttemptConflictError(
+                        "reservation is not both expired and owner-fenced"
+                    )
+            else:
+                expected_status = (
+                    "reserved" if target_status == "started" else "started"
+                )
+                owner_transition_allowed = (
+                    current.dispatch_owner_epoch == authority.epoch
+                    if target_status == "started"
+                    else current.dispatch_owner_epoch <= authority.epoch
+                )
+                if current.status != expected_status or not owner_transition_allowed:
+                    raise ExecutorAttemptConflictError(
+                        "executor attempt transition is not authorized"
+                    )
+                if (
+                    target_status == "started"
+                    and current.reservation_lease_expires_at is not None
+                    and current.reservation_lease_expires_at <= now
+                ):
+                    raise ExecutorAttemptConflictError(
+                        "executor reservation has expired"
+                    )
+            updated = replace(
+                current,
+                status=target_status,
+                quiescence_evidence_ref=evidence_ref,
+            )
+            connection.execute(
+                """
+                UPDATE session_executor_attempts SET status = ?, payload = ?
+                WHERE session_id = ? AND effect_id = ? AND attempt_id = ?
+                  AND authorization_transition_id = ?
+                """,
+                (target_status, _json_to_sql(updated.payload()), *key),
+            )
+        return updated
+
     async def settle_root_run(
         self,
         authority: OwnerAuthority,
@@ -292,6 +663,152 @@ class LocalUnitOfWorkMixin:
         )
         return receipt
 
+    def _assert_reconciliation_preconditions(
+        self,
+        connection,
+        authority: OwnerAuthority,
+        unit: AuthoritativeUnitOfWork,
+    ) -> None:
+        if unit.reconciliation_evidence_ref is None:
+            return
+        mutation = unit.effect_mutation
+        if mutation is None or mutation.reconciliation is None:
+            raise EffectMutationConflictError("reconciliation mutation is missing")
+        current_effect = connection.execute(
+            """
+            SELECT status, payload FROM session_effect_slots
+            WHERE session_id = ? AND effect_id = ?
+            """,
+            (authority.session_id, mutation.effect_id),
+        ).fetchone()
+        if current_effect is None or current_effect["status"] != "unknown":
+            raise EffectMutationConflictError(
+                "reconciliation requires a durable UNKNOWN effect"
+            )
+        current_payload = _json_object_from_sql(
+            current_effect["payload"],
+            context="effect slot",
+        )
+        expected_authorization = (
+            unit.expected_reconciliation_authorization_transition_id
+        )
+        if (
+            current_payload.get("attempt_id") != mutation.attempt_id
+            or current_payload.get("authorization_transition_id")
+            != expected_authorization
+        ):
+            raise EffectMutationConflictError(
+                "reconciliation retained authorization does not match"
+            )
+        dispatch_owner_epoch = current_payload.get("dispatch_owner_epoch")
+        if (
+            isinstance(dispatch_owner_epoch, bool)
+            or not isinstance(dispatch_owner_epoch, int)
+            or dispatch_owner_epoch <= 0
+        ):
+            raise EffectMutationConflictError("effect dispatch owner epoch is missing")
+        evidence_row = connection.execute(
+            """
+            SELECT payload FROM session_effect_reconciliation_evidence
+            WHERE session_id = ? AND evidence_ref = ?
+            """,
+            (authority.session_id, unit.reconciliation_evidence_ref),
+        ).fetchone()
+        if evidence_row is None:
+            raise EffectMutationConflictError("reconciliation evidence does not exist")
+        evidence = _json_object_from_sql(
+            evidence_row["payload"],
+            context="effect reconciliation evidence",
+        )
+        expected_evidence = {
+            "evidence_ref": unit.reconciliation_evidence_ref,
+            "session_id": authority.session_id,
+            "effect_id": mutation.effect_id,
+            "attempt_id": mutation.attempt_id,
+            "authorization_transition_id": expected_authorization,
+            "reconciliation_owner_epoch": authority.epoch,
+            "outcome": mutation.reconciliation.observed_outcome.value,
+            "result": _plain_json(mutation.payload.get("result")),
+            "reason_code": mutation.payload.get("reason_code"),
+            "reason_message": mutation.payload.get("reason_message"),
+        }
+        if evidence != expected_evidence:
+            raise EffectMutationConflictError(
+                "reconciliation evidence does not match terminal payload"
+            )
+        executor_row = connection.execute(
+            """
+            SELECT payload FROM session_executor_attempts
+            WHERE session_id = ? AND effect_id = ? AND attempt_id = ?
+              AND authorization_transition_id = ?
+            """,
+            (
+                authority.session_id,
+                mutation.effect_id,
+                mutation.attempt_id,
+                expected_authorization,
+            ),
+        ).fetchone()
+        if executor_row is None:
+            raise ExecutorAttemptConflictError("executor attempt does not exist")
+        executor = _executor_attempt_from_payload(
+            _json_object_from_sql(
+                executor_row["payload"],
+                context="executor attempt",
+            )
+        )
+        if executor.dispatch_owner_epoch != dispatch_owner_epoch:
+            raise ExecutorAttemptConflictError(
+                "executor attempt dispatch owner does not match effect"
+            )
+        same_owner_recovery = dispatch_owner_epoch == authority.epoch
+        safe_unclaimed_takeover = (
+            executor.status == "authorized_unclaimed"
+            and dispatch_owner_epoch < authority.epoch
+        )
+        if (
+            executor.status != "quiescent"
+            and not same_owner_recovery
+            and not safe_unclaimed_takeover
+        ):
+            raise ExecutorAttemptConflictError(
+                "executor attempt is not durably quiescent"
+            )
+        state_cas = unit.state_cas
+        state_value = unit.state_value
+        if state_cas is None or state_value is None:
+            raise ValueError("reconciliation transition is incomplete")
+        current_state_row = connection.execute(
+            """
+            SELECT * FROM session_operation_states
+            WHERE session_id = ? AND run_id = ?
+            """,
+            (authority.session_id, state_cas.run_id),
+        ).fetchone()
+        if current_state_row is None:
+            raise StateVersionConflictError(
+                "reconciliation operation state does not exist"
+            )
+        current_state = _operation_state_from_sqlite_row(current_state_row)
+        if current_state.cas != state_cas:
+            raise StateVersionConflictError("operation state compare-and-swap conflict")
+        evidence_record = _reconciliation_evidence_from_payload(evidence)
+        expected_state_value = state_value_with_reconciled_effect(
+            current_state.value,
+            evidence_record,
+            mutation.reconciliation,
+        )
+        expected_runtime = expected_state_value["_agentkit_runtime"]
+        expected_unknown = expected_runtime["unknown_effect"]
+        if expected_unknown.get("dispatch_owner_epoch") != dispatch_owner_epoch:
+            raise EffectMutationConflictError(
+                "unknown effect dispatch owner does not match effect slot"
+            )
+        if _plain_json(state_value) != expected_state_value:
+            raise EffectMutationConflictError(
+                "reconciliation state does not match canonical evidence"
+            )
+
     async def _commit_transition(
         self,
         authority: OwnerAuthority,
@@ -375,6 +892,11 @@ class LocalUnitOfWorkMixin:
                         expected_mailbox_cut=expected_mailbox_cut,
                         current_mailbox_cut=current_mailbox_cut,
                     )
+            self._assert_reconciliation_preconditions(
+                connection,
+                authority,
+                unit,
+            )
 
             current_state_row = connection.execute(
                 """
@@ -426,6 +948,12 @@ class LocalUnitOfWorkMixin:
                 if unit.effect_mutation is None
                 else effect_slot_from_mutation(unit.effect_mutation)
             )
+            is_dispatch_authorization = (
+                unit.effect_mutation is not None
+                and unit.effect_mutation.expected_status is not None
+                and unit.effect_mutation.expected_status.value == "prepared"
+                and unit.effect_mutation.status.value == "dispatched"
+            )
             if unit.effect_mutation is not None:
                 current_effect = connection.execute(
                     """
@@ -463,6 +991,17 @@ class LocalUnitOfWorkMixin:
                         effect_slot,
                         payload={**current_payload, **effect_slot.payload},
                     )
+            if is_dispatch_authorization:
+                if effect_slot is None:
+                    raise RuntimeError("dispatch effect slot was not built")
+                effect_slot = replace(
+                    effect_slot,
+                    payload={
+                        **effect_slot.payload,
+                        "authorization_transition_id": transition_id,
+                        "dispatch_owner_epoch": authority.epoch,
+                    },
+                )
             first_seq = fact_source.session_seq_int + 1 if unit.facts else None
             committed_facts: list[EventRecord] = []
             for offset, fact in enumerate(unit.facts):
@@ -593,6 +1132,53 @@ class LocalUnitOfWorkMixin:
                         effect_slot.effect_id,
                         effect_slot.status,
                         _json_to_sql(effect_slot.payload),
+                    ),
+                )
+            if is_dispatch_authorization:
+                if unit.effect_mutation is None:
+                    raise RuntimeError("dispatch effect mutation is missing")
+                executor_attempt = ExecutorAttemptRecord(
+                    session_id=authority.session_id,
+                    effect_id=unit.effect_mutation.effect_id,
+                    attempt_id=unit.effect_mutation.attempt_id,
+                    authorization_transition_id=transition_id,
+                    dispatch_owner_epoch=authority.epoch,
+                    status="authorized_unclaimed",
+                )
+                existing_executor = connection.execute(
+                    """
+                    SELECT payload FROM session_executor_attempts
+                    WHERE session_id = ? AND effect_id = ? AND attempt_id = ?
+                      AND authorization_transition_id = ?
+                    """,
+                    (
+                        authority.session_id,
+                        executor_attempt.effect_id,
+                        executor_attempt.attempt_id,
+                        transition_id,
+                    ),
+                ).fetchone()
+                if existing_executor is not None:
+                    raise ExecutorAttemptConflictError(
+                        "dispatch executor attempt already exists without a receipt"
+                    )
+                connection.execute(
+                    """
+                    INSERT INTO session_executor_attempts (
+                        session_id, effect_id, attempt_id,
+                        authorization_transition_id, dispatch_owner_epoch,
+                        status, payload
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        executor_attempt.session_id,
+                        executor_attempt.effect_id,
+                        executor_attempt.attempt_id,
+                        executor_attempt.authorization_transition_id,
+                        executor_attempt.dispatch_owner_epoch,
+                        executor_attempt.status,
+                        _json_to_sql(executor_attempt.payload()),
                     ),
                 )
             notices = tuple(
@@ -1075,3 +1661,80 @@ class LocalUnitOfWorkMixin:
             ),
             idempotent=idempotent,
         )
+
+
+def _executor_attempt_from_payload(payload: JSONObject) -> ExecutorAttemptRecord:
+    lease = payload.get("reservation_lease_expires_at")
+    return ExecutorAttemptRecord(
+        session_id=_required_payload_str(payload, "session_id"),
+        effect_id=_required_payload_str(payload, "effect_id"),
+        attempt_id=_required_payload_str(payload, "attempt_id"),
+        authorization_transition_id=_required_payload_str(
+            payload,
+            "authorization_transition_id",
+        ),
+        dispatch_owner_epoch=_required_payload_int(
+            payload,
+            "dispatch_owner_epoch",
+        ),
+        status=_required_payload_str(payload, "status"),
+        executor_id=_optional_payload_str(payload, "executor_id"),
+        claim_generation=_required_payload_int(payload, "claim_generation"),
+        reservation_lease_expires_at=(
+            None
+            if lease is None
+            else datetime.fromisoformat(
+                _required_payload_str(payload, "reservation_lease_expires_at")
+            )
+        ),
+        quiescence_evidence_ref=_optional_payload_str(
+            payload,
+            "quiescence_evidence_ref",
+        ),
+    )
+
+
+def _required_payload_str(payload: JSONObject, field_name: str) -> str:
+    value = payload.get(field_name)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{field_name} must be a non-empty string")
+    return value
+
+
+def _optional_payload_str(payload: JSONObject, field_name: str) -> str | None:
+    value = payload.get(field_name)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{field_name} must be a non-empty string or None")
+    return value
+
+
+def _required_payload_int(payload: JSONObject, field_name: str) -> int:
+    value = payload.get(field_name)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{field_name} must be an integer")
+    return value
+
+
+def _reconciliation_evidence_from_payload(
+    payload: JSONObject,
+) -> EffectReconciliationEvidence:
+    return EffectReconciliationEvidence(
+        evidence_ref=_required_payload_str(payload, "evidence_ref"),
+        session_id=_required_payload_str(payload, "session_id"),
+        effect_id=_required_payload_str(payload, "effect_id"),
+        attempt_id=_required_payload_str(payload, "attempt_id"),
+        authorization_transition_id=_required_payload_str(
+            payload,
+            "authorization_transition_id",
+        ),
+        reconciliation_owner_epoch=_required_payload_int(
+            payload,
+            "reconciliation_owner_epoch",
+        ),
+        outcome=_required_payload_str(payload, "outcome"),
+        result=payload.get("result"),
+        reason_code=_optional_payload_str(payload, "reason_code"),
+        reason_message=_optional_payload_str(payload, "reason_message"),
+    )

@@ -792,6 +792,114 @@ def _identity_value(
     return value
 
 
+def _runtime_marker(
+    state_version: OperationStateVersion,
+    key: str,
+) -> Mapping[str, Any] | None:
+    runtime_state = state_version.value.get("_agentkit_runtime")
+    if runtime_state is None:
+        return None
+    if not isinstance(runtime_state, Mapping):
+        raise ValueError("engine runtime state must be a mapping")
+    marker = runtime_state.get(key)
+    if marker is None:
+        return None
+    if not isinstance(marker, Mapping):
+        raise ValueError(f"engine runtime {key} must be a mapping")
+    return marker
+
+
+def _retained_authorization_transition_id(
+    state_version: OperationStateVersion,
+) -> str | None:
+    marker = _runtime_marker(state_version, "reconciled_effect")
+    if marker is None:
+        marker = _runtime_marker(state_version, "active_effect_authorization")
+    if marker is None:
+        return None
+    return _identity_value(
+        marker,
+        "authorization_transition_id",
+        subject="retained effect authorization",
+    )
+
+
+def _validate_reconciled_settlement_binding(
+    state_version: OperationStateVersion,
+    settlement: EffectSettlement,
+) -> None:
+    marker = _runtime_marker(state_version, "reconciled_effect")
+    if marker is None:
+        return
+    expected = {
+        "input_id": _identity_value(
+            marker,
+            "reconciled_input_id",
+            subject="reconciled effect",
+        ),
+        "effect_id": _identity_value(
+            marker,
+            "effect_id",
+            subject="reconciled effect",
+        ),
+        "attempt_id": _identity_value(
+            marker,
+            "attempt_id",
+            subject="reconciled effect",
+        ),
+        "tool_call_id": _identity_value(
+            marker,
+            "tool_call_id",
+            subject="reconciled effect",
+        ),
+        "tool_name": _identity_value(
+            marker,
+            "tool_name",
+            subject="reconciled effect",
+        ),
+        "authorization_transition_id": _identity_value(
+            marker,
+            "authorization_transition_id",
+            subject="reconciled effect",
+        ),
+        "outcome": marker.get("outcome"),
+        "result": marker.get("result"),
+        "reason_code": marker.get("reason_code"),
+        "reason_message": marker.get("reason_message"),
+    }
+    actual = {
+        "input_id": settlement.input_id,
+        "effect_id": settlement.effect_id,
+        "attempt_id": settlement.attempt_id,
+        "tool_call_id": settlement.tool_call_id,
+        "tool_name": settlement.tool_name,
+        "authorization_transition_id": settlement.authorization_transition_id,
+        "outcome": settlement.outcome.value,
+        "result": settlement.result,
+        "reason_code": settlement.reason_code,
+        "reason_message": settlement.reason_message,
+    }
+    if actual != expected:
+        raise ValueError("settlement must match committed reconciled effect")
+
+
+def _has_outstanding_effect_recovery(
+    state_version: OperationStateVersion,
+) -> bool:
+    runtime_state = state_version.value.get("_agentkit_runtime")
+    if runtime_state is None:
+        return False
+    if not isinstance(runtime_state, Mapping):
+        raise ValueError("engine runtime state must be a mapping")
+    plans = runtime_state.get("pending_effect_plans", ())
+    if not isinstance(plans, tuple | list):
+        raise ValueError("pending effect plans must be a sequence")
+    return bool(plans) or any(
+        runtime_state.get(key) is not None
+        for key in ("unknown_effect", "reconciled_effect")
+    )
+
+
 def _pending_effect_identity(
     state_version: OperationStateVersion,
 ) -> tuple[str, str, str, str]:
@@ -853,10 +961,15 @@ def _validate_settlement_binding(
     if isinstance(settlement, EffectSettlement):
         transition_field = "authorization_transition_id"
         transition_id = settlement.authorization_transition_id
+        expected_transition_id = _retained_authorization_transition_id(state_version)
+        if expected_transition_id is None:
+            raise ValueError("effect settlement requires retained authorization")
+        _validate_reconciled_settlement_binding(state_version, settlement)
     else:
         transition_field = "transition_id"
         transition_id = settlement.transition_id
-    if transition_id != state_version.commit_ref.transition_id:
+        expected_transition_id = state_version.commit_ref.transition_id
+    if transition_id != expected_transition_id:
         raise ValueError(
             f"settlement {transition_field} must match owning committed transition"
         )
@@ -1091,6 +1204,12 @@ class RunSegmentRequest:
             (Initial, ModelGenerationCompleted, EffectSettled, ApprovalResolved),
         ):
             raise TypeError("step_input must be an EngineStepInput variant")
+        if isinstance(self.step_input, Initial) and _has_outstanding_effect_recovery(
+            self.state_version
+        ):
+            raise ValueError(
+                "initial input is forbidden during outstanding effect recovery"
+            )
         if isinstance(self.step_input, ModelGenerationCompleted):
             _validate_model_completion_binding(
                 self.state_version,
@@ -1274,6 +1393,18 @@ class CommitReconciliationRequest:
             raise TypeError("record must be a ReconciliationRecord")
         if self.record.owner_epoch != self.owner_epoch:
             raise ValueError("reconciliation owner_epoch must match request")
+        unknown = _runtime_marker(self.state_version, "unknown_effect")
+        if unknown is None:
+            raise ValueError("reconciliation requires a committed unknown effect")
+        if self.record.effect_id != unknown.get("effect_id"):
+            raise ValueError("reconciliation effect_id must match unknown effect")
+        if self.record.attempt_id != unknown.get("attempt_id"):
+            raise ValueError("reconciliation attempt_id must match unknown effect")
+        if self.record.transition_id in {
+            unknown.get("authorization_transition_id"),
+            unknown.get("indeterminate_input_id"),
+        }:
+            raise ValueError("reconciliation transition identity must be fresh")
 
 
 def _validate_commit_request(
