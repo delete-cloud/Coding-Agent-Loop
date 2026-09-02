@@ -2,22 +2,31 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from agentkit.providers.models import DoneEvent, TextEvent
-from agentkit.runtime import CompletedOutcome, FailedOutcome, SegmentCoordinator
+from agentkit.providers.models import DoneEvent, TextEvent, ToolCallEvent
+from agentkit.runtime import (
+    BlockedOutcome,
+    CompletedOutcome,
+    SegmentCoordinator,
+)
+from coding_agent.approval import ApprovalPolicy
 from coding_agent.executors.durable import LocalToolEffectBackend
 from coding_agent.runtime_activation import RUNTIME_VERSION_NEW
 from coding_agent.runs.serving_runtime import (
     DurableSegmentTurnAdapter,
     ProviderModelAdapter,
+    _messages_from_model_request,
     build_new_runtime_turn_adapter,
-    session_effect_backend,
     session_model_adapter,
     session_serving_turn_kind,
+    session_tool_executor,
+    session_workspace_root,
 )
 from coding_agent.runs.turn_execution import DurableSegmentRunner
+from coding_agent.server.session.models import _local_default_run_target
 from coding_agent.server.stores.session_owner_store import OwnerAuthority
 from coding_agent.stores.rtstore.harness import effect_status_may_replace
 from tests.coding_agent.test_harness_p2_fact_source import (
@@ -32,15 +41,39 @@ class _Session:
     runtime_version: str
     provider: object | None = None
     repo_path: Path | None = None
+    default_run_target: object | None = None
+    approval_policy: ApprovalPolicy = ApprovalPolicy.YOLO
 
 
 class _StreamProvider:
     model_name = "stub"
     max_context_size = 1024
+    tools: object = None
 
     async def stream(self, messages, tools=None, **kwargs):
-        del messages, tools, kwargs
+        del messages, kwargs
+        self.tools = tools
         yield TextEvent(text="done")
+        yield DoneEvent()
+
+
+class _ToolCallProvider:
+    model_name = "stub"
+    max_context_size = 1024
+    tools: object = None
+
+    async def stream(self, messages, tools=None, **kwargs):
+        del messages, kwargs
+        self.tools = tools
+        if not tools:
+            yield TextEvent(text="no-tools")
+            yield DoneEvent()
+            return
+        yield ToolCallEvent(
+            tool_call_id="call-1",
+            name="file_read",
+            arguments={"path": "README.md"},
+        )
         yield DoneEvent()
 
 
@@ -120,7 +153,10 @@ async def test_serving_factory_builds_coordinator_and_commit_port(
 ) -> None:
     store, owner = await _open_store(store_kind, tmp_path)
     adapter = build_new_runtime_turn_adapter(
-        session=_Session(RUNTIME_VERSION_NEW),
+        session=_Session(
+            RUNTIME_VERSION_NEW,
+            default_run_target=_local_default_run_target(tmp_path),
+        ),
         run_id="run-serving",
         authority=owner,
         store=store,
@@ -134,37 +170,146 @@ async def test_serving_factory_builds_coordinator_and_commit_port(
     assert isinstance(owner, OwnerAuthority)
 
 
-def test_session_model_adapter_wraps_stream_provider() -> None:
+def test_session_model_adapter_wraps_stream_provider(tmp_path: Path) -> None:
+    executor = session_tool_executor(
+        _Session(
+            RUNTIME_VERSION_NEW,
+            default_run_target=_local_default_run_target(tmp_path),
+        )
+    )
     adapter = session_model_adapter(
-        _Session(RUNTIME_VERSION_NEW, provider=_StreamProvider())
+        _Session(RUNTIME_VERSION_NEW, provider=_StreamProvider()),
+        executor,
     )
     assert isinstance(adapter, ProviderModelAdapter)
 
 
-def test_session_effect_backend_uses_local_tools() -> None:
-    backend = session_effect_backend(_Session(RUNTIME_VERSION_NEW))
-    assert isinstance(backend, LocalToolEffectBackend)
+def test_session_workspace_root_uses_run_target(tmp_path: Path) -> None:
+    target = _local_default_run_target(tmp_path)
+    session = _Session(RUNTIME_VERSION_NEW, default_run_target=target)
+    assert session_workspace_root(session) == tmp_path.resolve()
+    executor = session_tool_executor(session)
+    assert isinstance(LocalToolEffectBackend(executor), LocalToolEffectBackend)
+    assert executor._workspace_root == tmp_path.resolve()
+
+
+def test_messages_preserve_tool_call_history() -> None:
+    request = SimpleNamespace(
+        context={
+            "messages": (
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": (
+                        {
+                            "tool_call_id": "call-1",
+                            "name": "file_read",
+                            "arguments": {"path": "README.md"},
+                        },
+                    ),
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-1",
+                    "name": "file_read",
+                    "content": {"text": "ok"},
+                    "is_error": False,
+                },
+            )
+        }
+    )
+    messages = _messages_from_model_request(request)
+    assert messages[0]["tool_calls"][0]["id"] == "call-1"
+    assert messages[0]["tool_calls"][0]["function"]["name"] == "file_read"
+    assert messages[1]["role"] == "tool"
+    assert messages[1]["tool_call_id"] == "call-1"
+    assert messages[1]["content"] == '{"text": "ok"}'
+
+
+@pytest.mark.asyncio
+async def test_provider_stream_receives_core_tool_schemas(tmp_path: Path) -> None:
+    provider = _ToolCallProvider()
+    executor = session_tool_executor(
+        _Session(
+            RUNTIME_VERSION_NEW,
+            default_run_target=_local_default_run_target(tmp_path),
+        )
+    )
+    adapter = ProviderModelAdapter(
+        provider,
+        tools=tuple(executor.schemas()),
+        approval_policy=ApprovalPolicy.YOLO,
+    )
+    result = await adapter.generate(
+        SimpleNamespace(request_id="req-1", context={}),
+        _Sink(),
+        None,
+    )
+    assert provider.tools
+    assert {schema.name for schema in provider.tools} >= {"file_read"}
+    assert result.tool_calls[0].name == "file_read"
+    assert result.tool_calls[0].requires_approval is False
+
+
+@pytest.mark.asyncio
+async def test_interactive_policy_marks_tool_calls_for_approval() -> None:
+    adapter = ProviderModelAdapter(
+        _ToolCallProvider(),
+        tools=(SimpleNamespace(name="file_read"),),
+        approval_policy=ApprovalPolicy.INTERACTIVE,
+    )
+    result = await adapter.generate(
+        SimpleNamespace(request_id="req-1", context={}),
+        _Sink(),
+        None,
+    )
+    assert result.tool_calls[0].requires_approval is True
+    assert result.tool_calls[0].approval_request_id == "req-1:call-1"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("store_kind", ["sqlite", "pg"])
-async def test_new_runtime_run_turn_reaches_completed_or_named_failure(
+async def test_new_runtime_run_turn_reaches_completed_outcome(
     store_kind: str,
     tmp_path: Path,
 ) -> None:
     store, owner = await _open_store(store_kind, tmp_path)
     adapter = build_new_runtime_turn_adapter(
-        session=_Session(RUNTIME_VERSION_NEW, provider=_StreamProvider()),
+        session=_Session(
+            RUNTIME_VERSION_NEW,
+            provider=_StreamProvider(),
+            default_run_target=_local_default_run_target(tmp_path),
+        ),
         run_id="run-serving-turn",
         authority=owner,
         store=store,
         state_version=None,
     )
     outcome = await adapter.run_turn("hello")
-    if isinstance(outcome, FailedOutcome):
-        assert outcome.error.code
-        assert outcome.error.code != "serving_effect_backend_unwired"
-        return
     assert isinstance(outcome, CompletedOutcome)
     assert outcome.final_message == "done"
     assert outcome.stop_reason == "no_tool_calls"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("store_kind", ["sqlite", "pg"])
+async def test_interactive_tool_call_blocks_without_backend_execution(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store, owner = await _open_store(store_kind, tmp_path)
+    adapter = build_new_runtime_turn_adapter(
+        session=_Session(
+            RUNTIME_VERSION_NEW,
+            provider=_ToolCallProvider(),
+            default_run_target=_local_default_run_target(tmp_path),
+            approval_policy=ApprovalPolicy.INTERACTIVE,
+        ),
+        run_id="run-serving-approval",
+        authority=owner,
+        store=store,
+        state_version=None,
+    )
+    outcome = await adapter.run_turn("read the file")
+    assert isinstance(outcome, BlockedOutcome)
+    assert outcome.reason == "approval_required"
