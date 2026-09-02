@@ -107,3 +107,19 @@ def assert_effect_status_allowed(*, status: str, runtime_version: str) -> None:
         )
     if runtime_version == RUNTIME_VERSION_NEW and status == "settled":
         raise NewRuntimeSettledWriteError("new-runtime sessions cannot write settled")
+
+
+ServingTurnKind = Literal["pipeline_adapter", "durable_segment_runner"]
+
+
+def serving_turn_kind(payload: Mapping[str, object]) -> ServingTurnKind:
+    if runtime_path_for_version(parse_runtime_version(payload)) == "new":
+        return "durable_segment_runner"
+    return "pipeline_adapter"
+
+
+def assert_legacy_terminal_writer_allowed(payload: Mapping[str, object]) -> None:
+    assert_effect_status_allowed(
+        status="settled",
+        runtime_version=parse_runtime_version(payload),
+    )

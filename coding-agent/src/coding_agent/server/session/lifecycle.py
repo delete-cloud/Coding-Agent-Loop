@@ -19,6 +19,7 @@ from coding_agent.approval import (
     ApprovalCoordinator,
     ApprovalPolicy,
 )
+from coding_agent.runtime_activation import version_for_new_session
 from coding_agent.approval.store import ApprovalStore
 from coding_agent.core import config as core_config
 from coding_agent.stores.runtime_store import JSONObject
@@ -199,9 +200,12 @@ class LifecycleOps:
         async with self._lock:
             try:
                 await self._acquire_owner_for_session(session_id)
+                store = self._authoritative_store()
+                if store is not None:
+                    activation = await store.load_runtime_activation()
+                    session.runtime_version = version_for_new_session(activation)
                 await self._persist_session_async(session)
                 await self._persist_workspace_record_for_session(session)
-                store = self._authoritative_store()
                 if store is not None:
                     await store.snapshot_chat_events(session_id, None, 1)
             except BaseException:
@@ -328,7 +332,10 @@ class LifecycleOps:
                 else None
             )
 
-            if interrupted_run_id is not None and self.can_settle_root_run_authoritatively():
+            if (
+                interrupted_run_id is not None
+                and self.can_settle_root_run_authoritatively()
+            ):
                 from coding_agent.events.connected_chat import (
                     RootRunAlreadySettledError,
                 )

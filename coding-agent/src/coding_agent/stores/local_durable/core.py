@@ -139,6 +139,17 @@ class LocalCoreMixin:
         compensation_effect_id TEXT,
         PRIMARY KEY (session_id, receipt_id)
     );
+    CREATE TABLE IF NOT EXISTS session_projector_cursors (
+        session_id TEXT PRIMARY KEY,
+        last_session_seq INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS session_projector_sinks (
+        session_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        sink TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        PRIMARY KEY (session_id, event_id, sink)
+    );
     """
 
     _RUNTIME_ACTIVATION_SCHEMA_SQL: Final[str] = """

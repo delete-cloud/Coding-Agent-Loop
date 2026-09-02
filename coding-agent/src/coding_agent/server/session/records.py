@@ -12,6 +12,10 @@ from typing import (
 )
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.approval.store import ApprovalStore
+from coding_agent.runtime_activation import (
+    RUNTIME_VERSION_LEGACY,
+    parse_runtime_version,
+)
 from coding_agent.runs import (
     RunTarget,
     run_target_from_legacy_session_payload,
@@ -48,6 +52,7 @@ class SessionRecord:
     tape_id: str | None
     last_failure_details: str | None
     current_turn_id: str | None = None
+    runtime_version: str = RUNTIME_VERSION_LEGACY
 
     def to_store_data(self) -> dict[str, Any]:
         return {
@@ -69,6 +74,7 @@ class SessionRecord:
             "tape_id": self.tape_id,
             "last_failure_details": self.last_failure_details,
             "turn_id": self.current_turn_id,
+            "runtime_version": self.runtime_version,
         }
 
     @classmethod
@@ -156,6 +162,7 @@ class SessionRecord:
             tape_id=tape_id_raw,
             last_failure_details=last_failure_details_raw,
             current_turn_id=current_turn_id_raw,
+            runtime_version=parse_runtime_version(data),
         )
 
     def to_session(self) -> Session:
@@ -179,6 +186,7 @@ class SessionRecord:
             tape_id=self.tape_id,
             last_failure_details=self.last_failure_details,
             current_turn_id=self.current_turn_id,
+            runtime_version=self.runtime_version,
         )
 
 

@@ -69,6 +69,10 @@ RuntimePersistHook = Callable[[LocalDaemonRuntimeSession], Awaitable[None]]
 RuntimeTapeLoader = Callable[[str | None], Awaitable[object]]
 RuntimeFactory = Callable[..., tuple[object, object]]
 RuntimeAdapterFactory = Callable[[object, object], RuntimeTurnAdapter]
+NewRuntimeAdapterFactory = Callable[
+    [LocalDaemonRuntimeSession, RunRequest],
+    RuntimeTurnAdapter,
+]
 SemanticTopicStoreFactory = Callable[[], object | None]
 
 
@@ -120,6 +124,7 @@ class LocalDaemonSessionRuntimeProvider:
     persist_session: RuntimePersistHook
     adapter_factory: RuntimeAdapterFactory
     semantic_topic_store_factory: SemanticTopicStoreFactory = lambda: None
+    new_runtime_adapter_factory: NewRuntimeAdapterFactory | None = None
 
     async def prepare_runtime(self, request: RunRequest) -> LocalDaemonRuntimeBinding:
         session = self.session
@@ -179,7 +184,16 @@ class LocalDaemonSessionRuntimeProvider:
             if session.provider is not None:
                 llm_plugin._instance = session.provider
 
-            adapter = self.adapter_factory(pipeline, ctx)
+            from coding_agent.runs.serving_runtime import session_serving_turn_kind
+
+            if session_serving_turn_kind(session) == "durable_segment_runner":
+                if self.new_runtime_adapter_factory is None:
+                    raise RuntimeError(
+                        "new-runtime sessions require DurableSegmentTurnAdapter"
+                    )
+                adapter = self.new_runtime_adapter_factory(session, request)
+            else:
+                adapter = self.adapter_factory(pipeline, ctx)
             session.attach_runtime_binding(
                 pipeline=pipeline,
                 ctx=ctx,

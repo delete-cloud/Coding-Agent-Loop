@@ -12,6 +12,7 @@ from coding_agent.stores.pg_durable.sql_session import PgSessionSqlMixin
 from coding_agent.stores.pg_durable.tape import PgTapeMixin
 from coding_agent.stores.pg_durable.topics import PgTopicsMixin
 from coding_agent.stores.pg_durable.uow import PgUnitOfWorkMixin
+from coding_agent.stores.pg_durable.projector import PgProjectorMixin
 
 
 class PGDurableStore(
@@ -25,5 +26,6 @@ class PGDurableStore(
     PgUnitOfWorkMixin,
     PgFactSourceMixin,
     PgTopicsMixin,
+    PgProjectorMixin,
 ):
     """PostgreSQL protected write facade for durable owner fencing."""

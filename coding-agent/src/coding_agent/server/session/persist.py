@@ -29,6 +29,7 @@ from coding_agent.stores.runtime_store import (
     MailboxDispositionSlot,
 )
 from coding_agent.server.stores.session_owner_store import SessionOwnershipConflictError
+from coding_agent.runtime_activation import assert_legacy_terminal_writer_allowed
 from coding_agent.server.session.models import Session
 from coding_agent.server.session.models import T
 
@@ -188,8 +189,9 @@ class PersistOps:
         await self._publish_chat_commit(settlement)
         return settlement
 
-
-    async def persist_chat_wire_message(self, session: Session, message: object) -> None:
+    async def persist_chat_wire_message(
+        self, session: Session, message: object
+    ) -> None:
         from coding_agent.wire.protocol import (
             StreamDelta,
             ThinkingDelta,
@@ -208,7 +210,10 @@ class PersistOps:
                 await self.flush_chat_assistant_buffer(session.id)
             current = self._chat_assistant_buffers.get(session.id)
             prefix = current[1] if current is not None and current[0] == run_id else ""
-            self._chat_assistant_buffers[session.id] = (run_id, prefix + message.content)
+            self._chat_assistant_buffers[session.id] = (
+                run_id,
+                prefix + message.content,
+            )
             return
         await self.flush_chat_assistant_buffer(session.id)
         if isinstance(message, ThinkingDelta):
@@ -416,6 +421,9 @@ class PersistOps:
         if request_id is None or self._authoritative_store() is None:
             await self._persist_session_async(session)
             return
+        assert_legacy_terminal_writer_allowed(
+            cast(dict[str, object], session.to_store_data())
+        )
         await self._commit_session_uow(
             session,
             event_kind="harness.ApprovalDecided",

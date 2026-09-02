@@ -9,6 +9,7 @@ from coding_agent.stores.local_durable.runtime_ops import LocalRuntimeMixin
 from coding_agent.stores.local_durable.checkpoint import LocalCheckpointMixin
 from coding_agent.stores.local_durable.uow import LocalUnitOfWorkMixin
 from coding_agent.stores.local_durable.fact_source import LocalFactSourceMixin
+from coding_agent.stores.local_durable.projector import LocalProjectorMixin
 
 
 class SQLiteLocalDurableStore(
@@ -19,6 +20,7 @@ class SQLiteLocalDurableStore(
     LocalCheckpointMixin,
     LocalUnitOfWorkMixin,
     LocalFactSourceMixin,
+    LocalProjectorMixin,
 ):
     """SQLite-local protected mutation facade.
 
