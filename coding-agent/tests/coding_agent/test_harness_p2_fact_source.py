@@ -218,7 +218,10 @@ class HarnessFakePGConnection:
                 self.session_tape_by_session[session_id] = tape_id
                 self.session_by_tape[tape_id] = session_id
             return "INSERT"
-        if "INSERT INTO runtime_activation" in query or "UPDATE runtime_activation" in query:
+        if (
+            "INSERT INTO runtime_activation" in query
+            or "UPDATE runtime_activation" in query
+        ):
             if args:
                 self.new_sessions_enabled = bool(args[0])
             return "INSERT"
@@ -1257,7 +1260,14 @@ async def test_receipt_generation_and_effect_status_do_not_regress(
     tmp_path: Path,
 ) -> None:
     store, owner = await _open_store(store_kind, tmp_path)
-    first = _unit("one")
+    first = replace(
+        _unit("one"),
+        effect=EffectLedgerSlot(
+            effect_id="effect-1",
+            status="prepared",
+            payload={"attempt": "one"},
+        ),
+    )
     advanced = AuthoritativeUnitOfWork(
         event=_event("high"),
         session_state={**SESSION_PAYLOAD, "turn": "high"},

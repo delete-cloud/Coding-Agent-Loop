@@ -51,6 +51,7 @@ from coding_agent.stores.runtime_store import (
     RecoveryLeaseConflictError,
     StaleRecoveryGuardError,
     effect_status_may_replace,
+    legacy_settled_slot_may_replace,
     format_u64,
     runtime_command_from_mailbox_payload,
     runtime_command_invalidates_dispatch,
@@ -2330,10 +2331,19 @@ class PgUnitOfWorkMixin:
                     authority.session_id,
                     unit.effect.effect_id,
                 )
-                if existing_effect is None or effect_status_may_replace(
-                    current=_required_str(dict(existing_effect), "status"),
-                    incoming=unit.effect.status,
-                ):
+                current_status = (
+                    None
+                    if existing_effect is None
+                    else _required_str(dict(existing_effect), "status")
+                )
+                if unit.effect.status == "settled":
+                    allowed = legacy_settled_slot_may_replace(current_status)
+                else:
+                    allowed = current_status is None or effect_status_may_replace(
+                        current=current_status,
+                        incoming=unit.effect.status,
+                    )
+                if allowed:
                     _ = await connection.fetchrow(
                         self._UPSERT_EFFECT_SLOT_SQL,
                         authority.session_id,
