@@ -13,6 +13,7 @@ from dataclasses import (
     dataclass,
     field,
 )
+from coding_agent.runtime_activation import RUNTIME_VERSION_LEGACY
 from datetime import datetime
 from pathlib import Path
 from typing import (
@@ -264,6 +265,7 @@ class Session:
     approval_response: dict[str, Any] | None = None
     event_queues: list[asyncio.Queue[dict[str, Any]]] = field(default_factory=list)
     tape_id: str | None = None
+    runtime_version: str = RUNTIME_VERSION_LEGACY
     runtime_pipeline: Any | None = None
     runtime_ctx: Any | None = None
     runtime_adapter: Any | None = None
@@ -464,6 +466,7 @@ class Session:
             tape_id=self.tape_id,
             last_failure_details=self.last_failure_details,
             current_turn_id=self.current_turn_id,
+            runtime_version=self.runtime_version,
         )
 
     @classmethod

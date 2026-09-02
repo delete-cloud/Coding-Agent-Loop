@@ -12,9 +12,12 @@ from coding_agent.runtime_activation import (
     CrossVersionWriteError,
     NewRuntimeSettledWriteError,
     UnknownRuntimeVersionError,
+    assert_legacy_terminal_writer_allowed,
     parse_runtime_version,
     runtime_path_for_version,
+    serving_turn_kind,
 )
+from coding_agent.runs.child_execution import child_execution_binding
 from coding_agent.server.stores.session_owner_store import OwnerAuthority
 from coding_agent.stores.runtime_store import EffectLedgerSlot
 from tests.coding_agent.test_harness_p2_fact_source import (
@@ -93,18 +96,16 @@ async def test_child_run_inherits_parent_runtime_version(
     await store.save_session(owner, payload)
     parent = await _load_session(store, owner.session_id)
     assert parent is not None
-    await store.save_session(
-        owner,
-        {
-            **payload,
-            "runtime_version": parent["runtime_version"],
-            "parent_run_id": "matrix-parent-run",
-        },
+    binding = child_execution_binding(
+        session_id=owner.session_id,
+        parent_run_id="matrix-parent-run",
+        parent_effect_id="parent-effect",
+        parent_attempt_id="parent-attempt",
+        prepared_transition_id="prepared-transition",
     )
-    loaded = await _load_session(store, owner.session_id)
-    assert loaded is not None
-    assert loaded["runtime_version"] == RUNTIME_VERSION_NEW
-    assert runtime_path_for_version(str(loaded["runtime_version"])) == "new"
+    assert binding.session_id == owner.session_id
+    assert parent["runtime_version"] == RUNTIME_VERSION_NEW
+    assert runtime_path_for_version(str(parent["runtime_version"])) == "new"
 
 
 @pytest.mark.asyncio
@@ -167,6 +168,8 @@ async def test_new_runtime_cannot_write_settled_or_use_legacy_terminal_writer(
         store, store_kind, "session-settled-forbidden"
     )
     await store.save_session(owner, payload)
+    loaded = await _load_session(store, owner.session_id)
+    assert loaded is not None
     unit = replace(
         _unit(
             "settled-forbidden",
@@ -183,6 +186,8 @@ async def test_new_runtime_cannot_write_settled_or_use_legacy_terminal_writer(
         ),
     )
     with pytest.raises(NewRuntimeSettledWriteError):
+        assert_legacy_terminal_writer_allowed(loaded)
+    with pytest.raises(NewRuntimeSettledWriteError):
         await store.commit_authoritative_uow(owner, unit)
 
 
@@ -193,6 +198,12 @@ async def test_legacy_session_keeps_pipeline_adapter_and_message_bus(
     tmp_path: Path,
 ) -> None:
     del store_kind, tmp_path
+    assert serving_turn_kind({"runtime_version": RUNTIME_VERSION_LEGACY}) == (
+        "pipeline_adapter"
+    )
+    assert serving_turn_kind({"runtime_version": RUNTIME_VERSION_NEW}) == (
+        "durable_segment_runner"
+    )
     assert runtime_path_for_version(RUNTIME_VERSION_LEGACY) == "legacy"
 
 

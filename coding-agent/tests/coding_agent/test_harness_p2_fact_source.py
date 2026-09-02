@@ -153,6 +153,8 @@ class HarnessFakePGConnection:
         self.transition_receipts: dict[tuple[str, int, str], dict[str, object]] = {}
         self.agent_runs: dict[str, dict[str, object]] = {}
         self.checkpoints: dict[str, dict[str, object]] = {}
+        self.projector_cursors: dict[str, int] = {}
+        self.projector_sinks: dict[tuple[str, str, str], dict[str, object]] = {}
         self.in_txn = False
         self.fail_on_operation_state_write = False
         self.new_sessions_enabled = False
@@ -178,6 +180,8 @@ class HarnessFakePGConnection:
                 "checkpoints": self.checkpoints,
                 "operation_states": self.operation_states,
                 "transition_receipts": self.transition_receipts,
+                "projector_cursors": self.projector_cursors,
+                "projector_sinks": self.projector_sinks,
                 "new_sessions_enabled": self.new_sessions_enabled,
             }
         )
@@ -220,6 +224,24 @@ class HarnessFakePGConnection:
             return "INSERT"
         if "INSERT INTO agent_http_sessions" in query:
             self.session_payloads[cast(str, args[0])] = cast(dict[str, object], args[1])
+            return "INSERT"
+        if "INSERT INTO session_projector_sinks" in query:
+            key = (cast(str, args[0]), cast(str, args[1]), cast(str, args[2]))
+            self.projector_sinks.setdefault(
+                key,
+                {
+                    "session_id": args[0],
+                    "event_id": args[1],
+                    "sink": args[2],
+                    "payload": args[3],
+                },
+            )
+            return "INSERT"
+        if "INSERT INTO session_projector_cursors" in query:
+            session_id = cast(str, args[0])
+            seq = int(cast(int, args[1]))
+            current = self.projector_cursors.get(session_id, 0)
+            self.projector_cursors[session_id] = max(current, seq)
             return "INSERT"
         if "INSERT INTO session_fact_source" in query:
             session_id = cast(str, args[0])
@@ -674,6 +696,12 @@ class HarnessFakePGConnection:
         if "INSERT INTO agent_runs" in query:
             await self.execute(query, *args)
             return self.agent_runs[cast(str, args[0])]
+        if "FROM session_projector_cursors" in query:
+            session_id = cast(str, args[0])
+            seq = self.projector_cursors.get(session_id)
+            if seq is None:
+                return None
+            return {"last_session_seq": seq}
         return None
 
     async def fetch(self, query: str, *args: object) -> list[dict[str, object]]:
@@ -771,6 +799,20 @@ class HarnessFakePGConnection:
                             joined["run_id"] = None
                     rows.append(joined)
             return rows[:limit]
+        if "FROM session_projector_sinks" in query:
+            session_id = cast(str, args[0])
+            if "sink = 'wire_outbox'" in query:
+                return [
+                    {"event_id": key[1]}
+                    for key in sorted(self.projector_sinks)
+                    if key[0] == session_id and key[2] == "wire_outbox"
+                ]
+            event_id = cast(str, args[1])
+            return [
+                {"sink": key[2]}
+                for key in self.projector_sinks
+                if key[0] == session_id and key[1] == event_id
+            ]
         return []
 
 
