@@ -17,11 +17,10 @@ from agentkit.runtime import (
 from agentkit.runtime.contracts import (
     CommitRef,
     EffectReference,
-    Initial,
     OperationStateVersion,
-    RunSegmentRequest,
+    RuntimeCommand,
 )
-from coding_agent.approval import ApprovalPolicy
+from coding_agent.approval import ApprovalCoordinator, ApprovalPolicy
 from coding_agent.executors.durable import LocalToolEffectBackend
 from coding_agent.runtime_activation import RUNTIME_VERSION_NEW
 from coding_agent.runs.serving_runtime import (
@@ -110,6 +109,55 @@ class _TwoRoundProvider:
         yield DoneEvent()
 
 
+class _ContextAwareProvider:
+    model_name = "stub"
+    max_context_size = 1024
+
+    def __init__(self) -> None:
+        self.rounds = 0
+
+    async def stream(self, messages, tools=None, **kwargs):
+        del kwargs
+        self.rounds += 1
+        if any(message.get("role") == "tool" for message in messages):
+            yield TextEvent(text="done")
+            yield DoneEvent()
+            return
+        assert tools
+        yield ToolCallEvent(
+            tool_call_id="call-1",
+            name="file_read",
+            arguments={"path": "README.md"},
+        )
+        yield DoneEvent()
+
+
+class _ManagerSession(_Session):
+    def __init__(
+        self,
+        *,
+        provider: object,
+        default_run_target: object,
+        max_steps: int = 30,
+    ) -> None:
+        super().__init__(
+            RUNTIME_VERSION_NEW,
+            provider=provider,
+            default_run_target=default_run_target,
+            approval_policy=ApprovalPolicy.INTERACTIVE,
+        )
+        self.id = SESSION_ID
+        self.max_steps = max_steps
+        self.current_turn_id = "run-serving-restart"
+        self.approval_coordinator = ApprovalCoordinator()
+
+    def begin_approval_request(self, request: object) -> None:
+        self.approval_coordinator.add_request(request)
+
+    def cleanup_approval_wait_projection(self, *, signal_event: bool) -> None:
+        del signal_event
+
+
 class _Probe:
     def observe(self) -> object:
         return object()
@@ -168,7 +216,11 @@ def test_generic_rank_does_not_treat_settled_as_completed() -> None:
 async def test_durable_segment_turn_adapter_does_not_use_pipeline() -> None:
     adapter = DurableSegmentTurnAdapter(
         runner=DurableSegmentRunner(coordinator=_Coordinator(), commit_port=_Port()),
-        request_for_prompt=lambda prompt: SimpleNamespace(max_rounds=1),
+        session_id="session-1",
+        owner_id="owner-1",
+        owner_epoch=1,
+        state_version=initial_operation_state("run-adapter"),
+        max_rounds=1,
         control_probe=_Probe(),
         frame_sink=_Sink(),
         committed_fact_sink=_Sink(),
@@ -390,8 +442,7 @@ async def test_interactive_allow_resumes_to_completed(
     store, owner = await _open_store(store_kind, tmp_path)
     provider = _TwoRoundProvider()
 
-    async def resolve_blocked(blocked: BlockedOutcome, request: object) -> object:
-        del request
+    async def resolve_blocked(blocked: BlockedOutcome) -> object:
         return await admit_blocked_approval(
             store,
             owner,
@@ -427,8 +478,7 @@ async def test_interactive_deny_resumes_to_completed(
     store, owner = await _open_store(store_kind, tmp_path)
     provider = _TwoRoundProvider()
 
-    async def resolve_blocked(blocked: BlockedOutcome, request: object) -> object:
-        del request
+    async def resolve_blocked(blocked: BlockedOutcome) -> object:
         return await admit_blocked_approval(
             store,
             owner,
@@ -453,6 +503,96 @@ async def test_interactive_deny_resumes_to_completed(
     assert isinstance(outcome, CompletedOutcome)
     assert outcome.final_message == "done"
     assert provider.rounds == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("store_kind", ["sqlite", "pg"])
+async def test_reconstructed_adapter_consumes_durable_approval(
+    store_kind: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from coding_agent.server.session.manager import SessionManager
+
+    (tmp_path / "README.md").write_text("durable\n", encoding="utf-8")
+    store, owner = await _open_store(store_kind, tmp_path)
+    session = _ManagerSession(
+        provider=_ContextAwareProvider(),
+        default_run_target=_local_default_run_target(tmp_path),
+    )
+    first_adapter = build_new_runtime_turn_adapter(
+        session=session,
+        run_id=session.current_turn_id,
+        authority=owner,
+        store=store,
+        state_version=None,
+    )
+    blocked = await first_adapter.run_turn("read the file")
+    assert isinstance(blocked, BlockedOutcome)
+    await admit_blocked_approval(store, owner, blocked, approved=True)
+
+    session.provider = _ContextAwareProvider()
+    manager = SessionManager()
+    monkeypatch.setattr(manager, "_authoritative_store", lambda: store)
+    manager._owner_authorities[session.id] = owner
+    reconstructed = await manager._build_new_runtime_turn_adapter(
+        session,
+        SimpleNamespace(run_id=session.current_turn_id),
+    )
+
+    outcome = await asyncio.wait_for(
+        reconstructed.run_turn("read the file"),
+        timeout=1,
+    )
+
+    assert isinstance(outcome, CompletedOutcome)
+    assert outcome.final_message == "done"
+    assert outcome.steps_taken == 2
+    assert session.provider.rounds == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("store_kind", ["sqlite", "pg"])
+async def test_reconstructed_adapter_enforces_persisted_round_budget(
+    store_kind: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from coding_agent.server.session.manager import SessionManager
+
+    store, owner = await _open_store(store_kind, tmp_path)
+    session = _ManagerSession(
+        provider=_ContextAwareProvider(),
+        default_run_target=_local_default_run_target(tmp_path),
+        max_steps=1,
+    )
+    first_adapter = build_new_runtime_turn_adapter(
+        session=session,
+        run_id=session.current_turn_id,
+        authority=owner,
+        store=store,
+        state_version=None,
+    )
+    blocked = await first_adapter.run_turn("read the file")
+    assert isinstance(blocked, BlockedOutcome)
+
+    session.provider = _ContextAwareProvider()
+    manager = SessionManager()
+    monkeypatch.setattr(manager, "_authoritative_store", lambda: store)
+    manager._owner_authorities[session.id] = owner
+    reconstructed = await manager._build_new_runtime_turn_adapter(
+        session,
+        SimpleNamespace(run_id=session.current_turn_id),
+    )
+
+    outcome = await asyncio.wait_for(
+        reconstructed.run_turn("read the file"),
+        timeout=1,
+    )
+
+    assert isinstance(outcome, RoundLimitOutcome)
+    assert outcome.steps_taken == 1
+    assert session.provider.rounds == 0
 
 
 def _blocked_outcome(
@@ -510,8 +650,7 @@ async def test_adapter_does_not_resume_indeterminate_block() -> None:
     blocked = _blocked_outcome(reason="indeterminate_dispatch")
     calls: list[str] = []
 
-    async def resolve_blocked(outcome: BlockedOutcome, request: object) -> object:
-        del request
+    async def resolve_blocked(outcome: BlockedOutcome) -> object:
         calls.append(outcome.reason)
         raise AssertionError("indeterminate blocks must not resume as approval")
 
@@ -520,7 +659,11 @@ async def test_adapter_does_not_resume_indeterminate_block() -> None:
             coordinator=_BlockedCoordinator(blocked),
             commit_port=_Port(),
         ),
-        request_for_prompt=lambda prompt: SimpleNamespace(max_rounds=1),
+        session_id="session-1",
+        owner_id="owner-1",
+        owner_epoch=1,
+        state_version=initial_operation_state("run-indeterminate-block"),
+        max_rounds=1,
         control_probe=_Probe(),
         frame_sink=_Sink(),
         committed_fact_sink=_Sink(),
@@ -543,12 +686,42 @@ class _NewRuntimeApprovalStore:
         del session_id, run_id
         return None
 
+    async def load_runtime_command_mailbox(self, session_id: str) -> object:
+        del session_id
+        entries = tuple(
+            SimpleNamespace(command=command) for _authority, command in self.admitted
+        )
+        return SimpleNamespace(entries=entries, mailbox_cut=str(len(entries)))
+
     async def admit_new_runtime_command(
         self,
         authority: OwnerAuthority,
         command: object,
     ) -> None:
         self.admitted.append((authority, command))
+
+
+class _TimeoutWinnerStore(_NewRuntimeApprovalStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.load_count = 0
+        self.winner = RuntimeCommand(
+            command_id="serving-approval:call-1",
+            command_kind="approval_decision",
+            payload={
+                "approved": True,
+                "request_id": ("run-indeterminate:approval:serving-approval:call-1"),
+                "target_run_id": "run-indeterminate",
+            },
+        )
+
+    async def load_runtime_command_mailbox(self, session_id: str) -> object:
+        del session_id
+        self.load_count += 1
+        entries = (
+            () if self.load_count == 1 else (SimpleNamespace(command=self.winner),)
+        )
+        return SimpleNamespace(entries=entries, mailbox_cut="1")
 
 
 @pytest.mark.asyncio
@@ -593,7 +766,7 @@ async def test_new_runtime_http_approval_bypasses_legacy_writer(
     blocked = _blocked_outcome(reason="approval_required")
     resolver = adapter.resolve_blocked
     assert resolver is not None
-    resolution = asyncio.create_task(resolver(blocked, SimpleNamespace(max_rounds=5)))
+    resolution = asyncio.create_task(resolver(blocked))
     for _ in range(10):
         if session.approval_coordinator.get_request("call-1") is not None:
             break
@@ -622,6 +795,97 @@ async def test_new_runtime_http_approval_bypasses_legacy_writer(
         "request_id": settlement.input_id,
         "target_run_id": "run-indeterminate",
     }
+
+
+@pytest.mark.asyncio
+async def test_timeout_adopts_durable_human_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_build(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return SimpleNamespace(resolve_blocked=kwargs.get("resolve_blocked"))
+
+    monkeypatch.setattr(
+        "coding_agent.runs.serving_runtime.build_new_runtime_turn_adapter",
+        fake_build,
+    )
+    from coding_agent.server.session.manager import SessionManager
+
+    manager = SessionManager()
+    session_id = await manager.create_session()
+    session = await manager.get_session_async(session_id)
+    session.runtime_version = RUNTIME_VERSION_NEW
+    session.current_turn_id = "run-indeterminate"
+    store = _TimeoutWinnerStore()
+    owner = OwnerAuthority(session_id=session_id, owner_id="owner-1", epoch=1)
+    monkeypatch.setattr(manager, "_authoritative_store", lambda: store)
+    manager._owner_authorities[session_id] = owner
+
+    async def timeout(_request_id: str, _timeout: float) -> None:
+        return None
+
+    monkeypatch.setattr(
+        session.approval_coordinator,
+        "wait_for_response",
+        timeout,
+    )
+    adapter = await manager._build_new_runtime_turn_adapter(
+        session,
+        SimpleNamespace(run_id="run-indeterminate"),
+    )
+    resolver = adapter.resolve_blocked
+    assert resolver is not None
+
+    settlement = await resolver(
+        _blocked_outcome(reason="approval_required"),
+    )
+
+    assert settlement.approved is True
+    assert store.load_count == 2
+    assert store.admitted == []
+
+
+@pytest.mark.asyncio
+async def test_durable_http_approval_acknowledges_after_waiter_disappears(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from coding_agent.server.session.manager import SessionManager
+    from coding_agent.wire.protocol import ApprovalRequest
+
+    manager = SessionManager()
+    session_id = await manager.create_session()
+    session = await manager.get_session_async(session_id)
+    session.runtime_version = RUNTIME_VERSION_NEW
+    session.current_turn_id = "run-indeterminate"
+    session.begin_approval_request(
+        ApprovalRequest(
+            session_id=session_id,
+            request_id="call-1",
+            tool="file_read",
+            args={},
+        )
+    )
+    store = _NewRuntimeApprovalStore()
+    owner = OwnerAuthority(session_id=session_id, owner_id="owner-1", epoch=1)
+    monkeypatch.setattr(manager, "_authoritative_store", lambda: store)
+    manager._owner_authorities[session_id] = owner
+    monkeypatch.setattr(
+        session.approval_coordinator,
+        "respond",
+        lambda _response: False,
+    )
+
+    response = await manager.submit_approval_response(
+        session_id=session_id,
+        request_id="call-1",
+        approved=True,
+    )
+
+    assert response is not None
+    assert response.approved is True
+    assert len(store.admitted) == 1
 
 
 def test_approval_command_id_includes_request_identity() -> None:
@@ -672,32 +936,20 @@ class _BudgetCoordinator:
 async def test_approval_resume_uses_remaining_round_budget() -> None:
     coordinator = _BudgetCoordinator()
 
-    async def resolve_blocked(blocked: BlockedOutcome, request: object) -> object:
-        del request
+    async def resolve_blocked(blocked: BlockedOutcome) -> object:
         return approval_settlement_from_blocked(
             blocked,
             approved=True,
             owner_epoch=1,
         )
 
-    def request_for_prompt(prompt: str) -> RunSegmentRequest:
-        del prompt
-        return RunSegmentRequest(
-            session_id="session-1",
-            owner_id="owner-1",
-            owner_epoch=1,
-            state_version=initial_operation_state("run-budget"),
-            step_input=Initial(
-                input_id="run-budget:initial",
-                command_batch=(),
-                mailbox_cut=0,
-            ),
-            max_rounds=5,
-        )
-
     adapter = DurableSegmentTurnAdapter(
         runner=DurableSegmentRunner(coordinator=coordinator, commit_port=_Port()),
-        request_for_prompt=request_for_prompt,
+        session_id="session-1",
+        owner_id="owner-1",
+        owner_epoch=1,
+        state_version=initial_operation_state("run-budget"),
+        max_rounds=5,
         control_probe=_Probe(),
         frame_sink=_Sink(),
         committed_fact_sink=_Sink(),
@@ -722,8 +974,8 @@ class _ExhaustedBudgetCoordinator:
 async def test_exhausted_approval_wait_returns_round_limit() -> None:
     resolver_called = False
 
-    async def resolve_blocked(blocked: BlockedOutcome, request: object) -> object:
-        del blocked, request
+    async def resolve_blocked(blocked: BlockedOutcome) -> object:
+        del blocked
         nonlocal resolver_called
         resolver_called = True
         raise AssertionError("exhausted turns must not wait for approval")
@@ -733,18 +985,11 @@ async def test_exhausted_approval_wait_returns_round_limit() -> None:
             coordinator=_ExhaustedBudgetCoordinator(),
             commit_port=_Port(),
         ),
-        request_for_prompt=lambda prompt: RunSegmentRequest(
-            session_id="session-1",
-            owner_id="owner-1",
-            owner_epoch=1,
-            state_version=initial_operation_state("run-budget"),
-            step_input=Initial(
-                input_id=f"{prompt}:initial",
-                command_batch=(),
-                mailbox_cut=0,
-            ),
-            max_rounds=2,
-        ),
+        session_id="session-1",
+        owner_id="owner-1",
+        owner_epoch=1,
+        state_version=initial_operation_state("run-budget"),
+        max_rounds=2,
         control_probe=_Probe(),
         frame_sink=_Sink(),
         committed_fact_sink=_Sink(),

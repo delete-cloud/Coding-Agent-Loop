@@ -36,6 +36,9 @@ require store-backed requests across HTTP approval flow
 - Changes in approval paths
 - New-runtime HTTP decisions acknowledged before durable mailbox admission
 - New-runtime approval waits routed through the legacy settled writer
+- Process restart strands an admitted approval because resume only watches memory
+- Timeout denial races a durable human decision under the same command identity
+- Reconstructed approval waits reset the persisted per-run round budget
 - Historical commit: `fix(approval): require store-backed requests across HTTP approval flow`
 
 # Known Fix Signals
@@ -60,3 +63,6 @@ require store-backed requests across HTTP approval flow
 - Review affected files for the same control-flow shape before shipping.
 - Confirm new-runtime HTTP approval admits the durable command before returning.
 - Confirm the process-local coordinator is only a waiter wake mechanism.
+- Confirm restart reconstructs `ApprovalResolved` from the durable mailbox.
+- Confirm timeout and HTTP admission select one durable decision under a shared lock.
+- Confirm reconstructed turns subtract the persisted `round_index` from `max_rounds`.

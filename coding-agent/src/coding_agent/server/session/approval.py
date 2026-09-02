@@ -129,49 +129,51 @@ class ApprovalOps:
         await self._assert_owner(session_id)
         session = await self.get_session_async(session_id)
         if session_serving_turn_kind(session) == "durable_segment_runner":
-            request = session.approval_coordinator.get_request(request_id)
-            if request is None:
-                logger.warning(
-                    "Approval submission failed for session %s: request %s not found",
-                    session.id,
-                    request_id,
+            async with self._lock:
+                request = session.approval_coordinator.get_request(request_id)
+                if request is None:
+                    logger.warning(
+                        "Approval submission failed for session %s: request %s not found",
+                        session.id,
+                        request_id,
+                    )
+                    return None
+                run_id = session.current_turn_id
+                if run_id is None:
+                    raise RuntimeError(
+                        "new-runtime approval requires an active root run"
+                    )
+                store = self._authoritative_store()
+                if store is None:
+                    raise RuntimeError("new-runtime approval requires a durable store")
+                authority = self._owner_authorities.get(session.id)
+                if authority is None:
+                    raise RuntimeError("new-runtime approval requires owner authority")
+                command_id, input_id = serving_approval_identity(
+                    run_id=run_id,
+                    request_id=request_id,
                 )
-                return None
-            run_id = session.current_turn_id
-            if run_id is None:
-                raise RuntimeError("new-runtime approval requires an active root run")
-            store = self._authoritative_store()
-            if store is None:
-                raise RuntimeError("new-runtime approval requires a durable store")
-            authority = self._owner_authorities.get(session.id)
-            if authority is None:
-                raise RuntimeError("new-runtime approval requires owner authority")
-            command_id, input_id = serving_approval_identity(
-                run_id=run_id,
-                request_id=request_id,
-            )
-            response = ApprovalResponse(
-                session_id=session.id,
-                request_id=request_id,
-                approved=approved,
-                feedback=feedback,
-                scope=scope,
-            )
-            await store.admit_new_runtime_command(
-                authority,
-                RuntimeCommand(
-                    command_id=command_id,
-                    command_kind="approval_decision",
-                    payload={
-                        "approved": approved,
-                        "request_id": input_id,
-                        "target_run_id": run_id,
-                    },
-                ),
-            )
-            if not session.approval_coordinator.respond(response):
-                return None
-            return response
+                response = ApprovalResponse(
+                    session_id=session.id,
+                    request_id=request_id,
+                    approved=approved,
+                    feedback=feedback,
+                    scope=scope,
+                )
+                await store.admit_new_runtime_command(
+                    authority,
+                    RuntimeCommand(
+                        command_id=command_id,
+                        command_kind="approval_decision",
+                        payload={
+                            "approved": approved,
+                            "request_id": input_id,
+                            "target_run_id": run_id,
+                        },
+                    ),
+                )
+                session.approval_coordinator.respond(response)
+                return response
         response = await self._approval_decisions().submit(
             session,
             request_id,
