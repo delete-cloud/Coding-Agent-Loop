@@ -8,14 +8,7 @@ from inspect import isawaitable
 from types import TracebackType
 from typing import Any, Protocol, cast
 
-from agentkit.runtime.contracts import (
-    BlockedOutcome,
-    CancelledOutcome,
-    CompletedOutcome,
-    FailedOutcome,
-    RoundLimitOutcome,
-    SafeYieldOutcome,
-)
+from agentkit.runtime.contracts import SegmentOutcome
 from coding_agent.adapter.types import (
     StopReason,
     TurnOutcome,
@@ -770,22 +763,10 @@ class RuntimeTurnController:
                 "RuntimeTurnController requires finalizer for after_turn"
             )
         mapped = outcome
-        if isinstance(
-            outcome,
-            (
-                CompletedOutcome,
-                FailedOutcome,
-                CancelledOutcome,
-                RoundLimitOutcome,
-                SafeYieldOutcome,
-                BlockedOutcome,
-            ),
-        ):
+        if isinstance(outcome, SegmentOutcome):
             mapped = turn_outcome_from_segment_outcome(outcome)
             if mapped is None:
-                raise TypeError(
-                    "store-backed turn cannot finalize a blocked or safe-yield outcome"
-                )
+                return
         await self.finalizer.complete(
             session,
             ctx=binding.ctx,

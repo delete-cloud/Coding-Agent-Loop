@@ -16,6 +16,7 @@ from coding_agent.executors import (
     LocalDaemonSessionRuntimeProvider,
     RunExecutorTargetError,
 )
+from coding_agent.runtime_activation import RUNTIME_VERSION_NEW
 from coding_agent.runs import (
     CloudWorkspaceRef,
     IsolationPolicy,
@@ -31,10 +32,10 @@ def _local_request() -> RunRequest:
     return _local_request_for_path("/repo")
 
 
-def _local_request_for_path(path: str) -> RunRequest:
+def _local_request_for_path(path: str, *, run_id: str = "run-1") -> RunRequest:
     return RunRequest(
         session_id="session-1",
-        run_id="run-1",
+        run_id=run_id,
         target=RunTarget(
             workspace=LocalPathWorkspaceRef(path=path),
             executor=LocalDaemonExecutorRef(),
@@ -89,6 +90,7 @@ class FakeRuntimeSession:
         self.runtime_pipeline: object | None = None
         self.runtime_ctx: object | None = None
         self.runtime_adapter: FakeRuntimeAdapter | None = None
+        self.runtime_version = "legacy"
 
     def attach_runtime_binding(
         self,
@@ -148,6 +150,73 @@ async def test_local_daemon_session_runtime_provider_reuses_cached_runtime(
     assert binding.pipeline is cached_pipeline
     assert binding.ctx is cached_ctx
     assert binding.adapter is cached_adapter
+
+
+@pytest.mark.asyncio
+async def test_new_runtime_rebuilds_adapter_for_each_run(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    session = FakeRuntimeSession()
+    session.runtime_version = RUNTIME_VERSION_NEW
+    cached_pipeline = object()
+    cached_ctx = types.SimpleNamespace(
+        config={}, tape=types.SimpleNamespace(tape_id="tape-old")
+    )
+    session.runtime_pipeline = cached_pipeline
+    session.runtime_ctx = cached_ctx
+    session.runtime_adapter = FakeRuntimeAdapter()
+    created_for: list[str] = []
+
+    async def build_new_adapter(runtime_session, request: RunRequest) -> object:
+        assert runtime_session is session
+        created_for.append(request.run_id)
+        return FakeRuntimeAdapter(result=request.run_id)
+
+    async def close_runtime(runtime_session) -> None:
+        del runtime_session
+        raise AssertionError("same-workspace runtime context must stay attached")
+
+    async def restore_tape(tape_id: str | None) -> object:
+        del tape_id
+        raise AssertionError("cached context must not restore tape")
+
+    async def persist_session(runtime_session) -> None:
+        del runtime_session
+        raise AssertionError("cached context must not persist")
+
+    def create_agent_for_session(**kwargs):
+        raise AssertionError(f"cached context must not create agent: {kwargs!r}")
+
+    provider = LocalDaemonSessionRuntimeProvider(
+        session=session,
+        resolve_environment=lambda target: target,
+        workspace_root_for_environment=lambda environment: workspace.resolve(),
+        workspace_root_for_runtime=lambda ctx: workspace.resolve(),
+        close_runtime=close_runtime,
+        create_agent_for_session=create_agent_for_session,
+        restore_tape=restore_tape,
+        persist_session=persist_session,
+        adapter_factory=lambda pipeline, ctx: FakeRuntimeAdapter(),
+        new_runtime_adapter_factory=build_new_adapter,
+    )
+
+    first = await provider.prepare_runtime(
+        _local_request_for_path(str(workspace), run_id="run-1")
+    )
+    second = await provider.prepare_runtime(
+        _local_request_for_path(str(workspace), run_id="run-2")
+    )
+
+    assert first.pipeline is cached_pipeline
+    assert first.ctx is cached_ctx
+    assert second.pipeline is cached_pipeline
+    assert second.ctx is cached_ctx
+    assert first.adapter is not second.adapter
+    assert first.adapter.result == "run-1"
+    assert second.adapter.result == "run-2"
+    assert created_for == ["run-1", "run-2"]
 
 
 @pytest.mark.asyncio

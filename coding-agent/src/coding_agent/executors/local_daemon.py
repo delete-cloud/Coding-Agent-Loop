@@ -132,6 +132,9 @@ class LocalDaemonSessionRuntimeProvider:
         ctx = session.runtime_ctx
         adapter = session.runtime_adapter
         environment = self.resolve_environment(request.target)
+        from coding_agent.runs.serving_runtime import session_serving_turn_kind
+
+        turn_kind = session_serving_turn_kind(session)
         workspace_root = self.workspace_root_for_environment(environment)
         if pipeline is not None and ctx is not None and adapter is not None:
             cached_workspace_root = self.workspace_root_for_runtime(ctx)
@@ -144,7 +147,9 @@ class LocalDaemonSessionRuntimeProvider:
                 pipeline = None
                 ctx = None
                 adapter = None
-        if pipeline is None or ctx is None or adapter is None:
+
+        context_created = pipeline is None or ctx is None
+        if context_created:
             approval_mode_map = {
                 ApprovalPolicy.YOLO: "yolo",
                 ApprovalPolicy.INTERACTIVE: "interactive",
@@ -184,20 +189,23 @@ class LocalDaemonSessionRuntimeProvider:
             if session.provider is not None:
                 llm_plugin._instance = session.provider
 
-            from coding_agent.runs.serving_runtime import session_serving_turn_kind
-
-            if session_serving_turn_kind(session) == "durable_segment_runner":
-                if self.new_runtime_adapter_factory is None:
-                    raise RuntimeError(
-                        "new-runtime sessions require DurableSegmentTurnAdapter"
-                    )
-                adapter_result = self.new_runtime_adapter_factory(session, request)
-                if isawaitable(adapter_result):
-                    adapter = await adapter_result
-                else:
-                    adapter = adapter_result
+        adapter_created = False
+        if turn_kind == "durable_segment_runner":
+            if self.new_runtime_adapter_factory is None:
+                raise RuntimeError(
+                    "new-runtime sessions require DurableSegmentTurnAdapter"
+                )
+            adapter_result = self.new_runtime_adapter_factory(session, request)
+            if isawaitable(adapter_result):
+                adapter = await adapter_result
             else:
-                adapter = self.adapter_factory(pipeline, ctx)
+                adapter = adapter_result
+            adapter_created = True
+        elif context_created or adapter is None:
+            adapter = self.adapter_factory(pipeline, ctx)
+            adapter_created = True
+
+        if context_created or adapter_created:
             session.attach_runtime_binding(
                 pipeline=pipeline,
                 ctx=ctx,

@@ -824,8 +824,10 @@ class SessionManager(
     ) -> Any:
         from coding_agent.runs.serving_runtime import (
             admit_blocked_approval,
+            approval_settlement_from_blocked,
             blocked_approval_tool,
             build_new_runtime_turn_adapter,
+            serving_approval_identity,
         )
         from coding_agent.wire.protocol import ApprovalRequest
 
@@ -849,13 +851,37 @@ class SessionManager(
                 tool=tool_name,
                 args=arguments,
             )
-            consumer = self._make_session_consumer(session)
-            response = await consumer.request_approval(approval_req)
-            return await admit_blocked_approval(
-                store,
-                authority,
+            if session.approval_coordinator.is_session_approved(approval_req):
+                return await admit_blocked_approval(
+                    store,
+                    authority,
+                    blocked,
+                    approved=True,
+                )
+            session.begin_approval_request(approval_req)
+            try:
+                response = await session.approval_coordinator.wait_for_response(
+                    approval_req.request_id,
+                    float(approval_req.timeout_seconds),
+                )
+            finally:
+                session.cleanup_approval_wait_projection(signal_event=False)
+            if response is None:
+                return await admit_blocked_approval(
+                    store,
+                    authority,
+                    blocked,
+                    approved=False,
+                )
+            command_id, _input_id = serving_approval_identity(
+                run_id=blocked.state_version.run_id,
+                request_id=approval_req.request_id,
+            )
+            return approval_settlement_from_blocked(
                 blocked,
                 approved=response.approved,
+                owner_epoch=authority.epoch,
+                command_id=command_id,
             )
 
         return build_new_runtime_turn_adapter(

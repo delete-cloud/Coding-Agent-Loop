@@ -10,6 +10,7 @@ from typing import Any, cast
 import pytest
 
 from agentkit.runtime.contracts import (
+    BlockedOutcome,
     CommitRef,
     CompletedOutcome,
     OperationStateVersion,
@@ -1151,6 +1152,43 @@ async def test_runtime_turn_controller_after_turn_maps_completed_segment_outcome
         }
     ]
     assert session.tape_id == "tape-seg"
+
+
+@pytest.mark.asyncio
+async def test_runtime_turn_controller_leaves_blocked_segment_unfinalized() -> None:
+    completions: list[object] = []
+
+    async def complete(*args: object, **kwargs: object) -> None:
+        completions.append((args, kwargs))
+
+    controller = RuntimeTurnController(
+        starter=SimpleNamespace(run_id="run-blocked", resume_context=None),
+        finalizer=SimpleNamespace(complete=complete),
+        error_handler=cast(Any, object()),
+    )
+    state = OperationStateVersion(
+        run_id="run-blocked",
+        revision=1,
+        projection_epoch=0,
+        commit_ref=CommitRef(transition_id="run-blocked:blocked"),
+        value={},
+    )
+
+    await controller.after_turn(
+        FakeTurnSession(id="session-1", tape_id=None),
+        FakeRuntimeBinding(
+            ctx=FakeRuntimeContext("tape-blocked"),
+            adapter=FakeRuntimeAdapter(),
+        ),
+        BlockedOutcome(
+            state_version=state,
+            reason="indeterminate_dispatch",
+            effect=None,
+            steps_taken=1,
+        ),
+    )
+
+    assert completions == []
 
 
 @pytest.mark.asyncio

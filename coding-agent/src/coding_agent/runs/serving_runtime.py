@@ -34,6 +34,7 @@ from agentkit.runtime.contracts import (
     OperationStateVersion,
     ProviderStopMetadata,
     RunSegmentRequest,
+    RoundLimitOutcome,
     RuntimeCommand,
     SegmentOutcome,
     StreamFrame,
@@ -75,6 +76,8 @@ class DurableSegmentTurnAdapter:
 
     async def run_turn(self, prompt: str) -> SegmentOutcome:
         request = self.request_for_prompt(prompt)
+        round_budget = request.max_rounds
+        completed_rounds = 0
         while True:
             outcome = await self.runner.run(
                 request,
@@ -88,10 +91,19 @@ class DurableSegmentTurnAdapter:
                 or outcome.effect is None
                 or self.resolve_blocked is None
             ):
-                return outcome
-            remaining_rounds = request.max_rounds - outcome.steps_taken
+                if completed_rounds == 0:
+                    return outcome
+                return replace(
+                    outcome,
+                    steps_taken=completed_rounds + outcome.steps_taken,
+                )
+            completed_rounds += outcome.steps_taken
+            remaining_rounds = round_budget - completed_rounds
             if remaining_rounds <= 0:
-                return outcome
+                return RoundLimitOutcome(
+                    state_version=outcome.state_version,
+                    steps_taken=completed_rounds,
+                )
             settlement = await self.resolve_blocked(outcome, request)
             request = replace(
                 request,
@@ -124,17 +136,6 @@ class ServingControlProbe:
 class ServingNullSink:
     async def emit(self, _item: object) -> None:
         return None
-
-
-class UnwiredServingModelAdapter:
-    async def generate(
-        self,
-        request: object,
-        frame_sink: object,
-        cancellation: object,
-    ) -> object:
-        del request, frame_sink, cancellation
-        raise RuntimeError("new-runtime serving requires a ModelAdapter")
 
 
 class ProviderModelAdapter:
@@ -337,7 +338,20 @@ def session_model_adapter(session: Any, executor: CoreToolExecutor) -> object:
             tools=serving_tool_schemas(executor),
             approval_policy=policy,
         )
-    return UnwiredServingModelAdapter()
+    raise RuntimeError("new-runtime serving requires a ModelAdapter")
+
+
+def serving_approval_identity(
+    *,
+    run_id: str,
+    request_id: str,
+) -> tuple[str, str]:
+    if not run_id:
+        raise ValueError("serving approval requires a run_id")
+    if not request_id:
+        raise ValueError("serving approval requires a request_id")
+    command_id = f"serving-approval:{request_id}"
+    return command_id, f"{run_id}:approval:{command_id}"
 
 
 def approval_settlement_from_blocked(
@@ -349,9 +363,14 @@ def approval_settlement_from_blocked(
 ) -> ApprovalSettlement:
     if blocked.effect is None:
         raise ValueError("blocked approval outcome requires an effect")
-    tool_name = _blocked_tool_name(blocked)
-    resolved_command_id = command_id or f"serving-approval:{blocked.effect.effect_id}"
+    request_id = blocked.effect.approval_request_id or blocked.effect.tool_call_id
+    default_command_id, _input_id = serving_approval_identity(
+        run_id=blocked.state_version.run_id,
+        request_id=request_id,
+    )
+    resolved_command_id = command_id or default_command_id
     input_id = f"{blocked.state_version.run_id}:approval:{resolved_command_id}"
+    tool_name, _arguments = blocked_approval_tool(blocked)
     return ApprovalSettlement(
         input_id=input_id,
         command_id=resolved_command_id,
@@ -403,11 +422,6 @@ def blocked_approval_tool(blocked: BlockedOutcome) -> tuple[str, dict[str, Any]]
     if not isinstance(raw_arguments, Mapping):
         raise TypeError("pending effect plan arguments must be a mapping")
     return tool_name, {str(key): value for key, value in raw_arguments.items()}
-
-
-def _blocked_tool_name(blocked: BlockedOutcome) -> str:
-    tool_name, _arguments = blocked_approval_tool(blocked)
-    return tool_name
 
 
 def _blocked_payload(blocked: BlockedOutcome) -> Mapping[str, Any]:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,6 +11,7 @@ from agentkit.providers.models import DoneEvent, TextEvent, ToolCallEvent
 from agentkit.runtime import (
     BlockedOutcome,
     CompletedOutcome,
+    RoundLimitOutcome,
     SegmentCoordinator,
 )
 from agentkit.runtime.contracts import (
@@ -166,7 +168,7 @@ def test_generic_rank_does_not_treat_settled_as_completed() -> None:
 async def test_durable_segment_turn_adapter_does_not_use_pipeline() -> None:
     adapter = DurableSegmentTurnAdapter(
         runner=DurableSegmentRunner(coordinator=_Coordinator(), commit_port=_Port()),
-        request_for_prompt=lambda prompt: prompt,
+        request_for_prompt=lambda prompt: SimpleNamespace(max_rounds=1),
         control_probe=_Probe(),
         frame_sink=_Sink(),
         committed_fact_sink=_Sink(),
@@ -186,6 +188,7 @@ async def test_serving_factory_builds_coordinator_and_commit_port(
     adapter = build_new_runtime_turn_adapter(
         session=_Session(
             RUNTIME_VERSION_NEW,
+            provider=_StreamProvider(),
             default_run_target=_local_default_run_target(tmp_path),
         ),
         run_id="run-serving",
@@ -213,6 +216,20 @@ def test_session_model_adapter_wraps_stream_provider(tmp_path: Path) -> None:
         executor,
     )
     assert isinstance(adapter, ProviderModelAdapter)
+
+
+def test_session_model_adapter_rejects_missing_provider(tmp_path: Path) -> None:
+    session = _Session(
+        RUNTIME_VERSION_NEW,
+        default_run_target=_local_default_run_target(tmp_path),
+    )
+    executor = session_tool_executor(session)
+
+    with pytest.raises(
+        RuntimeError,
+        match="new-runtime serving requires a ModelAdapter",
+    ):
+        session_model_adapter(session, executor)
 
 
 def test_session_workspace_root_uses_run_target(tmp_path: Path) -> None:
@@ -503,7 +520,7 @@ async def test_adapter_does_not_resume_indeterminate_block() -> None:
             coordinator=_BlockedCoordinator(blocked),
             commit_port=_Port(),
         ),
-        request_for_prompt=lambda prompt: prompt,
+        request_for_prompt=lambda prompt: SimpleNamespace(max_rounds=1),
         control_probe=_Probe(),
         frame_sink=_Sink(),
         committed_fact_sink=_Sink(),
@@ -514,9 +531,28 @@ async def test_adapter_does_not_resume_indeterminate_block() -> None:
     assert calls == []
 
 
+class _NewRuntimeApprovalStore:
+    def __init__(self) -> None:
+        self.admitted: list[tuple[OwnerAuthority, object]] = []
+
+    async def load_operation_state(
+        self,
+        session_id: str,
+        run_id: str,
+    ) -> None:
+        del session_id, run_id
+        return None
+
+    async def admit_new_runtime_command(
+        self,
+        authority: OwnerAuthority,
+        command: object,
+    ) -> None:
+        self.admitted.append((authority, command))
+
+
 @pytest.mark.asyncio
-async def test_session_manager_new_runtime_adapter_wires_resolve_blocked(
-    tmp_path: Path,
+async def test_new_runtime_http_approval_bypasses_legacy_writer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
@@ -529,28 +565,71 @@ async def test_session_manager_new_runtime_adapter_wires_resolve_blocked(
         "coding_agent.runs.serving_runtime.build_new_runtime_turn_adapter",
         fake_build,
     )
-    store, owner = await _open_store("sqlite", tmp_path)
     from coding_agent.server.session.manager import SessionManager
 
     manager = SessionManager()
     session_id = await manager.create_session()
     session = await manager.get_session_async(session_id)
+    session.runtime_version = RUNTIME_VERSION_NEW
+    session.current_turn_id = "run-indeterminate"
+    store = _NewRuntimeApprovalStore()
+    owner = OwnerAuthority(session_id=session_id, owner_id="owner-1", epoch=1)
     monkeypatch.setattr(manager, "_authoritative_store", lambda: store)
     manager._owner_authorities[session_id] = owner
+
+    def fail_legacy_consumer(_session: object) -> object:
+        raise AssertionError("new-runtime approval must not use the legacy consumer")
+
+    monkeypatch.setattr(
+        manager,
+        "_make_session_consumer",
+        fail_legacy_consumer,
+    )
+
     adapter = await manager._build_new_runtime_turn_adapter(
         session,
-        SimpleNamespace(run_id="run-http-approval"),
+        SimpleNamespace(run_id="run-indeterminate"),
     )
-    assert captured["resolve_blocked"] is not None
-    assert adapter.resolve_blocked is not None
+    blocked = _blocked_outcome(reason="approval_required")
+    resolver = adapter.resolve_blocked
+    assert resolver is not None
+    resolution = asyncio.create_task(resolver(blocked, SimpleNamespace(max_rounds=5)))
+    for _ in range(10):
+        if session.approval_coordinator.get_request("call-1") is not None:
+            break
+        if resolution.done():
+            await resolution
+        await asyncio.sleep(0)
+    assert session.approval_coordinator.get_request("call-1") is not None
+
+    response = await manager.submit_approval_response(
+        session_id=session_id,
+        request_id="call-1",
+        approved=True,
+    )
+    assert len(store.admitted) == 1
+    settlement = await resolution
+
+    assert response is not None
+    assert response.approved is True
+    assert settlement.approved is True
+    assert len(store.admitted) == 1
+    admitted_authority, command = store.admitted[0]
+    assert admitted_authority == owner
+    assert command.command_kind == "approval_decision"
+    assert command.payload == {
+        "approved": True,
+        "request_id": settlement.input_id,
+        "target_run_id": "run-indeterminate",
+    }
 
 
-def test_approval_command_id_includes_effect_identity() -> None:
+def test_approval_command_id_includes_request_identity() -> None:
     first = approval_settlement_from_blocked(
         _blocked_outcome(
             reason="approval_required",
             effect_id="effect-a",
-            tool_call_id="call-1",
+            tool_call_id="call-a",
         ),
         approved=True,
         owner_epoch=1,
@@ -559,14 +638,14 @@ def test_approval_command_id_includes_effect_identity() -> None:
         _blocked_outcome(
             reason="approval_required",
             effect_id="effect-b",
-            tool_call_id="call-1",
+            tool_call_id="call-b",
         ),
         approved=True,
         owner_epoch=1,
     )
     assert first.command_id != second.command_id
-    assert "effect-a" in first.command_id
-    assert "effect-b" in second.command_id
+    assert "call-a" in first.command_id
+    assert "call-b" in second.command_id
 
 
 class _BudgetCoordinator:
@@ -627,3 +706,53 @@ async def test_approval_resume_uses_remaining_round_budget() -> None:
     outcome = await adapter.run_turn("hello")
     assert isinstance(outcome, CompletedOutcome)
     assert coordinator.max_rounds == [5, 3]
+    assert outcome.steps_taken == 3
+
+
+class _ExhaustedBudgetCoordinator:
+    async def run(self, request, control_probe, frame_sink, committed_fact_sink):
+        del control_probe, frame_sink, committed_fact_sink
+        return _blocked_outcome(
+            reason="approval_required",
+            steps_taken=request.max_rounds,
+        )
+
+
+@pytest.mark.asyncio
+async def test_exhausted_approval_wait_returns_round_limit() -> None:
+    resolver_called = False
+
+    async def resolve_blocked(blocked: BlockedOutcome, request: object) -> object:
+        del blocked, request
+        nonlocal resolver_called
+        resolver_called = True
+        raise AssertionError("exhausted turns must not wait for approval")
+
+    adapter = DurableSegmentTurnAdapter(
+        runner=DurableSegmentRunner(
+            coordinator=_ExhaustedBudgetCoordinator(),
+            commit_port=_Port(),
+        ),
+        request_for_prompt=lambda prompt: RunSegmentRequest(
+            session_id="session-1",
+            owner_id="owner-1",
+            owner_epoch=1,
+            state_version=initial_operation_state("run-budget"),
+            step_input=Initial(
+                input_id=f"{prompt}:initial",
+                command_batch=(),
+                mailbox_cut=0,
+            ),
+            max_rounds=2,
+        ),
+        control_probe=_Probe(),
+        frame_sink=_Sink(),
+        committed_fact_sink=_Sink(),
+        resolve_blocked=resolve_blocked,
+    )
+
+    outcome = await adapter.run_turn("hello")
+
+    assert isinstance(outcome, RoundLimitOutcome)
+    assert outcome.steps_taken == 2
+    assert resolver_called is False
