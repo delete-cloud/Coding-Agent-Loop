@@ -8,6 +8,14 @@ from inspect import isawaitable
 from types import TracebackType
 from typing import Any, Protocol, cast
 
+from agentkit.runtime.contracts import (
+    BlockedOutcome,
+    CancelledOutcome,
+    CompletedOutcome,
+    FailedOutcome,
+    RoundLimitOutcome,
+    SafeYieldOutcome,
+)
 from coding_agent.adapter.types import (
     StopReason,
     TurnOutcome,
@@ -762,7 +770,17 @@ class RuntimeTurnController:
                 "RuntimeTurnController requires finalizer for after_turn"
             )
         mapped = outcome
-        if not isinstance(outcome, TurnOutcome):
+        if isinstance(
+            outcome,
+            (
+                CompletedOutcome,
+                FailedOutcome,
+                CancelledOutcome,
+                RoundLimitOutcome,
+                SafeYieldOutcome,
+                BlockedOutcome,
+            ),
+        ):
             mapped = turn_outcome_from_segment_outcome(outcome)
             if mapped is None:
                 raise TypeError(
