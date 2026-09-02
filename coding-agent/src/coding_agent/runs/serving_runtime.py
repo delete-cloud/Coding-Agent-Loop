@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
+from pathlib import Path
+import asyncio
 from typing import Any
 
+from agentkit.providers.models import (
+    DoneEvent,
+    TextEvent,
+    ThinkingEvent,
+    ToolCallEvent,
+    UsageEvent,
+)
 from agentkit.runtime import AgentEngine, SegmentCoordinator
 from agentkit.runtime.contracts import (
     CommitRef,
@@ -14,15 +23,23 @@ from agentkit.runtime.contracts import (
     ControlGeneration,
     ControlProbe,
     ControlSnapshot,
-    EffectFailedResult,
-    FailureReport,
     FrameSink,
     Initial,
+    ModelGenerationResult,
+    ModelToolCall,
+    ModelUsage,
     OperationStateVersion,
+    ProviderStopMetadata,
     RunSegmentRequest,
     SegmentOutcome,
+    StreamFrame,
+    StreamFrameKind,
 )
-from coding_agent.executors.durable import DurableEffectExecutor
+from coding_agent.executors.durable import (
+    DurableEffectExecutor,
+    LocalToolEffectBackend,
+)
+from coding_agent.plugins.core_tools import CoreToolExecutor
 from coding_agent.runtime_activation import serving_turn_kind
 from coding_agent.runs.turn_execution import DurableSegmentRunner
 from coding_agent.server.stores.session_owner_store import OwnerAuthority
@@ -61,11 +78,15 @@ def session_serving_turn_kind(session: Any) -> str:
 
 
 class ServingControlProbe:
+    def __init__(self) -> None:
+        self._never = asyncio.Event()
+
     def observe(self) -> ControlSnapshot:
         return ControlSnapshot(generation=ControlGeneration(0), raised=False)
 
     async def wait(self, after: ControlGeneration) -> ControlSnapshot:
         del after
+        await self._never.wait()
         return self.observe()
 
 
@@ -85,17 +106,79 @@ class UnwiredServingModelAdapter:
         raise RuntimeError("new-runtime serving requires a ModelAdapter")
 
 
-class UnwiredServingEffectBackend:
-    async def execute(
-        self, invocation: object, cancellation: object
-    ) -> EffectFailedResult:
-        del invocation, cancellation
-        return EffectFailedResult(
-            error=FailureReport(
-                code="serving_effect_backend_unwired",
-                message="new-runtime serving has no effect backend yet",
-            )
+class ProviderModelAdapter:
+    """Adapt an LLMProvider.stream surface into the frozen ModelAdapter."""
+
+    def __init__(self, provider: Any) -> None:
+        self._provider = provider
+
+    async def generate(
+        self,
+        request: Any,
+        frame_sink: FrameSink,
+        cancellation: object,
+    ) -> ModelGenerationResult:
+        del cancellation
+        messages = _messages_from_model_request(request)
+        texts: list[str] = []
+        thinking: list[str] = []
+        calls: list[ModelToolCall] = []
+        input_tokens = 0
+        output_tokens = 0
+        frame_index = 0
+        async for event in self._provider.stream(messages):
+            if isinstance(event, TextEvent) and event.text:
+                texts.append(event.text)
+                await frame_sink.emit(
+                    StreamFrame(
+                        frame_id=f"{request.request_id}:frame:{frame_index}",
+                        kind=StreamFrameKind.TOKEN_DELTA,
+                        payload={"text": event.text},
+                    )
+                )
+                frame_index += 1
+            elif isinstance(event, ThinkingEvent) and event.text:
+                thinking.append(event.text)
+            elif isinstance(event, ToolCallEvent) and event.tool_call_id and event.name:
+                calls.append(
+                    ModelToolCall(
+                        tool_call_id=event.tool_call_id,
+                        name=event.name,
+                        arguments=event.arguments or {},
+                    )
+                )
+            elif isinstance(event, UsageEvent):
+                input_tokens = event.input_tokens
+                output_tokens = event.output_tokens
+            elif isinstance(event, DoneEvent):
+                break
+        return ModelGenerationResult(
+            result_id=f"{request.request_id}:result",
+            request_id=request.request_id,
+            assistant_content="".join(texts),
+            finalized_thinking="".join(thinking) or None,
+            tool_calls=tuple(calls),
+            usage=ModelUsage(input_tokens=input_tokens, output_tokens=output_tokens),
+            provider_stop=ProviderStopMetadata(reason="tool_use" if calls else "stop"),
         )
+
+
+def _messages_from_model_request(request: Any) -> list[dict[str, Any]]:
+    context = getattr(request, "context", {})
+    if not isinstance(context, Mapping):
+        return []
+    raw_messages = context.get("messages", ())
+    messages: list[dict[str, Any]] = []
+    if isinstance(raw_messages, list | tuple):
+        for message in raw_messages:
+            if not isinstance(message, Mapping):
+                continue
+            role = message.get("role") or "assistant"
+            content = message.get("content")
+            if content is None:
+                content = message.get("text") or ""
+            messages.append({"role": str(role), "content": str(content)})
+    return messages
 
 
 def commit_port_for_store(store: object, session_state: Mapping[str, object]) -> object:
@@ -111,7 +194,15 @@ def session_model_adapter(session: Any) -> object:
     provider = getattr(session, "provider", None)
     if callable(getattr(provider, "generate", None)):
         return provider
+    if callable(getattr(provider, "stream", None)):
+        return ProviderModelAdapter(provider)
     return UnwiredServingModelAdapter()
+
+
+def session_effect_backend(session: Any) -> LocalToolEffectBackend:
+    repo_path = getattr(session, "repo_path", None)
+    workspace = Path(repo_path) if repo_path is not None else Path(".")
+    return LocalToolEffectBackend(CoreToolExecutor(workspace_root=workspace))
 
 
 def initial_operation_state(run_id: str) -> OperationStateVersion:
@@ -150,7 +241,7 @@ def build_new_runtime_turn_adapter(
         store,  # type: ignore[arg-type]
         owner_id=authority.owner_id,
         executor_id="local-daemon",
-        backend=UnwiredServingEffectBackend(),
+        backend=session_effect_backend(session),
         reservation_lease=timedelta(seconds=30),
     )
     coordinator = SegmentCoordinator(
@@ -164,12 +255,20 @@ def build_new_runtime_turn_adapter(
     max_rounds = getattr(session, "max_steps", None) or 30
 
     def request_for_prompt(prompt: str) -> RunSegmentRequest:
-        del prompt
+        state = resolved_state
+        if prompt.strip():
+            value = dict(state.value)
+            context = dict(value.get("context") or {})
+            messages = list(context.get("messages") or ())
+            messages.append({"role": "user", "content": prompt})
+            context["messages"] = tuple(messages)
+            value["context"] = context
+            state = replace(state, value=value)
         return RunSegmentRequest(
             session_id=authority.session_id,
             owner_id=authority.owner_id,
             owner_epoch=authority.epoch,
-            state_version=resolved_state,
+            state_version=state,
             step_input=Initial(
                 input_id=f"{run_id}:initial",
                 command_batch=(),

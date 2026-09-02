@@ -5,11 +5,16 @@ from pathlib import Path
 
 import pytest
 
-from agentkit.runtime import SegmentCoordinator
+from agentkit.providers.models import DoneEvent, TextEvent
+from agentkit.runtime import CompletedOutcome, FailedOutcome, SegmentCoordinator
+from coding_agent.executors.durable import LocalToolEffectBackend
 from coding_agent.runtime_activation import RUNTIME_VERSION_NEW
 from coding_agent.runs.serving_runtime import (
     DurableSegmentTurnAdapter,
+    ProviderModelAdapter,
     build_new_runtime_turn_adapter,
+    session_effect_backend,
+    session_model_adapter,
     session_serving_turn_kind,
 )
 from coding_agent.runs.turn_execution import DurableSegmentRunner
@@ -25,6 +30,18 @@ from tests.coding_agent.test_harness_p2_fact_source import (
 @dataclass
 class _Session:
     runtime_version: str
+    provider: object | None = None
+    repo_path: Path | None = None
+
+
+class _StreamProvider:
+    model_name = "stub"
+    max_context_size = 1024
+
+    async def stream(self, messages, tools=None, **kwargs):
+        del messages, tools, kwargs
+        yield TextEvent(text="done")
+        yield DoneEvent()
 
 
 class _Probe:
@@ -115,3 +132,39 @@ async def test_serving_factory_builds_coordinator_and_commit_port(
     assert owner.session_id == SESSION_ID
     assert owner.owner_id == OWNER_ID
     assert isinstance(owner, OwnerAuthority)
+
+
+def test_session_model_adapter_wraps_stream_provider() -> None:
+    adapter = session_model_adapter(
+        _Session(RUNTIME_VERSION_NEW, provider=_StreamProvider())
+    )
+    assert isinstance(adapter, ProviderModelAdapter)
+
+
+def test_session_effect_backend_uses_local_tools() -> None:
+    backend = session_effect_backend(_Session(RUNTIME_VERSION_NEW))
+    assert isinstance(backend, LocalToolEffectBackend)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("store_kind", ["sqlite", "pg"])
+async def test_new_runtime_run_turn_reaches_completed_or_named_failure(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store, owner = await _open_store(store_kind, tmp_path)
+    adapter = build_new_runtime_turn_adapter(
+        session=_Session(RUNTIME_VERSION_NEW, provider=_StreamProvider()),
+        run_id="run-serving-turn",
+        authority=owner,
+        store=store,
+        state_version=None,
+    )
+    outcome = await adapter.run_turn("hello")
+    if isinstance(outcome, FailedOutcome):
+        assert outcome.error.code
+        assert outcome.error.code != "serving_effect_backend_unwired"
+        return
+    assert isinstance(outcome, CompletedOutcome)
+    assert outcome.final_message == "done"
+    assert outcome.stop_reason == "no_tool_calls"
