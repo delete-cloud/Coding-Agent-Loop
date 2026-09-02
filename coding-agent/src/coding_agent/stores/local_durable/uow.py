@@ -57,6 +57,7 @@ from coding_agent.stores.runtime_store import (
     _json_object_from_sql,
     _json_to_sql,
     effect_status_may_replace,
+    legacy_settled_slot_may_replace,
     format_u64,
     runtime_command_from_mailbox_payload,
     runtime_command_invalidates_dispatch,
@@ -2574,10 +2575,17 @@ class LocalUnitOfWorkMixin:
                     """,
                     (authority.session_id, unit.effect.effect_id),
                 ).fetchone()
-                if existing_effect is None or effect_status_may_replace(
-                    current=existing_effect["status"],
-                    incoming=unit.effect.status,
-                ):
+                current_status = (
+                    None if existing_effect is None else str(existing_effect["status"])
+                )
+                if unit.effect.status == "settled":
+                    allowed = legacy_settled_slot_may_replace(current_status)
+                else:
+                    allowed = current_status is None or effect_status_may_replace(
+                        current=current_status,
+                        incoming=unit.effect.status,
+                    )
+                if allowed:
                     connection.execute(
                         """
                         INSERT INTO session_effect_slots (

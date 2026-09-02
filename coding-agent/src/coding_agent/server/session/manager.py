@@ -665,6 +665,7 @@ class SessionManager(
                     consumer=consumer,
                 )
             ),
+            new_runtime_adapter_factory=self._build_new_runtime_turn_adapter,
         )
         self._runtime_checkpoint_restore_service = RuntimeCheckpointRestoreService(
             checkpoint_service=lambda: self._checkpoint_service,
@@ -814,4 +815,26 @@ class SessionManager(
             owner_id=owner_id,
             fencing_token=fencing_token,
             owner_lease_seconds=owner_lease_seconds,
+        )
+
+    async def _build_new_runtime_turn_adapter(
+        self,
+        session: Session,
+        request: Any,
+    ) -> Any:
+        from coding_agent.runs.serving_runtime import build_new_runtime_turn_adapter
+
+        store = self._authoritative_store()
+        if store is None:
+            raise RuntimeError("new-runtime serving requires a durable store")
+        authority = self._owner_authorities.get(session.id)
+        if authority is None:
+            raise RuntimeError("new-runtime serving requires owner authority")
+        state = await store.load_operation_state(session.id, request.run_id)
+        return build_new_runtime_turn_adapter(
+            session=session,
+            run_id=request.run_id,
+            authority=authority,
+            store=store,
+            state_version=state,
         )

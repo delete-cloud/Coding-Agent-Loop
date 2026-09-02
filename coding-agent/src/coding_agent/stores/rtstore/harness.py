@@ -231,7 +231,6 @@ _EFFECT_STATUS_RANKS: Final[dict[str, int]] = {
     "unknown": 3,
     "failed": 3,
     "completed": 4,
-    "settled": 4,
 }
 
 
@@ -241,7 +240,13 @@ def effect_status_rank(status: str) -> int:
 
 
 def effect_status_may_replace(*, current: str, incoming: str) -> bool:
+    if current == "settled" or incoming == "settled":
+        return False
     return effect_status_rank(incoming) >= effect_status_rank(current)
+
+
+def legacy_settled_slot_may_replace(current: str | None) -> bool:
+    return current is None or current == "prepared"
 
 
 def receipt_generation_may_replace(*, current: str, incoming: str) -> bool:

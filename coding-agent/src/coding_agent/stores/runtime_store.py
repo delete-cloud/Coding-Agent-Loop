@@ -57,6 +57,7 @@ from coding_agent.stores.rtstore.harness import (
     effect_status_may_replace as effect_status_may_replace,
     effect_slot_from_mutation as effect_slot_from_mutation,
     effect_status_rank as effect_status_rank,
+    legacy_settled_slot_may_replace as legacy_settled_slot_may_replace,
     format_u64 as format_u64,
     mailbox_slot_from_disposition as mailbox_slot_from_disposition,
     runtime_command_from_mailbox_payload as runtime_command_from_mailbox_payload,

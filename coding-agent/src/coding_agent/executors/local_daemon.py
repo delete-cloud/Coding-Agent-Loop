@@ -71,7 +71,7 @@ RuntimeFactory = Callable[..., tuple[object, object]]
 RuntimeAdapterFactory = Callable[[object, object], RuntimeTurnAdapter]
 NewRuntimeAdapterFactory = Callable[
     [LocalDaemonRuntimeSession, RunRequest],
-    RuntimeTurnAdapter,
+    Awaitable[RuntimeTurnAdapter] | RuntimeTurnAdapter,
 ]
 SemanticTopicStoreFactory = Callable[[], object | None]
 
@@ -191,7 +191,11 @@ class LocalDaemonSessionRuntimeProvider:
                     raise RuntimeError(
                         "new-runtime sessions require DurableSegmentTurnAdapter"
                     )
-                adapter = self.new_runtime_adapter_factory(session, request)
+                adapter_result = self.new_runtime_adapter_factory(session, request)
+                if isawaitable(adapter_result):
+                    adapter = await adapter_result
+                else:
+                    adapter = adapter_result
             else:
                 adapter = self.adapter_factory(pipeline, ctx)
             session.attach_runtime_binding(

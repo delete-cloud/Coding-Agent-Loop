@@ -16,6 +16,7 @@ from coding_agent.executors.local_daemon import (
     LocalDaemonRuntimePreparation,
     LocalDaemonSessionRuntimeProvider,
     LocalDaemonRuntimeSession,
+    NewRuntimeAdapterFactory,
     RuntimeTurnAdapter,
 )
 from coding_agent.runs.coordinator import RunRequest
@@ -82,6 +83,7 @@ class LocalDaemonRuntimePreparationService:
             consumer=consumer,
         )
     )
+    new_runtime_adapter_factory: NewRuntimeAdapterFactory | None = None
 
     async def prepare_runtime(
         self,
@@ -107,6 +109,7 @@ class LocalDaemonRuntimePreparationService:
                 consumer,
             ),
             semantic_topic_store_factory=self.semantic_topic_store_factory,
+            new_runtime_adapter_factory=self.new_runtime_adapter_factory,
         ).prepare_runtime(request)
 
     async def build_runtime(
