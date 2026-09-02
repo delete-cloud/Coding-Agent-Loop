@@ -82,7 +82,12 @@ class DurableSegmentTurnAdapter:
                 self.frame_sink,
                 self.committed_fact_sink,
             )
-            if not isinstance(outcome, BlockedOutcome) or self.resolve_blocked is None:
+            if (
+                not isinstance(outcome, BlockedOutcome)
+                or outcome.reason != "approval_required"
+                or outcome.effect is None
+                or self.resolve_blocked is None
+            ):
                 return outcome
             settlement = await self.resolve_blocked(outcome, request)
             request = replace(
@@ -387,7 +392,23 @@ async def admit_blocked_approval(
     return settlement
 
 
+def blocked_approval_tool(blocked: BlockedOutcome) -> tuple[str, dict[str, Any]]:
+    payload = _blocked_payload(blocked)
+    tool_name = payload.get("tool_name")
+    if not isinstance(tool_name, str) or not tool_name:
+        raise ValueError("pending effect plan requires a tool_name")
+    raw_arguments = payload.get("arguments") or {}
+    if not isinstance(raw_arguments, Mapping):
+        raise TypeError("pending effect plan arguments must be a mapping")
+    return tool_name, {str(key): value for key, value in raw_arguments.items()}
+
+
 def _blocked_tool_name(blocked: BlockedOutcome) -> str:
+    tool_name, _arguments = blocked_approval_tool(blocked)
+    return tool_name
+
+
+def _blocked_payload(blocked: BlockedOutcome) -> Mapping[str, Any]:
     runtime = blocked.state_version.value.get("_agentkit_runtime")
     if not isinstance(runtime, Mapping):
         raise ValueError("blocked state is missing engine runtime")
@@ -400,10 +421,7 @@ def _blocked_tool_name(blocked: BlockedOutcome) -> str:
     payload = plan.get("payload")
     if not isinstance(payload, Mapping):
         raise TypeError("pending effect plan payload must be a mapping")
-    tool_name = payload.get("tool_name")
-    if not isinstance(tool_name, str) or not tool_name:
-        raise ValueError("pending effect plan requires a tool_name")
-    return tool_name
+    return payload
 
 
 def initial_operation_state(run_id: str) -> OperationStateVersion:

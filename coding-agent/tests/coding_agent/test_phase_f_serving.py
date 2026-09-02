@@ -12,6 +12,7 @@ from agentkit.runtime import (
     CompletedOutcome,
     SegmentCoordinator,
 )
+from agentkit.runtime.contracts import CommitRef, EffectReference, OperationStateVersion
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.executors.durable import LocalToolEffectBackend
 from coding_agent.runtime_activation import RUNTIME_VERSION_NEW
@@ -427,3 +428,88 @@ async def test_interactive_deny_resumes_to_completed(
     assert isinstance(outcome, CompletedOutcome)
     assert outcome.final_message == "done"
     assert provider.rounds == 2
+
+
+def _blocked_outcome(*, reason: str) -> BlockedOutcome:
+    return BlockedOutcome(
+        state_version=OperationStateVersion(
+            run_id="run-indeterminate",
+            revision=1,
+            projection_epoch=0,
+            commit_ref=CommitRef(transition_id="run-indeterminate:t1"),
+            value={},
+        ),
+        reason=reason,
+        effect=EffectReference(
+            effect_id="effect-1",
+            attempt_id="attempt-1",
+            tool_call_id="call-1",
+        ),
+        steps_taken=1,
+    )
+
+
+class _BlockedCoordinator:
+    def __init__(self, outcome: BlockedOutcome) -> None:
+        self.outcome = outcome
+
+    async def run(self, request, control_probe, frame_sink, committed_fact_sink):
+        del request, control_probe, frame_sink, committed_fact_sink
+        return self.outcome
+
+
+@pytest.mark.asyncio
+async def test_adapter_does_not_resume_indeterminate_block() -> None:
+    blocked = _blocked_outcome(reason="indeterminate_dispatch")
+    calls: list[str] = []
+
+    async def resolve_blocked(outcome: BlockedOutcome, request: object) -> object:
+        del request
+        calls.append(outcome.reason)
+        raise AssertionError("indeterminate blocks must not resume as approval")
+
+    adapter = DurableSegmentTurnAdapter(
+        runner=DurableSegmentRunner(
+            coordinator=_BlockedCoordinator(blocked),
+            commit_port=_Port(),
+        ),
+        request_for_prompt=lambda prompt: prompt,
+        control_probe=_Probe(),
+        frame_sink=_Sink(),
+        committed_fact_sink=_Sink(),
+        resolve_blocked=resolve_blocked,
+    )
+    outcome = await adapter.run_turn("hello")
+    assert outcome is blocked
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_session_manager_new_runtime_adapter_wires_resolve_blocked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_build(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return SimpleNamespace(resolve_blocked=kwargs.get("resolve_blocked"))
+
+    monkeypatch.setattr(
+        "coding_agent.runs.serving_runtime.build_new_runtime_turn_adapter",
+        fake_build,
+    )
+    store, owner = await _open_store("sqlite", tmp_path)
+    from coding_agent.server.session.manager import SessionManager
+
+    manager = SessionManager()
+    session_id = await manager.create_session()
+    session = await manager.get_session_async(session_id)
+    monkeypatch.setattr(manager, "_authoritative_store", lambda: store)
+    manager._owner_authorities[session_id] = owner
+    adapter = await manager._build_new_runtime_turn_adapter(
+        session,
+        SimpleNamespace(run_id="run-http-approval"),
+    )
+    assert captured["resolve_blocked"] is not None
+    assert adapter.resolve_blocked is not None

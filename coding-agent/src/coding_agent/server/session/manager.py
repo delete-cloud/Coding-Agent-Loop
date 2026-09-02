@@ -822,7 +822,12 @@ class SessionManager(
         session: Session,
         request: Any,
     ) -> Any:
-        from coding_agent.runs.serving_runtime import build_new_runtime_turn_adapter
+        from coding_agent.runs.serving_runtime import (
+            admit_blocked_approval,
+            blocked_approval_tool,
+            build_new_runtime_turn_adapter,
+        )
+        from coding_agent.wire.protocol import ApprovalRequest
 
         store = self._authoritative_store()
         if store is None:
@@ -831,10 +836,33 @@ class SessionManager(
         if authority is None:
             raise RuntimeError("new-runtime serving requires owner authority")
         state = await store.load_operation_state(session.id, request.run_id)
+
+        async def resolve_blocked(blocked: Any, _request: Any) -> Any:
+            if blocked.effect is None:
+                raise ValueError("blocked approval outcome requires an effect")
+            tool_name, arguments = blocked_approval_tool(blocked)
+            approval_req = ApprovalRequest(
+                session_id=session.id,
+                request_id=(
+                    blocked.effect.approval_request_id or blocked.effect.tool_call_id
+                ),
+                tool=tool_name,
+                args=arguments,
+            )
+            consumer = self._make_session_consumer(session)
+            response = await consumer.request_approval(approval_req)
+            return await admit_blocked_approval(
+                store,
+                authority,
+                blocked,
+                approved=response.approved,
+            )
+
         return build_new_runtime_turn_adapter(
             session=session,
             run_id=request.run_id,
             authority=authority,
             store=store,
             state_version=state,
+            resolve_blocked=resolve_blocked,
         )
