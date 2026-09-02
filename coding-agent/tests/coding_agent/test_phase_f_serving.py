@@ -12,7 +12,13 @@ from agentkit.runtime import (
     CompletedOutcome,
     SegmentCoordinator,
 )
-from agentkit.runtime.contracts import CommitRef, EffectReference, OperationStateVersion
+from agentkit.runtime.contracts import (
+    CommitRef,
+    EffectReference,
+    Initial,
+    OperationStateVersion,
+    RunSegmentRequest,
+)
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.executors.durable import LocalToolEffectBackend
 from coding_agent.runtime_activation import RUNTIME_VERSION_NEW
@@ -21,7 +27,9 @@ from coding_agent.runs.serving_runtime import (
     ProviderModelAdapter,
     _messages_from_model_request,
     admit_blocked_approval,
+    approval_settlement_from_blocked,
     build_new_runtime_turn_adapter,
+    initial_operation_state,
     session_model_adapter,
     session_serving_turn_kind,
     session_tool_executor,
@@ -430,22 +438,44 @@ async def test_interactive_deny_resumes_to_completed(
     assert provider.rounds == 2
 
 
-def _blocked_outcome(*, reason: str) -> BlockedOutcome:
+def _blocked_outcome(
+    *,
+    reason: str,
+    effect_id: str = "effect-1",
+    tool_call_id: str = "call-1",
+    steps_taken: int = 1,
+) -> BlockedOutcome:
     return BlockedOutcome(
         state_version=OperationStateVersion(
             run_id="run-indeterminate",
             revision=1,
             projection_epoch=0,
             commit_ref=CommitRef(transition_id="run-indeterminate:t1"),
-            value={},
+            value={
+                "_agentkit_runtime": {
+                    "pending_effect_plans": [
+                        {
+                            "effect_id": effect_id,
+                            "attempt_id": "attempt-1",
+                            "effect_kind": "tool",
+                            "payload": {
+                                "tool_call_id": tool_call_id,
+                                "tool_name": "file_read",
+                                "arguments": {},
+                            },
+                            "requires_approval": True,
+                        }
+                    ]
+                }
+            },
         ),
         reason=reason,
         effect=EffectReference(
-            effect_id="effect-1",
+            effect_id=effect_id,
             attempt_id="attempt-1",
-            tool_call_id="call-1",
+            tool_call_id=tool_call_id,
         ),
-        steps_taken=1,
+        steps_taken=steps_taken,
     )
 
 
@@ -513,3 +543,87 @@ async def test_session_manager_new_runtime_adapter_wires_resolve_blocked(
     )
     assert captured["resolve_blocked"] is not None
     assert adapter.resolve_blocked is not None
+
+
+def test_approval_command_id_includes_effect_identity() -> None:
+    first = approval_settlement_from_blocked(
+        _blocked_outcome(
+            reason="approval_required",
+            effect_id="effect-a",
+            tool_call_id="call-1",
+        ),
+        approved=True,
+        owner_epoch=1,
+    )
+    second = approval_settlement_from_blocked(
+        _blocked_outcome(
+            reason="approval_required",
+            effect_id="effect-b",
+            tool_call_id="call-1",
+        ),
+        approved=True,
+        owner_epoch=1,
+    )
+    assert first.command_id != second.command_id
+    assert "effect-a" in first.command_id
+    assert "effect-b" in second.command_id
+
+
+class _BudgetCoordinator:
+    def __init__(self) -> None:
+        self.max_rounds: list[int] = []
+
+    async def run(self, request, control_probe, frame_sink, committed_fact_sink):
+        del control_probe, frame_sink, committed_fact_sink
+        self.max_rounds.append(request.max_rounds)
+        if len(self.max_rounds) == 1:
+            return _blocked_outcome(
+                reason="approval_required",
+                steps_taken=2,
+            )
+        return CompletedOutcome(
+            state_version=request.state_version,
+            final_message="done",
+            steps_taken=1,
+            stop_reason="no_tool_calls",
+        )
+
+
+@pytest.mark.asyncio
+async def test_approval_resume_uses_remaining_round_budget() -> None:
+    coordinator = _BudgetCoordinator()
+
+    async def resolve_blocked(blocked: BlockedOutcome, request: object) -> object:
+        del request
+        return approval_settlement_from_blocked(
+            blocked,
+            approved=True,
+            owner_epoch=1,
+        )
+
+    def request_for_prompt(prompt: str) -> RunSegmentRequest:
+        del prompt
+        return RunSegmentRequest(
+            session_id="session-1",
+            owner_id="owner-1",
+            owner_epoch=1,
+            state_version=initial_operation_state("run-budget"),
+            step_input=Initial(
+                input_id="run-budget:initial",
+                command_batch=(),
+                mailbox_cut=0,
+            ),
+            max_rounds=5,
+        )
+
+    adapter = DurableSegmentTurnAdapter(
+        runner=DurableSegmentRunner(coordinator=coordinator, commit_port=_Port()),
+        request_for_prompt=request_for_prompt,
+        control_probe=_Probe(),
+        frame_sink=_Sink(),
+        committed_fact_sink=_Sink(),
+        resolve_blocked=resolve_blocked,
+    )
+    outcome = await adapter.run_turn("hello")
+    assert isinstance(outcome, CompletedOutcome)
+    assert coordinator.max_rounds == [5, 3]

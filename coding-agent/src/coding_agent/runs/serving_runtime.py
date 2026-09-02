@@ -89,11 +89,15 @@ class DurableSegmentTurnAdapter:
                 or self.resolve_blocked is None
             ):
                 return outcome
+            remaining_rounds = request.max_rounds - outcome.steps_taken
+            if remaining_rounds <= 0:
+                return outcome
             settlement = await self.resolve_blocked(outcome, request)
             request = replace(
                 request,
                 state_version=outcome.state_version,
                 step_input=ApprovalResolved(settlement=settlement),
+                max_rounds=remaining_rounds,
             )
 
 
@@ -346,9 +350,7 @@ def approval_settlement_from_blocked(
     if blocked.effect is None:
         raise ValueError("blocked approval outcome requires an effect")
     tool_name = _blocked_tool_name(blocked)
-    resolved_command_id = (
-        command_id or f"serving-approval:{blocked.effect.tool_call_id}"
-    )
+    resolved_command_id = command_id or f"serving-approval:{blocked.effect.effect_id}"
     input_id = f"{blocked.state_version.run_id}:approval:{resolved_command_id}"
     return ApprovalSettlement(
         input_id=input_id,
