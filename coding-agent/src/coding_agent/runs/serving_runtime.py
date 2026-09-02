@@ -36,7 +36,7 @@ from agentkit.runtime.contracts import (
     StreamFrame,
     StreamFrameKind,
 )
-from coding_agent.approval import ApprovalPolicy
+from coding_agent.approval import ApprovalPolicy, PolicyConfig, PolicyEngine
 from coding_agent.executors.durable import (
     DurableEffectExecutor,
     LocalToolEffectBackend,
@@ -154,7 +154,9 @@ class ProviderModelAdapter:
             elif isinstance(event, ThinkingEvent) and event.text:
                 thinking.append(event.text)
             elif isinstance(event, ToolCallEvent) and event.tool_call_id and event.name:
-                requires_approval = self._approval_policy is not ApprovalPolicy.YOLO
+                requires_approval = PolicyEngine(
+                    PolicyConfig(policy=self._approval_policy)
+                ).needs_approval(event.name)
                 calls.append(
                     ModelToolCall(
                         tool_call_id=event.tool_call_id,
@@ -277,10 +279,18 @@ def session_workspace_root(session: Any) -> Path:
     path = getattr(workspace, "path", None)
     if isinstance(path, str) and path:
         return Path(path)
-    repo_path = getattr(session, "repo_path", None)
-    if repo_path is not None:
-        return Path(repo_path)
     raise ValueError("new-runtime serving requires a resolved workspace root")
+
+
+_SERVING_EXCLUDED_TOOLS = frozenset({"subagent"})
+
+
+def serving_tool_schemas(executor: CoreToolExecutor) -> tuple[Any, ...]:
+    return tuple(
+        schema
+        for schema in executor.schemas()
+        if schema.name not in _SERVING_EXCLUDED_TOOLS
+    )
 
 
 def session_tool_executor(session: Any) -> CoreToolExecutor:
@@ -295,7 +305,7 @@ def session_model_adapter(session: Any, executor: CoreToolExecutor) -> object:
     if callable(getattr(provider, "stream", None)):
         return ProviderModelAdapter(
             provider,
-            tools=tuple(executor.schemas()),
+            tools=serving_tool_schemas(executor),
             approval_policy=policy,
         )
     return UnwiredServingModelAdapter()

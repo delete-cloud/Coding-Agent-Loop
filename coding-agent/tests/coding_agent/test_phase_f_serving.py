@@ -24,6 +24,7 @@ from coding_agent.runs.serving_runtime import (
     session_serving_turn_kind,
     session_tool_executor,
     session_workspace_root,
+    serving_tool_schemas,
 )
 from coding_agent.runs.turn_execution import DurableSegmentRunner
 from coding_agent.server.session.models import _local_default_run_target
@@ -237,7 +238,7 @@ async def test_provider_stream_receives_core_tool_schemas(tmp_path: Path) -> Non
     )
     adapter = ProviderModelAdapter(
         provider,
-        tools=tuple(executor.schemas()),
+        tools=serving_tool_schemas(executor),
         approval_policy=ApprovalPolicy.YOLO,
     )
     result = await adapter.generate(
@@ -245,8 +246,9 @@ async def test_provider_stream_receives_core_tool_schemas(tmp_path: Path) -> Non
         _Sink(),
         None,
     )
-    assert provider.tools
-    assert {schema.name for schema in provider.tools} >= {"file_read"}
+    names = {schema.name for schema in provider.tools}
+    assert "file_read" in names
+    assert "subagent" not in names
     assert result.tool_calls[0].name == "file_read"
     assert result.tool_calls[0].requires_approval is False
 
@@ -265,6 +267,22 @@ async def test_interactive_policy_marks_tool_calls_for_approval() -> None:
     )
     assert result.tool_calls[0].requires_approval is True
     assert result.tool_calls[0].approval_request_id == "req-1:call-1"
+
+
+@pytest.mark.asyncio
+async def test_auto_policy_allows_safe_file_read() -> None:
+    adapter = ProviderModelAdapter(
+        _ToolCallProvider(),
+        tools=(SimpleNamespace(name="file_read"),),
+        approval_policy=ApprovalPolicy.AUTO,
+    )
+    result = await adapter.generate(
+        SimpleNamespace(request_id="req-1", context={}),
+        _Sink(),
+        None,
+    )
+    assert result.tool_calls[0].requires_approval is False
+    assert result.tool_calls[0].approval_request_id is None
 
 
 @pytest.mark.asyncio
