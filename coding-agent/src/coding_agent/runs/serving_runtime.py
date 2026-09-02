@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from pathlib import Path
 import asyncio
 import json
 from typing import Any
-
 from agentkit.providers.models import (
     DoneEvent,
     TextEvent,
@@ -19,6 +18,9 @@ from agentkit.providers.models import (
 )
 from agentkit.runtime import AgentEngine, SegmentCoordinator
 from agentkit.runtime.contracts import (
+    ApprovalResolved,
+    ApprovalSettlement,
+    BlockedOutcome,
     CommitRef,
     CommittedFactSink,
     ControlGeneration,
@@ -32,6 +34,7 @@ from agentkit.runtime.contracts import (
     OperationStateVersion,
     ProviderStopMetadata,
     RunSegmentRequest,
+    RuntimeCommand,
     SegmentOutcome,
     StreamFrame,
     StreamFrameKind,
@@ -53,6 +56,12 @@ from coding_agent.stores.durable_local import SQLiteLocalDurableStore
 from coding_agent.stores.durable_pg import PGDurableStore
 
 
+ServingBlockedResolver = Callable[
+    [BlockedOutcome, RunSegmentRequest],
+    Awaitable[ApprovalSettlement],
+]
+
+
 @dataclass(frozen=True)
 class DurableSegmentTurnAdapter:
     """Turn adapter that never uses PipelineAdapter for new-runtime sessions."""
@@ -62,14 +71,25 @@ class DurableSegmentTurnAdapter:
     control_probe: ControlProbe
     frame_sink: FrameSink
     committed_fact_sink: CommittedFactSink
+    resolve_blocked: ServingBlockedResolver | None = None
 
     async def run_turn(self, prompt: str) -> SegmentOutcome:
-        return await self.runner.run(
-            self.request_for_prompt(prompt),
-            self.control_probe,
-            self.frame_sink,
-            self.committed_fact_sink,
-        )
+        request = self.request_for_prompt(prompt)
+        while True:
+            outcome = await self.runner.run(
+                request,
+                self.control_probe,
+                self.frame_sink,
+                self.committed_fact_sink,
+            )
+            if not isinstance(outcome, BlockedOutcome) or self.resolve_blocked is None:
+                return outcome
+            settlement = await self.resolve_blocked(outcome, request)
+            request = replace(
+                request,
+                state_version=outcome.state_version,
+                step_input=ApprovalResolved(settlement=settlement),
+            )
 
 
 def session_serving_turn_kind(session: Any) -> str:
@@ -311,6 +331,81 @@ def session_model_adapter(session: Any, executor: CoreToolExecutor) -> object:
     return UnwiredServingModelAdapter()
 
 
+def approval_settlement_from_blocked(
+    blocked: BlockedOutcome,
+    *,
+    approved: bool,
+    owner_epoch: int,
+    command_id: str | None = None,
+) -> ApprovalSettlement:
+    if blocked.effect is None:
+        raise ValueError("blocked approval outcome requires an effect")
+    tool_name = _blocked_tool_name(blocked)
+    resolved_command_id = (
+        command_id or f"serving-approval:{blocked.effect.tool_call_id}"
+    )
+    input_id = f"{blocked.state_version.run_id}:approval:{resolved_command_id}"
+    return ApprovalSettlement(
+        input_id=input_id,
+        command_id=resolved_command_id,
+        tool_call_id=blocked.effect.tool_call_id,
+        tool_name=tool_name,
+        effect_id=blocked.effect.effect_id,
+        attempt_id=blocked.effect.attempt_id,
+        transition_id=blocked.state_version.commit_ref.transition_id,
+        owner_epoch=owner_epoch,
+        approved=approved,
+        rejection_reason_code=None if approved else "user_denied",
+        rejection_message=None if approved else "User denied this tool call",
+    )
+
+
+async def admit_blocked_approval(
+    store: Any,
+    authority: OwnerAuthority,
+    blocked: BlockedOutcome,
+    *,
+    approved: bool,
+) -> ApprovalSettlement:
+    settlement = approval_settlement_from_blocked(
+        blocked,
+        approved=approved,
+        owner_epoch=authority.epoch,
+    )
+    await store.admit_new_runtime_command(
+        authority,
+        RuntimeCommand(
+            command_id=settlement.command_id,
+            command_kind="approval_decision",
+            payload={
+                "approved": approved,
+                "request_id": settlement.input_id,
+                "target_run_id": blocked.state_version.run_id,
+            },
+        ),
+    )
+    return settlement
+
+
+def _blocked_tool_name(blocked: BlockedOutcome) -> str:
+    runtime = blocked.state_version.value.get("_agentkit_runtime")
+    if not isinstance(runtime, Mapping):
+        raise ValueError("blocked state is missing engine runtime")
+    plans = runtime.get("pending_effect_plans") or ()
+    if not isinstance(plans, tuple | list) or not plans:
+        raise ValueError("blocked state has no pending effect plan")
+    plan = plans[0]
+    if not isinstance(plan, Mapping):
+        raise TypeError("pending effect plan must be a mapping")
+    payload = plan.get("payload")
+    if not isinstance(payload, Mapping):
+        raise TypeError("pending effect plan payload must be a mapping")
+    tool_name = payload.get("tool_name")
+    if not isinstance(tool_name, str) or not tool_name:
+        raise ValueError("pending effect plan requires a tool_name")
+    return tool_name
+
+
 def initial_operation_state(run_id: str) -> OperationStateVersion:
     return OperationStateVersion(
         run_id=run_id,
@@ -330,6 +425,7 @@ def build_new_runtime_turn_adapter(
     state_version: OperationStateVersion | None,
     model_adapter: object | None = None,
     effect_executor: object | None = None,
+    resolve_blocked: ServingBlockedResolver | None = None,
 ) -> DurableSegmentTurnAdapter:
     session_state: Mapping[str, object]
     to_store_data = getattr(session, "to_store_data", None)
@@ -394,4 +490,5 @@ def build_new_runtime_turn_adapter(
         control_probe=ServingControlProbe(),
         frame_sink=ServingNullSink(),
         committed_fact_sink=ServingNullSink(),
+        resolve_blocked=resolve_blocked,
     )

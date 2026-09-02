@@ -8,7 +8,12 @@ from inspect import isawaitable
 from types import TracebackType
 from typing import Any, Protocol, cast
 
-from coding_agent.adapter.types import StopReason, TurnOutcome, exception_error_message
+from coding_agent.adapter.types import (
+    StopReason,
+    TurnOutcome,
+    exception_error_message,
+    turn_outcome_from_segment_outcome,
+)
 from coding_agent.stores.runtime_store import AgentRunRecord, JSONObject
 from coding_agent.stores import RuntimeRunLifecycleStore
 from coding_agent.topics.context_pack import merged_context_pack_stash
@@ -756,10 +761,17 @@ class RuntimeTurnController:
             raise RuntimeError(
                 "RuntimeTurnController requires finalizer for after_turn"
             )
+        mapped = outcome
+        if not isinstance(outcome, TurnOutcome):
+            mapped = turn_outcome_from_segment_outcome(outcome)
+            if mapped is None:
+                raise TypeError(
+                    "store-backed turn cannot finalize a blocked or safe-yield outcome"
+                )
         await self.finalizer.complete(
             session,
             ctx=binding.ctx,
-            outcome=outcome,
+            outcome=mapped,
             run_id=self._require_run_id(),
             resume_context=None
             if self.starter is None

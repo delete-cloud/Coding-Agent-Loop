@@ -19,6 +19,7 @@ from coding_agent.runs.serving_runtime import (
     DurableSegmentTurnAdapter,
     ProviderModelAdapter,
     _messages_from_model_request,
+    admit_blocked_approval,
     build_new_runtime_turn_adapter,
     session_model_adapter,
     session_serving_turn_kind,
@@ -75,6 +76,26 @@ class _ToolCallProvider:
             name="file_read",
             arguments={"path": "README.md"},
         )
+        yield DoneEvent()
+
+
+class _TwoRoundProvider:
+    model_name = "stub"
+    max_context_size = 1024
+    rounds = 0
+
+    async def stream(self, messages, tools=None, **kwargs):
+        del messages, tools, kwargs
+        self.rounds += 1
+        if self.rounds == 1:
+            yield ToolCallEvent(
+                tool_call_id="call-1",
+                name="file_read",
+                arguments={"path": "README.md"},
+            )
+            yield DoneEvent()
+            return
+        yield TextEvent(text="done")
         yield DoneEvent()
 
 
@@ -331,3 +352,78 @@ async def test_interactive_tool_call_blocks_without_backend_execution(
     outcome = await adapter.run_turn("read the file")
     assert isinstance(outcome, BlockedOutcome)
     assert outcome.reason == "approval_required"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("store_kind", ["sqlite", "pg"])
+async def test_interactive_allow_resumes_to_completed(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "README.md").write_text("hello from workspace\n", encoding="utf-8")
+    store, owner = await _open_store(store_kind, tmp_path)
+    provider = _TwoRoundProvider()
+
+    async def resolve_blocked(blocked: BlockedOutcome, request: object) -> object:
+        del request
+        return await admit_blocked_approval(
+            store,
+            owner,
+            blocked,
+            approved=True,
+        )
+
+    adapter = build_new_runtime_turn_adapter(
+        session=_Session(
+            RUNTIME_VERSION_NEW,
+            provider=provider,
+            default_run_target=_local_default_run_target(tmp_path),
+            approval_policy=ApprovalPolicy.INTERACTIVE,
+        ),
+        run_id="run-serving-allow",
+        authority=owner,
+        store=store,
+        state_version=None,
+        resolve_blocked=resolve_blocked,
+    )
+    outcome = await adapter.run_turn("read the file")
+    assert isinstance(outcome, CompletedOutcome)
+    assert outcome.final_message == "done"
+    assert provider.rounds == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("store_kind", ["sqlite", "pg"])
+async def test_interactive_deny_resumes_to_completed(
+    store_kind: str,
+    tmp_path: Path,
+) -> None:
+    store, owner = await _open_store(store_kind, tmp_path)
+    provider = _TwoRoundProvider()
+
+    async def resolve_blocked(blocked: BlockedOutcome, request: object) -> object:
+        del request
+        return await admit_blocked_approval(
+            store,
+            owner,
+            blocked,
+            approved=False,
+        )
+
+    adapter = build_new_runtime_turn_adapter(
+        session=_Session(
+            RUNTIME_VERSION_NEW,
+            provider=provider,
+            default_run_target=_local_default_run_target(tmp_path),
+            approval_policy=ApprovalPolicy.INTERACTIVE,
+        ),
+        run_id="run-serving-deny",
+        authority=owner,
+        store=store,
+        state_version=None,
+        resolve_blocked=resolve_blocked,
+    )
+    outcome = await adapter.run_turn("read the file")
+    assert isinstance(outcome, CompletedOutcome)
+    assert outcome.final_message == "done"
+    assert provider.rounds == 2
