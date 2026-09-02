@@ -4,10 +4,17 @@ import asyncio
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 
+from agentkit.runtime.contracts import (
+    BlockedOutcome,
+    CommitRef,
+    CompletedOutcome,
+    OperationStateVersion,
+)
 from coding_agent.adapter.types import (
     StopReason,
     TurnOutcome,
@@ -1052,6 +1059,136 @@ async def test_runtime_turn_controller_routes_before_and_after_hooks() -> None:
     assert finishes == ["run-1"]
     assert persisted == [session]
     assert completions == [(recorder, "tape-1", "completed")]
+
+
+@pytest.mark.asyncio
+async def test_runtime_turn_controller_after_turn_maps_completed_segment_outcome() -> (
+    None
+):
+    session = FakeTurnSession(id="session-1", tape_id=None)
+    ctx = FakeRuntimeContext("tape-seg")
+    binding = FakeRuntimeBinding(ctx=ctx, adapter=FakeRuntimeAdapter())
+    finishes: list[dict[str, object]] = []
+
+    async def save_snapshot(
+        session: FakeTurnSession,
+        ctx: FakeRuntimeContext,
+        *,
+        run_id: str,
+    ) -> None:
+        del session, ctx, run_id
+
+    async def finish_run(
+        session: FakeTurnSession,
+        *,
+        run_id: str,
+        status: str,
+        result: JSONObject,
+        error: str | None,
+        resume_context: object | None = None,
+        extra_metadata: JSONObject | None = None,
+    ) -> None:
+        del session, resume_context, extra_metadata
+        finishes.append(
+            {
+                "run_id": run_id,
+                "status": status,
+                "result": result,
+                "error": error,
+            }
+        )
+
+    async def persist_session(session: FakeTurnSession) -> None:
+        del session
+
+    controller = RuntimeTurnController(
+        starter=SimpleNamespace(run_id="run-seg", resume_context=None),
+        finalizer=RuntimeTurnFinalizer(
+            has_runtime_store=True,
+            save_message_snapshot=save_snapshot,
+            finish_run=finish_run,
+            persist_session=persist_session,
+        ),
+        error_handler=RuntimeTurnErrorHandler(
+            turn_run=RuntimeTurnRunTracker(
+                lifecycle=RuntimeRunLifecycle(
+                    store=RecordingRuntimeStore(),
+                    metadata_for_session=lambda session, *, resume_context=None: {
+                        "session_id": session.id
+                    },
+                ),
+                run_id="run-seg",
+                started_at=datetime(2026, 1, 1, tzinfo=UTC),
+            ),
+            close_runtime=persist_session,
+            notify_generic_error=lambda session, exc: persist_session(session),
+        ),
+    )
+    outcome = CompletedOutcome(
+        state_version=OperationStateVersion(
+            run_id="run-seg",
+            revision=1,
+            projection_epoch=0,
+            commit_ref=CommitRef(transition_id="run-seg:done"),
+            value={},
+        ),
+        final_message="done",
+        steps_taken=1,
+        stop_reason="no_tool_calls",
+    )
+
+    await controller.after_turn(session, binding, outcome)
+
+    assert finishes == [
+        {
+            "run_id": "run-seg",
+            "status": "completed",
+            "result": {
+                "stop_reason": "no_tool_calls",
+                "steps_taken": 1,
+                "text": "done",
+            },
+            "error": None,
+        }
+    ]
+    assert session.tape_id == "tape-seg"
+
+
+@pytest.mark.asyncio
+async def test_runtime_turn_controller_leaves_blocked_segment_unfinalized() -> None:
+    completions: list[object] = []
+
+    async def complete(*args: object, **kwargs: object) -> None:
+        completions.append((args, kwargs))
+
+    controller = RuntimeTurnController(
+        starter=SimpleNamespace(run_id="run-blocked", resume_context=None),
+        finalizer=SimpleNamespace(complete=complete),
+        error_handler=cast(Any, object()),
+    )
+    state = OperationStateVersion(
+        run_id="run-blocked",
+        revision=1,
+        projection_epoch=0,
+        commit_ref=CommitRef(transition_id="run-blocked:blocked"),
+        value={},
+    )
+
+    await controller.after_turn(
+        FakeTurnSession(id="session-1", tape_id=None),
+        FakeRuntimeBinding(
+            ctx=FakeRuntimeContext("tape-blocked"),
+            adapter=FakeRuntimeAdapter(),
+        ),
+        BlockedOutcome(
+            state_version=state,
+            reason="indeterminate_dispatch",
+            effect=None,
+            steps_taken=1,
+        ),
+    )
+
+    assert completions == []
 
 
 @pytest.mark.asyncio

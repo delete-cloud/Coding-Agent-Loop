@@ -822,7 +822,13 @@ class SessionManager(
         session: Session,
         request: Any,
     ) -> Any:
-        from coding_agent.runs.serving_runtime import build_new_runtime_turn_adapter
+        from coding_agent.runs.serving_runtime import (
+            admit_blocked_approval,
+            approval_settlement_from_mailbox,
+            blocked_approval_tool,
+            build_new_runtime_turn_adapter,
+        )
+        from coding_agent.wire.protocol import ApprovalRequest
 
         store = self._authoritative_store()
         if store is None:
@@ -831,10 +837,67 @@ class SessionManager(
         if authority is None:
             raise RuntimeError("new-runtime serving requires owner authority")
         state = await store.load_operation_state(session.id, request.run_id)
+
+        async def durable_settlement(blocked: Any) -> Any:
+            mailbox = await store.load_runtime_command_mailbox(session.id)
+            return approval_settlement_from_mailbox(
+                blocked,
+                mailbox,
+                owner_epoch=authority.epoch,
+            )
+
+        async def resolve_blocked(blocked: Any) -> Any:
+            if blocked.effect is None:
+                raise ValueError("blocked approval outcome requires an effect")
+            settlement = await durable_settlement(blocked)
+            if settlement is not None:
+                return settlement
+            tool_name, arguments = blocked_approval_tool(blocked)
+            approval_req = ApprovalRequest(
+                session_id=session.id,
+                request_id=(
+                    blocked.effect.approval_request_id or blocked.effect.tool_call_id
+                ),
+                tool=tool_name,
+                args=arguments,
+            )
+            if session.approval_coordinator.is_session_approved(approval_req):
+                async with self._lock:
+                    settlement = await durable_settlement(blocked)
+                    if settlement is not None:
+                        return settlement
+                    return await admit_blocked_approval(
+                        store,
+                        authority,
+                        blocked,
+                        approved=True,
+                    )
+            session.begin_approval_request(approval_req)
+            try:
+                response = await session.approval_coordinator.wait_for_response(
+                    approval_req.request_id,
+                    float(approval_req.timeout_seconds),
+                )
+            finally:
+                session.cleanup_approval_wait_projection(signal_event=False)
+            async with self._lock:
+                settlement = await durable_settlement(blocked)
+                if settlement is not None:
+                    return settlement
+                if response is None:
+                    return await admit_blocked_approval(
+                        store,
+                        authority,
+                        blocked,
+                        approved=False,
+                    )
+            raise RuntimeError("new-runtime approval response was not durably admitted")
+
         return build_new_runtime_turn_adapter(
             session=session,
             run_id=request.run_id,
             authority=authority,
             store=store,
             state_version=state,
+            resolve_blocked=resolve_blocked,
         )

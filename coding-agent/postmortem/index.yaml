@@ -406,11 +406,15 @@ patterns:
   - src/coding_agent/ui/http_server.py
   - src/coding_agent/ui/schemas.py
   - src/coding_agent/ui/session_manager.py
+  - src/coding_agent/runs/serving_runtime.py
+  - src/coding_agent/server/session/approval.py
+  - src/coding_agent/server/session/manager.py
   - tests/approval/test_store.py
   - tests/integration/test_wire_http_integration.py
   - tests/ui/test_http_server.py
   - tests/ui/test_security.py
   - tests/ui/test_session_manager_public_api.py
+  - tests/coding_agent/test_phase_f_serving.py
   related_commits:
   - de91c5f10b06574508c75751571fe435f7cd2006
   keywords:

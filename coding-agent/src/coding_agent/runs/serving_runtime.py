@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from pathlib import Path
 import asyncio
 import json
 from typing import Any
-
 from agentkit.providers.models import (
     DoneEvent,
     TextEvent,
@@ -19,7 +18,11 @@ from agentkit.providers.models import (
 )
 from agentkit.runtime import AgentEngine, SegmentCoordinator
 from agentkit.runtime.contracts import (
+    ApprovalResolved,
+    ApprovalSettlement,
+    BlockedOutcome,
     CommitRef,
+    EffectReference,
     CommittedFactSink,
     ControlGeneration,
     ControlProbe,
@@ -32,6 +35,8 @@ from agentkit.runtime.contracts import (
     OperationStateVersion,
     ProviderStopMetadata,
     RunSegmentRequest,
+    RoundLimitOutcome,
+    RuntimeCommand,
     SegmentOutcome,
     StreamFrame,
     StreamFrameKind,
@@ -53,23 +58,118 @@ from coding_agent.stores.durable_local import SQLiteLocalDurableStore
 from coding_agent.stores.durable_pg import PGDurableStore
 
 
+ServingBlockedResolver = Callable[
+    [BlockedOutcome],
+    Awaitable[ApprovalSettlement],
+]
+
+
 @dataclass(frozen=True)
 class DurableSegmentTurnAdapter:
     """Turn adapter that never uses PipelineAdapter for new-runtime sessions."""
 
     runner: DurableSegmentRunner
-    request_for_prompt: Callable[[str], RunSegmentRequest]
+    session_id: str
+    owner_id: str
+    owner_epoch: int
+    state_version: OperationStateVersion
+    max_rounds: int
     control_probe: ControlProbe
     frame_sink: FrameSink
     committed_fact_sink: CommittedFactSink
+    resolve_blocked: ServingBlockedResolver | None = None
+
+    def _request(
+        self,
+        prompt: str,
+        step_input: Initial | ApprovalResolved,
+        *,
+        max_rounds: int,
+    ) -> RunSegmentRequest:
+        state = self.state_version
+        if isinstance(step_input, Initial) and prompt.strip():
+            value = dict(state.value)
+            context = dict(value.get("context") or {})
+            messages = list(context.get("messages") or ())
+            messages.append({"role": "user", "content": prompt})
+            context["messages"] = tuple(messages)
+            value["context"] = context
+            state = replace(state, value=value)
+        return RunSegmentRequest(
+            session_id=self.session_id,
+            owner_id=self.owner_id,
+            owner_epoch=self.owner_epoch,
+            state_version=state,
+            step_input=step_input,
+            max_rounds=max_rounds,
+        )
 
     async def run_turn(self, prompt: str) -> SegmentOutcome:
-        return await self.runner.run(
-            self.request_for_prompt(prompt),
-            self.control_probe,
-            self.frame_sink,
-            self.committed_fact_sink,
-        )
+        completed_rounds = _persisted_rounds(self.state_version)
+        resume_blocked = blocked_approval_from_state(self.state_version)
+        if resume_blocked is not None:
+            remaining_rounds = self.max_rounds - completed_rounds
+            if remaining_rounds <= 0:
+                return RoundLimitOutcome(
+                    state_version=self.state_version,
+                    steps_taken=completed_rounds,
+                )
+            if self.resolve_blocked is None:
+                return replace(resume_blocked, steps_taken=completed_rounds)
+            settlement = await self.resolve_blocked(resume_blocked)
+            request = self._request(
+                "",
+                ApprovalResolved(settlement=settlement),
+                max_rounds=remaining_rounds,
+            )
+        else:
+            if self.state_version.revision != 0:
+                raise RuntimeError(
+                    "new-runtime serving cannot restart a non-approval state"
+                )
+            request = self._request(
+                prompt,
+                Initial(
+                    input_id=f"{self.state_version.run_id}:initial",
+                    command_batch=(),
+                    mailbox_cut=0,
+                ),
+                max_rounds=self.max_rounds,
+            )
+
+        while True:
+            outcome = await self.runner.run(
+                request,
+                self.control_probe,
+                self.frame_sink,
+                self.committed_fact_sink,
+            )
+            if (
+                not isinstance(outcome, BlockedOutcome)
+                or outcome.reason != "approval_required"
+                or outcome.effect is None
+                or self.resolve_blocked is None
+            ):
+                if completed_rounds == 0:
+                    return outcome
+                return replace(
+                    outcome,
+                    steps_taken=completed_rounds + outcome.steps_taken,
+                )
+            completed_rounds += outcome.steps_taken
+            remaining_rounds = self.max_rounds - completed_rounds
+            if remaining_rounds <= 0:
+                return RoundLimitOutcome(
+                    state_version=outcome.state_version,
+                    steps_taken=completed_rounds,
+                )
+            settlement = await self.resolve_blocked(outcome)
+            request = replace(
+                request,
+                state_version=outcome.state_version,
+                step_input=ApprovalResolved(settlement=settlement),
+                max_rounds=remaining_rounds,
+            )
 
 
 def session_serving_turn_kind(session: Any) -> str:
@@ -95,17 +195,6 @@ class ServingControlProbe:
 class ServingNullSink:
     async def emit(self, _item: object) -> None:
         return None
-
-
-class UnwiredServingModelAdapter:
-    async def generate(
-        self,
-        request: object,
-        frame_sink: object,
-        cancellation: object,
-    ) -> object:
-        del request, frame_sink, cancellation
-        raise RuntimeError("new-runtime serving requires a ModelAdapter")
 
 
 class ProviderModelAdapter:
@@ -308,7 +397,211 @@ def session_model_adapter(session: Any, executor: CoreToolExecutor) -> object:
             tools=serving_tool_schemas(executor),
             approval_policy=policy,
         )
-    return UnwiredServingModelAdapter()
+    raise RuntimeError("new-runtime serving requires a ModelAdapter")
+
+
+def _persisted_rounds(state: OperationStateVersion) -> int:
+    runtime = state.value.get("_agentkit_runtime")
+    if runtime is None:
+        return 0
+    if not isinstance(runtime, Mapping):
+        raise TypeError("engine runtime state must be a mapping")
+    round_index = runtime.get("round_index", 0)
+    if isinstance(round_index, bool) or not isinstance(round_index, int):
+        raise TypeError("engine runtime round_index must be an integer")
+    if round_index < 0:
+        raise ValueError("engine runtime round_index must be non-negative")
+    return round_index
+
+
+def _pending_effect_plan(
+    state: OperationStateVersion,
+) -> Mapping[str, Any] | None:
+    runtime = state.value.get("_agentkit_runtime")
+    if runtime is None:
+        return None
+    if not isinstance(runtime, Mapping):
+        raise TypeError("engine runtime state must be a mapping")
+    plans = runtime.get("pending_effect_plans") or ()
+    if not isinstance(plans, tuple | list):
+        raise TypeError("pending effect plans must be a sequence")
+    if not plans:
+        return None
+    plan = plans[0]
+    if not isinstance(plan, Mapping):
+        raise TypeError("pending effect plan must be a mapping")
+    return plan
+
+
+def _required_plan_string(plan: Mapping[str, Any], field_name: str) -> str:
+    value = plan.get(field_name)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"pending effect plan requires {field_name}")
+    return value
+
+
+def blocked_approval_from_state(
+    state: OperationStateVersion,
+) -> BlockedOutcome | None:
+    plan = _pending_effect_plan(state)
+    if plan is None:
+        return None
+    requires_approval = plan.get("requires_approval", False)
+    if not isinstance(requires_approval, bool):
+        raise TypeError("pending effect plan requires_approval must be a bool")
+    if not requires_approval:
+        return None
+    payload = plan.get("payload")
+    if not isinstance(payload, Mapping):
+        raise TypeError("pending effect plan payload must be a mapping")
+    tool_call_id = _required_plan_string(payload, "tool_call_id")
+    approval_request_id = plan.get("approval_request_id")
+    if approval_request_id is not None and (
+        not isinstance(approval_request_id, str) or not approval_request_id
+    ):
+        raise ValueError("pending effect plan approval_request_id must be non-empty")
+    return BlockedOutcome(
+        state_version=state,
+        reason="approval_required",
+        effect=EffectReference(
+            effect_id=_required_plan_string(plan, "effect_id"),
+            attempt_id=_required_plan_string(plan, "attempt_id"),
+            tool_call_id=tool_call_id,
+            approval_request_id=approval_request_id,
+        ),
+        steps_taken=0,
+    )
+
+
+def approval_settlement_from_mailbox(
+    blocked: BlockedOutcome,
+    mailbox: Any,
+    *,
+    owner_epoch: int,
+) -> ApprovalSettlement | None:
+    if blocked.effect is None:
+        raise ValueError("blocked approval outcome requires an effect")
+    approval_request_id = (
+        blocked.effect.approval_request_id or blocked.effect.tool_call_id
+    )
+    command_id, input_id = serving_approval_identity(
+        run_id=blocked.state_version.run_id,
+        request_id=approval_request_id,
+    )
+    for entry in mailbox.entries:
+        command = entry.command
+        if command.command_id != command_id:
+            continue
+        if command.command_kind != "approval_decision":
+            raise ValueError("serving approval command has the wrong kind")
+        payload = command.payload
+        approved = payload.get("approved")
+        if not isinstance(approved, bool):
+            raise TypeError("serving approval command approved must be a bool")
+        if payload.get("request_id") != input_id:
+            raise ValueError("serving approval command request_id does not match")
+        if payload.get("target_run_id") != blocked.state_version.run_id:
+            raise ValueError("serving approval command target_run_id does not match")
+        return approval_settlement_from_blocked(
+            blocked,
+            approved=approved,
+            owner_epoch=owner_epoch,
+            command_id=command_id,
+        )
+    return None
+
+
+def serving_approval_identity(
+    *,
+    run_id: str,
+    request_id: str,
+) -> tuple[str, str]:
+    if not run_id:
+        raise ValueError("serving approval requires a run_id")
+    if not request_id:
+        raise ValueError("serving approval requires a request_id")
+    command_id = f"serving-approval:{request_id}"
+    return command_id, f"{run_id}:approval:{command_id}"
+
+
+def approval_settlement_from_blocked(
+    blocked: BlockedOutcome,
+    *,
+    approved: bool,
+    owner_epoch: int,
+    command_id: str | None = None,
+) -> ApprovalSettlement:
+    if blocked.effect is None:
+        raise ValueError("blocked approval outcome requires an effect")
+    request_id = blocked.effect.approval_request_id or blocked.effect.tool_call_id
+    default_command_id, _input_id = serving_approval_identity(
+        run_id=blocked.state_version.run_id,
+        request_id=request_id,
+    )
+    resolved_command_id = command_id or default_command_id
+    input_id = f"{blocked.state_version.run_id}:approval:{resolved_command_id}"
+    tool_name, _arguments = blocked_approval_tool(blocked)
+    return ApprovalSettlement(
+        input_id=input_id,
+        command_id=resolved_command_id,
+        tool_call_id=blocked.effect.tool_call_id,
+        tool_name=tool_name,
+        effect_id=blocked.effect.effect_id,
+        attempt_id=blocked.effect.attempt_id,
+        transition_id=blocked.state_version.commit_ref.transition_id,
+        owner_epoch=owner_epoch,
+        approved=approved,
+        rejection_reason_code=None if approved else "user_denied",
+        rejection_message=None if approved else "User denied this tool call",
+    )
+
+
+async def admit_blocked_approval(
+    store: Any,
+    authority: OwnerAuthority,
+    blocked: BlockedOutcome,
+    *,
+    approved: bool,
+) -> ApprovalSettlement:
+    settlement = approval_settlement_from_blocked(
+        blocked,
+        approved=approved,
+        owner_epoch=authority.epoch,
+    )
+    await store.admit_new_runtime_command(
+        authority,
+        RuntimeCommand(
+            command_id=settlement.command_id,
+            command_kind="approval_decision",
+            payload={
+                "approved": approved,
+                "request_id": settlement.input_id,
+                "target_run_id": blocked.state_version.run_id,
+            },
+        ),
+    )
+    return settlement
+
+
+def blocked_approval_tool(blocked: BlockedOutcome) -> tuple[str, dict[str, Any]]:
+    payload = _blocked_payload(blocked)
+    tool_name = payload.get("tool_name")
+    if not isinstance(tool_name, str) or not tool_name:
+        raise ValueError("pending effect plan requires a tool_name")
+    raw_arguments = payload.get("arguments") or {}
+    if not isinstance(raw_arguments, Mapping):
+        raise TypeError("pending effect plan arguments must be a mapping")
+    return tool_name, {str(key): value for key, value in raw_arguments.items()}
+
+
+def _blocked_payload(blocked: BlockedOutcome) -> Mapping[str, Any]:
+    plan = _pending_effect_plan(blocked.state_version)
+    if plan is None:
+        raise ValueError("blocked state has no pending effect plan")
+    payload = plan.get("payload")
+    if not isinstance(payload, Mapping):
+        raise TypeError("pending effect plan payload must be a mapping")
+    return payload
 
 
 def initial_operation_state(run_id: str) -> OperationStateVersion:
@@ -330,6 +623,7 @@ def build_new_runtime_turn_adapter(
     state_version: OperationStateVersion | None,
     model_adapter: object | None = None,
     effect_executor: object | None = None,
+    resolve_blocked: ServingBlockedResolver | None = None,
 ) -> DurableSegmentTurnAdapter:
     session_state: Mapping[str, object]
     to_store_data = getattr(session, "to_store_data", None)
@@ -363,35 +657,15 @@ def build_new_runtime_turn_adapter(
     )
     runner = DurableSegmentRunner(coordinator=coordinator, commit_port=commit_port)
     resolved_state = state_version or initial_operation_state(run_id)
-    max_rounds = getattr(session, "max_steps", None) or 30
-
-    def request_for_prompt(prompt: str) -> RunSegmentRequest:
-        state = resolved_state
-        if prompt.strip():
-            value = dict(state.value)
-            context = dict(value.get("context") or {})
-            messages = list(context.get("messages") or ())
-            messages.append({"role": "user", "content": prompt})
-            context["messages"] = tuple(messages)
-            value["context"] = context
-            state = replace(state, value=value)
-        return RunSegmentRequest(
-            session_id=authority.session_id,
-            owner_id=authority.owner_id,
-            owner_epoch=authority.epoch,
-            state_version=state,
-            step_input=Initial(
-                input_id=f"{run_id}:initial",
-                command_batch=(),
-                mailbox_cut=0,
-            ),
-            max_rounds=max_rounds,
-        )
-
     return DurableSegmentTurnAdapter(
         runner=runner,
-        request_for_prompt=request_for_prompt,
+        session_id=authority.session_id,
+        owner_id=authority.owner_id,
+        owner_epoch=authority.epoch,
+        state_version=resolved_state,
+        max_rounds=getattr(session, "max_steps", None) or 30,
         control_probe=ServingControlProbe(),
         frame_sink=ServingNullSink(),
         committed_fact_sink=ServingNullSink(),
+        resolve_blocked=resolve_blocked,
     )
