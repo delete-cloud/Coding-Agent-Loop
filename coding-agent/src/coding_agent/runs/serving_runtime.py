@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from datetime import timedelta
 from pathlib import Path
 import asyncio
+import json
 from typing import Any
 
 from agentkit.providers.models import (
@@ -35,6 +36,7 @@ from agentkit.runtime.contracts import (
     StreamFrame,
     StreamFrameKind,
 )
+from coding_agent.approval import ApprovalPolicy, PolicyConfig, PolicyEngine
 from coding_agent.executors.durable import (
     DurableEffectExecutor,
     LocalToolEffectBackend,
@@ -109,8 +111,16 @@ class UnwiredServingModelAdapter:
 class ProviderModelAdapter:
     """Adapt an LLMProvider.stream surface into the frozen ModelAdapter."""
 
-    def __init__(self, provider: Any) -> None:
+    def __init__(
+        self,
+        provider: Any,
+        *,
+        tools: tuple[Any, ...] = (),
+        approval_policy: ApprovalPolicy = ApprovalPolicy.AUTO,
+    ) -> None:
         self._provider = provider
+        self._tools = tools
+        self._approval_policy = approval_policy
 
     async def generate(
         self,
@@ -126,7 +136,11 @@ class ProviderModelAdapter:
         input_tokens = 0
         output_tokens = 0
         frame_index = 0
-        async for event in self._provider.stream(messages):
+        stream = self._provider.stream(
+            messages,
+            tools=list(self._tools) or None,
+        )
+        async for event in stream:
             if isinstance(event, TextEvent) and event.text:
                 texts.append(event.text)
                 await frame_sink.emit(
@@ -140,11 +154,20 @@ class ProviderModelAdapter:
             elif isinstance(event, ThinkingEvent) and event.text:
                 thinking.append(event.text)
             elif isinstance(event, ToolCallEvent) and event.tool_call_id and event.name:
+                requires_approval = PolicyEngine(
+                    PolicyConfig(policy=self._approval_policy)
+                ).needs_approval(event.name)
                 calls.append(
                     ModelToolCall(
                         tool_call_id=event.tool_call_id,
                         name=event.name,
                         arguments=event.arguments or {},
+                        requires_approval=requires_approval,
+                        approval_request_id=(
+                            f"{request.request_id}:{event.tool_call_id}"
+                            if requires_approval
+                            else None
+                        ),
                     )
                 )
             elif isinstance(event, UsageEvent):
@@ -169,16 +192,76 @@ def _messages_from_model_request(request: Any) -> list[dict[str, Any]]:
         return []
     raw_messages = context.get("messages", ())
     messages: list[dict[str, Any]] = []
-    if isinstance(raw_messages, list | tuple):
-        for message in raw_messages:
-            if not isinstance(message, Mapping):
-                continue
-            role = message.get("role") or "assistant"
-            content = message.get("content")
-            if content is None:
-                content = message.get("text") or ""
-            messages.append({"role": str(role), "content": str(content)})
+    if not isinstance(raw_messages, list | tuple):
+        return messages
+    for message in raw_messages:
+        if not isinstance(message, Mapping):
+            continue
+        role = message.get("role") or "assistant"
+        if role == "assistant":
+            entry: dict[str, Any] = {
+                "role": "assistant",
+                "content": _message_text(message),
+            }
+            tool_calls = _openai_tool_calls(message.get("tool_calls"))
+            if tool_calls:
+                entry["tool_calls"] = tool_calls
+            messages.append(entry)
+        elif role == "tool":
+            tool_call_id = message.get("tool_call_id")
+            if not isinstance(tool_call_id, str) or not tool_call_id:
+                raise ValueError("tool message requires tool_call_id")
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "name": message.get("name") or "",
+                    "content": _message_text(message),
+                }
+            )
+        else:
+            messages.append({"role": str(role), "content": _message_text(message)})
     return messages
+
+
+def _message_text(message: Mapping[str, Any]) -> str:
+    content = message.get("content")
+    if content is None:
+        content = message.get("text") or ""
+    if isinstance(content, str):
+        return content
+    return json.dumps(content, default=str)
+
+
+def _openai_tool_calls(raw_calls: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_calls, list | tuple):
+        return []
+    calls: list[dict[str, Any]] = []
+    for raw in raw_calls:
+        if not isinstance(raw, Mapping):
+            continue
+        call_id = raw.get("tool_call_id") or raw.get("id")
+        name = raw.get("name")
+        if not isinstance(call_id, str) or not call_id:
+            raise ValueError("assistant tool_call requires tool_call_id")
+        if not isinstance(name, str) or not name:
+            raise ValueError("assistant tool_call requires name")
+        arguments = raw.get("arguments") or {}
+        calls.append(
+            {
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": (
+                        arguments
+                        if isinstance(arguments, str)
+                        else json.dumps(arguments, default=str)
+                    ),
+                },
+            }
+        )
+    return calls
 
 
 def commit_port_for_store(store: object, session_state: Mapping[str, object]) -> object:
@@ -190,19 +273,42 @@ def commit_port_for_store(store: object, session_state: Mapping[str, object]) ->
     raise TypeError("new-runtime serving requires a durable SQLite or PostgreSQL store")
 
 
-def session_model_adapter(session: Any) -> object:
+def session_workspace_root(session: Any) -> Path:
+    target = getattr(session, "default_run_target", None)
+    workspace = getattr(target, "workspace", None)
+    path = getattr(workspace, "path", None)
+    if isinstance(path, str) and path:
+        return Path(path)
+    raise ValueError("new-runtime serving requires a resolved workspace root")
+
+
+_SERVING_EXCLUDED_TOOLS = frozenset({"subagent"})
+
+
+def serving_tool_schemas(executor: CoreToolExecutor) -> tuple[Any, ...]:
+    return tuple(
+        schema
+        for schema in executor.schemas()
+        if schema.name not in _SERVING_EXCLUDED_TOOLS
+    )
+
+
+def session_tool_executor(session: Any) -> CoreToolExecutor:
+    return CoreToolExecutor(workspace_root=session_workspace_root(session))
+
+
+def session_model_adapter(session: Any, executor: CoreToolExecutor) -> object:
     provider = getattr(session, "provider", None)
+    policy = getattr(session, "approval_policy", None) or ApprovalPolicy.AUTO
     if callable(getattr(provider, "generate", None)):
         return provider
     if callable(getattr(provider, "stream", None)):
-        return ProviderModelAdapter(provider)
+        return ProviderModelAdapter(
+            provider,
+            tools=serving_tool_schemas(executor),
+            approval_policy=policy,
+        )
     return UnwiredServingModelAdapter()
-
-
-def session_effect_backend(session: Any) -> LocalToolEffectBackend:
-    repo_path = getattr(session, "repo_path", None)
-    workspace = Path(repo_path) if repo_path is not None else Path(".")
-    return LocalToolEffectBackend(CoreToolExecutor(workspace_root=workspace))
 
 
 def initial_operation_state(run_id: str) -> OperationStateVersion:
@@ -237,16 +343,21 @@ def build_new_runtime_turn_adapter(
     if session_state.get("id") != authority.session_id:
         session_state = {**session_state, "id": authority.session_id}
     commit_port = commit_port_for_store(store, session_state)
+    tool_executor = session_tool_executor(session)
     executor = effect_executor or DurableEffectExecutor(
         store,  # type: ignore[arg-type]
         owner_id=authority.owner_id,
         executor_id="local-daemon",
-        backend=session_effect_backend(session),
+        backend=LocalToolEffectBackend(tool_executor),
         reservation_lease=timedelta(seconds=30),
     )
     coordinator = SegmentCoordinator(
         engine=AgentEngine(),
-        model_adapter=model_adapter or session_model_adapter(session),
+        model_adapter=(
+            model_adapter
+            if model_adapter is not None
+            else session_model_adapter(session, tool_executor)
+        ),
         commit_port=commit_port,
         effect_executor=executor,
     )
