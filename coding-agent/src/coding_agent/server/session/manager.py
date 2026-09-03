@@ -712,6 +712,7 @@ class SessionManager(
             checkpoint_service=lambda: self._checkpoint_service,
             ensure_runtime=lambda session_id: self.ensure_session_runtime(session_id),
             persist_session=lambda session: self._persist_session_async(session),
+            load_operation_state=self._load_restore_point_operation_state,
         )
         self._runtime_resume_orchestration = RuntimeResumeOrchestrationService(
             resume_service=self._runtime_control_services.resume(),

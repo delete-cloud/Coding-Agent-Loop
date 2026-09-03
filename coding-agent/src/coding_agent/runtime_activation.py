@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from agentkit.checkpoint.models import CheckpointSnapshot
 
 CHECKPOINT_FORMAT_KEY = "checkpoint_format"
+OPERATION_STATE_VERSION_KEY = "operation_state_version"
 
 
 class UnknownRuntimeVersionError(ValueError):
@@ -100,8 +101,42 @@ def is_new_runtime_restore_point(snapshot: CheckpointSnapshot) -> bool:
     extra = snapshot.extra or {}
     return (
         extra.get(CHECKPOINT_FORMAT_KEY) == RUNTIME_VERSION_NEW
+        and OPERATION_STATE_VERSION_KEY in extra
         and not snapshot.tape_entries
         and not snapshot.plugin_states
+    )
+
+
+def restore_point_stamp(
+    extra: Mapping[str, object],
+) -> Mapping[str, object] | None:
+    if OPERATION_STATE_VERSION_KEY not in extra:
+        return None
+    stamp = extra[OPERATION_STATE_VERSION_KEY]
+    if stamp is None:
+        return None
+    if not isinstance(stamp, Mapping):
+        raise ValueError("operation_state_version must be an object or null")
+    return stamp
+
+
+def restore_point_cas_matches(
+    stamp: Mapping[str, object],
+    *,
+    run_id: str,
+    revision: int,
+    projection_epoch: int,
+    transition_id: str,
+) -> bool:
+    commit_ref = stamp.get("commit_ref")
+    stored_transition = (
+        commit_ref.get("transition_id") if isinstance(commit_ref, Mapping) else None
+    )
+    return (
+        stamp.get("run_id") == run_id
+        and stamp.get("revision") == revision
+        and stamp.get("projection_epoch") == projection_epoch
+        and stored_transition == transition_id
     )
 
 

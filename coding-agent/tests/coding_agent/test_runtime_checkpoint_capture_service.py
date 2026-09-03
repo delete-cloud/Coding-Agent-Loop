@@ -23,6 +23,7 @@ class FakeSession:
     approval_policy: ApprovalPolicy = ApprovalPolicy.INTERACTIVE
     provider: object | None = None
     runtime_version: str = "legacy"
+    current_turn_id: str | None = None
 
     def attach_runtime_binding(
         self,
@@ -195,6 +196,7 @@ async def test_capture_reads_checkpoint_backend_provider_at_call_time() -> None:
 async def test_new_runtime_capture_uses_restore_point_backend() -> None:
     from coding_agent.runtime_activation import (
         CHECKPOINT_FORMAT_KEY,
+        OPERATION_STATE_VERSION_KEY,
         RUNTIME_VERSION_NEW,
     )
 
@@ -224,6 +226,7 @@ async def test_new_runtime_capture_uses_restore_point_backend() -> None:
             "label": "g1",
             "extra": {
                 CHECKPOINT_FORMAT_KEY: RUNTIME_VERSION_NEW,
+                OPERATION_STATE_VERSION_KEY: None,
                 "session_restart_config": {
                     "provider_name": "anthropic",
                     "model_name": "claude-checkpoint",
@@ -234,3 +237,66 @@ async def test_new_runtime_capture_uses_restore_point_backend() -> None:
             },
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_new_runtime_capture_stamps_operation_state_version() -> None:
+    from agentkit.runtime.contracts import CommitRef, OperationStateVersion
+    from coding_agent.runtime_activation import (
+        CHECKPOINT_FORMAT_KEY,
+        OPERATION_STATE_VERSION_KEY,
+        RUNTIME_VERSION_NEW,
+    )
+
+    state = OperationStateVersion(
+        run_id="run-1",
+        revision=3,
+        projection_epoch=1,
+        commit_ref=CommitRef(
+            transition_id="transition-1",
+            fact_seq_start="1",
+            fact_seq_end="2",
+        ),
+        value={"phase": "ready"},
+    )
+    session = FakeSession(
+        runtime_version=RUNTIME_VERSION_NEW,
+        current_turn_id="run-1",
+    )
+    ctx = types.SimpleNamespace(tape=types.SimpleNamespace(tape_id="stable-tape"))
+    backend = RecordingCheckpointBackend(_checkpoint())
+
+    async def ensure_runtime(session_id: str):
+        del session_id
+        return ctx
+
+    async def persist_session(current_session: FakeSession) -> None:
+        del current_session
+
+    async def load_operation_state(
+        session_id: str, run_id: str
+    ) -> OperationStateVersion:
+        assert session_id == "session-1"
+        assert run_id == "run-1"
+        return state
+
+    await RuntimeCheckpointCaptureService(
+        checkpoint_service=lambda: backend,
+        ensure_runtime=ensure_runtime,
+        persist_session=persist_session,
+        load_operation_state=load_operation_state,
+    ).capture(session, label="g3")
+
+    extra = backend.restore_point_calls[0]["extra"]
+    assert extra[CHECKPOINT_FORMAT_KEY] == RUNTIME_VERSION_NEW
+    assert extra[OPERATION_STATE_VERSION_KEY] == {
+        "run_id": "run-1",
+        "revision": 3,
+        "projection_epoch": 1,
+        "commit_ref": {
+            "transition_id": "transition-1",
+            "fact_seq_start": "1",
+            "fact_seq_end": "2",
+        },
+        "value": {"phase": "ready"},
+    }

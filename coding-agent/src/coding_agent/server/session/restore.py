@@ -10,6 +10,7 @@ from typing import (
 from agentkit.checkpoint.models import CheckpointMeta
 from agentkit.tape.models import Anchor
 from agentkit.tape.tape import Tape
+from agentkit.runtime.contracts import OperationStateVersion
 from coding_agent.stores.runtime_store import AgentRunRecord
 from coding_agent.runs import (
     RemoteLoopOwnershipRetired,
@@ -162,6 +163,16 @@ class RestoreOps:
             snapshot,
             payload,
         )
+
+    async def _load_restore_point_operation_state(
+        self,
+        session_id: str,
+        run_id: str,
+    ) -> OperationStateVersion | None:
+        store = self._authoritative_store()
+        if store is None:
+            return None
+        return await store.load_operation_state(session_id, run_id)
 
     async def capture_checkpoint(
         self,

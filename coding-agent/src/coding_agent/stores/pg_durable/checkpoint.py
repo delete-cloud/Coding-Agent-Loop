@@ -15,7 +15,13 @@ from coding_agent.stores.pg_durable.helpers import (
     _require_payload_session,
     _required_owned_row,
 )
-from coding_agent.runtime_activation import assert_checkpoint_allowed
+from coding_agent.runtime_activation import (
+    assert_checkpoint_allowed,
+    is_new_runtime_restore_point,
+    restore_point_cas_matches,
+    restore_point_stamp,
+)
+from coding_agent.stores.runtime_store import StateVersionConflictError
 
 
 class PgCheckpointMixin:
@@ -83,6 +89,11 @@ class PgCheckpointMixin:
         async def body(connection: Any) -> None:
             await self._require_owner(connection, authority)
             await self._require_stable_tape(connection, authority, meta.tape_id)
+            await self._assert_restore_point_cas(
+                connection,
+                session_id=authority.session_id,
+                snapshot=snapshot,
+            )
             await self._require_checkpoint_owner(
                 connection,
                 authority,
@@ -124,6 +135,43 @@ class PgCheckpointMixin:
             await self._open_projection_epoch(connection, authority.session_id)
 
         await self._with_transaction(body)
+
+    async def _assert_restore_point_cas(
+        self,
+        connection: Any,
+        *,
+        session_id: str,
+        snapshot: CheckpointSnapshot,
+    ) -> None:
+        if not is_new_runtime_restore_point(snapshot):
+            return
+        stamp = restore_point_stamp(snapshot.extra or {})
+        if stamp is None:
+            return
+        run_id = stamp.get("run_id")
+        if not isinstance(run_id, str) or not run_id:
+            raise ValueError(
+                "operation_state_version.run_id must be a non-empty string"
+            )
+        row = await connection.fetchrow(
+            """
+            SELECT run_id, revision, projection_epoch, transition_id
+            FROM session_operation_states
+            WHERE session_id = $1 AND run_id = $2
+            """,
+            session_id,
+            run_id,
+        )
+        if row is None or not restore_point_cas_matches(
+            stamp,
+            run_id=str(row["run_id"]),
+            revision=int(row["revision"]),
+            projection_epoch=int(row["projection_epoch"]),
+            transition_id=str(row["transition_id"]),
+        ):
+            raise StateVersionConflictError(
+                "restore point operation state does not match"
+            )
 
     async def _reconcile_topics_after_checkpoint_restore(
         self,
