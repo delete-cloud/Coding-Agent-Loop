@@ -90,8 +90,9 @@ async def test_runtime_ensure_service_builds_attaches_and_persists_runtime() -> 
     assert session.pipeline == "pipeline"
     assert session.runtime_ctx is ctx
     assert session.runtime_adapter is adapter
-    assert session.tape_id == "new-tape"
-    assert persisted == [("session-1", "new-tape")]
+    assert session.tape_id == "old-tape"
+    assert ctx.tape.tape_id == "old-tape"
+    assert persisted == [("session-1", "old-tape")]
 
 
 async def test_runtime_ensure_orchestration_asserts_owner_loads_and_builds() -> None:
@@ -124,11 +125,12 @@ async def test_runtime_ensure_orchestration_asserts_owner_loads_and_builds() -> 
     ).ensure_session_runtime("session-1")
 
     assert result is ctx
+    assert ctx.tape.tape_id == "old-tape"
     assert calls == [
         "owner:session-1",
         "load:session-1",
         "build:session-1",
-        "persist:session-1:orchestrated-tape",
+        "persist:session-1:old-tape",
     ]
 
 

@@ -140,7 +140,7 @@ def test_acp_command_uses_shared_provider_model(
         main,
         [
             "--provider",
-            "codex",
+            "codex:test-account",
             "--model",
             "gpt-5.5",
             "--base-url",
@@ -158,7 +158,7 @@ def test_acp_command_uses_shared_provider_model(
     assert calls == [
         {
             "shared_cli_args": {
-                "provider": "codex",
+                "provider": "codex:test-account",
                 "model": "gpt-5.5",
                 "base_url": "https://example.invalid/v1",
             },

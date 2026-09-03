@@ -604,13 +604,21 @@ def _blocked_payload(blocked: BlockedOutcome) -> Mapping[str, Any]:
     return payload
 
 
-def initial_operation_state(run_id: str) -> OperationStateVersion:
+def initial_operation_state(
+    run_id: str,
+    *,
+    system_prompt: str,
+) -> OperationStateVersion:
     return OperationStateVersion(
         run_id=run_id,
         revision=0,
         projection_epoch=0,
         commit_ref=CommitRef(transition_id=f"{run_id}:admission"),
-        value={},
+        value={
+            "context": {
+                "messages": ({"role": "system", "content": system_prompt},),
+            },
+        },
     )
 
 
@@ -621,6 +629,7 @@ def build_new_runtime_turn_adapter(
     authority: OwnerAuthority,
     store: object,
     state_version: OperationStateVersion | None,
+    system_prompt: str,
     model_adapter: object | None = None,
     effect_executor: object | None = None,
     resolve_blocked: ServingBlockedResolver | None = None,
@@ -656,7 +665,10 @@ def build_new_runtime_turn_adapter(
         effect_executor=executor,
     )
     runner = DurableSegmentRunner(coordinator=coordinator, commit_port=commit_port)
-    resolved_state = state_version or initial_operation_state(run_id)
+    resolved_state = state_version or initial_operation_state(
+        run_id,
+        system_prompt=system_prompt,
+    )
     return DurableSegmentTurnAdapter(
         runner=runner,
         session_id=authority.session_id,

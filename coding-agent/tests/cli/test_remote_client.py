@@ -6870,6 +6870,7 @@ def test_stream_prompt_can_emit_display_events_to_consumer(monkeypatch, capsys) 
     from coding_agent.wire.protocol import CompletionStatus, StreamDelta, TurnEnd
 
     emitted: list[object] = []
+    requests: list[dict[str, str]] = []
 
     class FakeConsumer:
         async def emit(self, msg: object) -> None:
@@ -6896,15 +6897,15 @@ def test_stream_prompt_can_emit_display_events_to_consumer(monkeypatch, capsys) 
                 "SSE",
                 (),
                 {
-                    "event": "assistant_text_delta",
+                    "event": "chat_event",
                     "data": json.dumps(
                         {
-                            "source_event_id": "live:sess-1:event-1",
+                            "source_event_id": "event-1",
+                            "session_seq": "1",
+                            "session_id": "sess-1",
                             "run_id": "run-1",
-                            "sequence": None,
-                            "display_kind": "assistant_text_delta",
-                            "payload": {"content": "hello"},
-                            "created_at": "2026-06-03T00:00:00+00:00",
+                            "kind": "assistant_message",
+                            "payload": {"text": "hello"},
                         }
                     ),
                 },
@@ -6913,18 +6914,19 @@ def test_stream_prompt_can_emit_display_events_to_consumer(monkeypatch, capsys) 
                 "SSE",
                 (),
                 {
-                    "event": "final_result",
+                    "event": "chat_event",
                     "data": json.dumps(
                         {
-                            "source_event_id": "live:sess-1:event-2",
+                            "source_event_id": "event-2",
+                            "session_seq": "2",
+                            "session_id": "sess-1",
                             "run_id": "run-1",
-                            "sequence": None,
-                            "display_kind": "final_result",
+                            "kind": "root_terminal",
                             "payload": {
-                                "turn_id": "turn-1",
-                                "completion_status": "completed",
+                                "outcome": "completed",
+                                "result": "hello",
+                                "error": None,
                             },
-                            "created_at": "2026-06-03T00:00:01+00:00",
                         }
                     ),
                 },
@@ -6941,10 +6943,12 @@ def test_stream_prompt_can_emit_display_events_to_consumer(monkeypatch, capsys) 
             return None
 
     monkeypatch.setattr("coding_agent.remote.client.httpx.Client", FakeClient)
-    monkeypatch.setattr(
-        "coding_agent.remote.client.connect_sse",
-        lambda *args, **kwargs: FakeEventSource(),
-    )
+
+    def fake_connect_sse(*args: object, **kwargs: object) -> FakeEventSource:
+        requests.append(dict(kwargs["json"]))
+        return FakeEventSource()
+
+    monkeypatch.setattr("coding_agent.remote.client.connect_sse", fake_connect_sse)
 
     from coding_agent.remote.client import stream_prompt_or_run_request
 
@@ -6964,8 +6968,10 @@ def test_stream_prompt_can_emit_display_events_to_consumer(monkeypatch, capsys) 
     assert emitted[0].content == "hello"
     assert isinstance(emitted[1], TurnEnd)
     assert emitted[1].session_id == "sess-1"
-    assert emitted[1].turn_id == "turn-1"
+    assert emitted[1].turn_id == "run-1"
     assert emitted[1].completion_status is CompletionStatus.COMPLETED
+    assert requests[0]["prompt"] == "hello"
+    assert requests[0]["command_id"]
 
 
 def test_stream_resume_requests_display_event_stream(monkeypatch, capsys) -> None:

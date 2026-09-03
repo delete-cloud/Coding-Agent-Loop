@@ -85,6 +85,7 @@
     "replayRequired": "事件流出现空洞——请重新加载会话以继续。",
     "model": "发送模型",
     "provider": "供应商",
+    "account": "账号",
     "searchModels": "搜索模型",
     "modelsLoading": "正在加载模型…",
     "modelsEmpty": "远端暂无模型"
@@ -122,6 +123,7 @@
     "label": "设置",
     "title": "会话设置",
     "provider": "供应商",
+    "account": "账号",
     "model": "模型",
     "apiKey": "API 密钥",
     "apiKeyHint": "仅保存在当前浏览器内存，不会写入本地存储。",

@@ -129,6 +129,50 @@ def test_connected_chat_projector_filters_child_internals_and_keeps_targeted_app
     }
 
 
+@pytest.mark.parametrize(
+    ("event_kind", "payload", "expected_payload"),
+    [
+        (
+            "assistant_message",
+            {"run_id": "run-active", "content": "answer"},
+            {"text": "answer"},
+        ),
+        (
+            "tool_call",
+            {
+                "run_id": "run-active",
+                "tool_call_id": "call-1",
+                "tool_name": "file_read",
+                "arguments": {"path": "README.md"},
+            },
+            {
+                "call_id": "call-1",
+                "tool_name": "file_read",
+                "arguments": {"path": "README.md"},
+            },
+        ),
+    ],
+)
+def test_project_chat_event_normalizes_agentkit_fact_payloads(
+    event_kind: str,
+    payload: dict[str, object],
+    expected_payload: dict[str, object],
+) -> None:
+    record = EventRecord(
+        event_id=f"event-{event_kind}",
+        session_id=SESSION_ID,
+        event_kind=event_kind,
+        payload=payload,
+        created_at=datetime(2026, 8, 24, tzinfo=UTC),
+        session_seq="1",
+    )
+
+    projected = project_chat_event(record, _run("run-active"))
+
+    assert projected is not None
+    assert projected.payload == expected_payload
+
+
 @pytest.mark.asyncio
 async def test_snapshot_chat_events_empty_and_nonempty_pages_are_bounded(
     store_kind: str,

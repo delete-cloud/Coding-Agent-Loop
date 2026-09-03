@@ -2734,17 +2734,17 @@ async def test_run_agent_reuses_session_tape_id_across_hot_turns() -> None:
     store = InMemorySessionStore()
     manager = SessionManager(store=store)
     session_id = await manager.create_session()
+    session = manager.get_session(session_id)
+    session.tape_id = "stable-session-tape"
 
     recorded_tapes: list[Tape | None] = []
 
     class FakeAdapter:
         def __init__(self, pipeline, ctx, consumer) -> None:
-            del pipeline, consumer
-            self.ctx = ctx
+            del pipeline, ctx, consumer
 
         async def run_turn(self, prompt: str) -> TurnOutcome:
             del prompt
-            self.ctx.tape.tape_id = "stable-session-tape"
             return TurnOutcome(stop_reason=StopReason.NO_TOOL_CALLS, steps_taken=1)
 
     fake_pipeline = types.SimpleNamespace(
@@ -2754,10 +2754,11 @@ async def test_run_agent_reuses_session_tape_id_across_hot_turns() -> None:
     )
 
     def fake_create_agent(**kwargs):
-        recorded_tapes.append(kwargs.get("tape"))
-        return fake_pipeline, types.SimpleNamespace(
-            config={}, tape=kwargs.get("tape") or Tape()
-        )
+        tape = kwargs.get("tape")
+        recorded_tapes.append(tape)
+        if tape is None:
+            raise AssertionError("prebound session tape was not restored")
+        return fake_pipeline, types.SimpleNamespace(config={}, tape=tape)
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
@@ -2766,7 +2767,8 @@ async def test_run_agent_reuses_session_tape_id_across_hot_turns() -> None:
         await manager.run_agent(session_id, "hello")
         await manager.run_agent(session_id, "again")
 
-    assert recorded_tapes[0] is None
+    assert recorded_tapes[0] is not None
+    assert recorded_tapes[0].tape_id == "stable-session-tape"
     assert len(recorded_tapes) == 1
     persisted_payload = store.get(session_id)
     assert persisted_payload is not None
@@ -3875,15 +3877,15 @@ async def test_session_store_persists_tape_id_for_cold_recovery() -> None:
     store = InMemorySessionStore()
     manager = SessionManager(store=store)
     session_id = await manager.create_session()
+    session = manager.get_session(session_id)
+    session.tape_id = "persisted-stable-id"
 
     class FakeAdapter:
         def __init__(self, pipeline, ctx, consumer) -> None:
-            del pipeline, consumer
-            self.ctx = ctx
+            del pipeline, ctx, consumer
 
         async def run_turn(self, prompt: str) -> None:
             del prompt
-            self.ctx.tape.tape_id = "persisted-stable-id"
 
     fake_pipeline = types.SimpleNamespace(
         _registry=types.SimpleNamespace(
@@ -3892,9 +3894,10 @@ async def test_session_store_persists_tape_id_for_cold_recovery() -> None:
     )
 
     def fake_create_agent(**kwargs):
-        return fake_pipeline, types.SimpleNamespace(
-            config={}, tape=kwargs.get("tape") or Tape()
-        )
+        tape = kwargs.get("tape")
+        if tape is None:
+            raise AssertionError("persisted session tape was not restored")
+        return fake_pipeline, types.SimpleNamespace(config={}, tape=tape)
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
@@ -6063,6 +6066,75 @@ async def test_cancelled_forked_turn_next_prompt_does_not_rebind_tape(
         assert stable_tape_id == "stable-fork-tape"
 
         await manager.run_agent(session_id, "next prompt")
+
+    session = manager.get_session(session_id)
+    assert session.tape_id == stable_tape_id
+    assert session.turn_in_progress is False
+    assert session.task is None
+
+
+@pytest.mark.asyncio
+async def test_completed_turn_next_prompt_does_not_rebind_tape(
+    tmp_path: Path,
+) -> None:
+    class SecondTurnProvider:
+        state_key = "llm_provider"
+
+        def hooks(self) -> dict[str, object]:
+            return {
+                "provide_llm": self.provide_llm,
+                "get_tools": self.get_tools,
+                "build_context": self.build_context,
+            }
+
+        def provide_llm(self, **kwargs: object) -> "SecondTurnProvider":
+            del kwargs
+            return self
+
+        def get_tools(self, **kwargs: object) -> list[object]:
+            del kwargs
+            return []
+
+        def build_context(self, **kwargs: object) -> list[dict[str, object]]:
+            del kwargs
+            return []
+
+        async def stream(self, messages, tools=None, **kwargs):
+            del messages, tools, kwargs
+            yield TextEvent(text="turn completed")
+            yield DoneEvent()
+
+    manager = SessionManager(
+        storage_config=local_sqlite_storage_config(tmp_path),
+        owner_store=SQLiteSessionOwnerStore(local_sqlite_path(tmp_path)),
+        owner_id="owner-a",
+        fencing_token=999,
+    )
+    plugin = SecondTurnProvider()
+
+    def fake_create_agent(**kwargs):
+        registry = PluginRegistry()
+        registry.register(plugin)
+        runtime = HookRuntime(registry)
+        pipeline = Pipeline(runtime=runtime, registry=registry)
+        return pipeline, PipelineContext(
+            tape=Tape(),
+            session_id=kwargs["session_id_override"],
+            config={"system_prompt": "test system instruction"},
+        )
+
+    session_id = await manager.create_session()
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
+        await manager.run_agent(session_id, "first prompt")
+        session = manager.get_session(session_id)
+        stable_tape_id = session.tape_id
+        assert stable_tape_id is not None
+        session.runtime_pipeline = None
+        session.runtime_ctx = None
+        session.runtime_adapter = None
+        await manager.run_agent(session_id, "second prompt")
 
     session = manager.get_session(session_id)
     assert session.tape_id == stable_tape_id

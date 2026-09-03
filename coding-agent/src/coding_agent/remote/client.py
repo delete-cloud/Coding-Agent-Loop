@@ -7,6 +7,7 @@ import json
 import os
 import tempfile
 import threading
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -1119,11 +1120,14 @@ def stream_prompt_or_run_request(
     headers: dict[str, str],
     display_consumer: DisplayWireConsumer | None = None,
 ) -> int:
+    payload = {"prompt": prompt}
+    if display_consumer is not None:
+        payload["command_id"] = uuid.uuid4().hex
     return _stream_prompt_like_request(
         base_url=base_url,
         session_id=session_id,
         path=f"/sessions/{session_id}/prompt?event_format=display",
-        payload={"prompt": prompt},
+        payload=payload,
         headers=headers,
         action="stream remote prompt",
         truncated_message="Remote prompt stream ended without RunRequested or TurnEnd",
@@ -1318,6 +1322,12 @@ def _legacy_prompt_event_payload(
         "Error",
     }:
         return event, _parse_sse_payload(data)
+    if event == "chat_event":
+        return _canonical_chat_event_payload(_parse_sse_payload(data))
+    if event == "stream_control":
+        control = _parse_sse_payload(data)
+        detail = control.get("code") or control.get("control") or "stream closed"
+        raise click.ClickException(f"Remote chat stream ended: {detail}")
     envelope = _parse_sse_payload(data)
     payload = envelope.get("payload")
     if not isinstance(payload, Mapping):
@@ -1326,6 +1336,71 @@ def _legacy_prompt_event_payload(
         _legacy_event_name_for_display_kind(event),
         dict(cast(Mapping[str, object], payload)),
     )
+
+
+def _canonical_chat_event_payload(
+    envelope: dict[str, object],
+) -> tuple[str, dict[str, object]]:
+    kind = _string_payload_value(envelope, "kind")
+    payload = envelope.get("payload")
+    if kind is None or not isinstance(payload, Mapping):
+        raise click.ClickException("Remote chat event is malformed")
+    event_payload = dict(cast(Mapping[str, object], payload))
+    shared: dict[str, object] = {
+        "session_id": _string_payload_value(envelope, "session_id") or "",
+        "agent_id": "",
+    }
+    run_id = _string_payload_value(envelope, "run_id") or ""
+    if kind == "assistant_message":
+        return "StreamDelta", {
+            **shared,
+            "content": _string_payload_value(event_payload, "text") or "",
+            "role": "assistant",
+        }
+    if kind == "thinking":
+        return "ThinkingDelta", {
+            **shared,
+            "text": _string_payload_value(event_payload, "text") or "",
+        }
+    if kind == "tool_call":
+        return "ToolCallDelta", {
+            **shared,
+            "call_id": _string_payload_value(event_payload, "call_id") or "",
+            "tool_name": _string_payload_value(event_payload, "tool_name") or "unknown",
+            "arguments": _mapping_payload_value(event_payload, "arguments"),
+        }
+    if kind == "tool_result":
+        output = _string_payload_value(event_payload, "output") or ""
+        return "ToolResultDelta", {
+            **shared,
+            "call_id": _string_payload_value(event_payload, "call_id") or "",
+            "tool_name": _string_payload_value(event_payload, "tool_name") or "unknown",
+            "result": output,
+            "display_result": output,
+            "is_error": bool(event_payload.get("is_error")),
+        }
+    if kind == "approval_requested":
+        return "ApprovalRequest", {
+            **shared,
+            "request_id": (
+                _string_payload_value(event_payload, "approval_request_id") or ""
+            ),
+            "call_id": _string_payload_value(event_payload, "tool_call_id") or "",
+            "tool": _string_payload_value(event_payload, "tool_name") or "unknown",
+            "args": _mapping_payload_value(event_payload, "arguments"),
+        }
+    if kind == "root_terminal":
+        outcome = _string_payload_value(event_payload, "outcome")
+        return "TurnEnd", {
+            **shared,
+            "turn_id": run_id,
+            "completion_status": (
+                CompletionStatus.COMPLETED.value
+                if outcome == "completed"
+                else CompletionStatus.ERROR.value
+            ),
+        }
+    return "Unknown", shared
 
 
 def _wire_message_from_payload(

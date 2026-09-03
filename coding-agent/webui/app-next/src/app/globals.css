@@ -739,6 +739,12 @@ body {
   color: var(--fg);
   background: var(--bg-hover);
 }
+
+.model-picker-accounts {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--hairline);
+}
 .model-picker-models {
   margin: 0;
   padding: 4px 0;

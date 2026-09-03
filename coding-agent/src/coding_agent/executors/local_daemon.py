@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Protocol, cast
 
 from coding_agent.approval import ApprovalPolicy
+from coding_agent.runs.ensure import retain_session_tape
 from coding_agent.runs import (
     LocalDaemonExecutorRef,
     LocalPathWorkspaceRef,
@@ -70,7 +71,7 @@ RuntimeTapeLoader = Callable[[str | None], Awaitable[object]]
 RuntimeFactory = Callable[..., tuple[object, object]]
 RuntimeAdapterFactory = Callable[[object, object], RuntimeTurnAdapter]
 NewRuntimeAdapterFactory = Callable[
-    [LocalDaemonRuntimeSession, RunRequest],
+    [LocalDaemonRuntimeSession, RunRequest, object],
     Awaitable[RuntimeTurnAdapter] | RuntimeTurnAdapter,
 ]
 SemanticTopicStoreFactory = Callable[[], object | None]
@@ -179,7 +180,7 @@ class LocalDaemonSessionRuntimeProvider:
                 semantic_topic_store=self.semantic_topic_store_factory(),
                 tape=await self.restore_tape(session.tape_id),
             )
-            session.tape_id = ctx.tape.tape_id
+            retain_session_tape(session, ctx)
             await self.persist_session(session)
             ctx.runtime_message_bus = session.runtime_message_bus
             ctx.config["wire_consumer"] = None
@@ -189,13 +190,17 @@ class LocalDaemonSessionRuntimeProvider:
             if session.provider is not None:
                 llm_plugin._instance = session.provider
 
+        if turn_kind == "durable_segment_runner" and session.provider is None:
+            llm_plugin = pipeline._registry.get("llm_provider")
+            session.provider = llm_plugin.provide_llm()
+
         adapter_created = False
         if turn_kind == "durable_segment_runner":
             if self.new_runtime_adapter_factory is None:
                 raise RuntimeError(
                     "new-runtime sessions require DurableSegmentTurnAdapter"
                 )
-            adapter_result = self.new_runtime_adapter_factory(session, request)
+            adapter_result = self.new_runtime_adapter_factory(session, request, ctx)
             if isawaitable(adapter_result):
                 adapter = await adapter_result
             else:

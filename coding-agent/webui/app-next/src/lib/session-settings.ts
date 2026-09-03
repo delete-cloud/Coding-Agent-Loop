@@ -32,19 +32,21 @@ export function isCodexProvider(provider: string): boolean {
   return provider === "codex" || provider.startsWith("codex:");
 }
 
+export function providerKind(provider: string): string {
+  return isCodexProvider(provider) ? "codex" : provider;
+}
+
 /** Bare `codex` is not a connected account when only `codex:<label>` exists. */
 export function resolveProviderAccount(provider: string, oauthProviders: readonly string[]): string {
   if (provider !== "codex") return provider;
   if (oauthProviders.includes("codex")) return "codex";
   const labeled = oauthProviders.filter((item) => item.startsWith("codex:"));
-  if (labeled.length === 1) return labeled[0];
-  if (labeled.length > 1) return labeled[0];
+  if (labeled.length > 0) return labeled[0];
   return provider;
 }
 
-export function listableProviders(oauthProviders: readonly string[]): string[] {
-  const builtins = BUILTIN_PROVIDERS.filter((item) => item !== "codex" || oauthProviders.includes("codex"));
-  return [...new Set([...builtins, ...oauthProviders])];
+export function listableProviders(): string[] {
+  return [...BUILTIN_PROVIDERS];
 }
 
 export function formatProviderAccountLabel(

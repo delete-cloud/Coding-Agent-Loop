@@ -191,8 +191,9 @@ describe("SettingsPanel apply", () => {
 });
 
 describe("SettingsPanel providers", () => {
-  it("lists connected codex:<label> keys and hides bare codex", async () => {
+  it("lists Codex once and keeps accounts in a separate control", async () => {
     renderSettings({
+      providerName: "codex:kina0630test-gmail-com",
       accounts: [{ provider: "codex:kina0630test-gmail-com", label: "kina" }],
       client: {
         listProviderModels: vi.fn(async () => ({
@@ -215,14 +216,16 @@ describe("SettingsPanel providers", () => {
     await waitFor(() => {
       const select = screen.getByLabelText(zhMessages.settings.provider) as HTMLSelectElement;
       const values = [...select.options].map((option) => option.value);
-      expect(values).toContain("codex:kina0630test-gmail-com");
-      expect(values).not.toContain("codex");
-      const labeled = [...select.options].find((option) => option.value === "codex:kina0630test-gmail-com");
-      expect(labeled?.textContent).toBe("Codex · kina");
+      expect(values).toContain("codex");
+      expect(values).not.toContain("codex:kina0630test-gmail-com");
+      expect(select.options[values.indexOf("codex")]?.textContent).toBe("Codex");
     });
+    const account = screen.getByLabelText(zhMessages.settings.account) as HTMLSelectElement;
+    expect(account.value).toBe("codex:kina0630test-gmail-com");
+    expect(account.options[account.selectedIndex]?.textContent).toBe("kina");
   });
 
-  it("applies the connected labeled Codex account instead of bare codex", async () => {
+  it("applies the selected Codex account instead of bare codex", async () => {
     const { onApply } = renderSettings({
       providerName: "codex",
       modelName: "gpt-5.4",
@@ -246,9 +249,12 @@ describe("SettingsPanel providers", () => {
     });
 
     await waitFor(() => {
-      expect(
-        (screen.getByLabelText(zhMessages.settings.provider) as HTMLSelectElement).value,
-      ).toBe("codex:kina0630test-gmail-com");
+      expect((screen.getByLabelText(zhMessages.settings.provider) as HTMLSelectElement).value).toBe(
+        "codex",
+      );
+      expect((screen.getByLabelText(zhMessages.settings.account) as HTMLSelectElement).value).toBe(
+        "codex:kina0630test-gmail-com",
+      );
     });
     fireEvent.click(screen.getByRole("button", { name: zhMessages.settings.apply }));
 

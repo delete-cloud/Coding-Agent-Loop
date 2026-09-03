@@ -9,10 +9,10 @@ import {
 const labeled = "codex:kina0630test-gmail-com";
 
 describe("listableProviders", () => {
-  it("hides bare codex unless that key is connected", () => {
-    expect(listableProviders([labeled])).toContain(labeled);
-    expect(listableProviders([labeled])).not.toContain("codex");
-    expect(listableProviders(["codex"])).toContain("codex");
+  it("lists Codex once and keeps OAuth accounts out of the provider list", () => {
+    expect(listableProviders()).toContain("codex");
+    expect(listableProviders()).not.toContain(labeled);
+    expect(listableProviders().filter((item) => item === "codex")).toEqual(["codex"]);
   });
 });
 
@@ -39,3 +39,5 @@ describe("formatProviderAccountLabel", () => {
     expect(formatProviderAccountLabel(labeled, [])).toBe("Codex");
   });
 });
+
+

@@ -160,6 +160,7 @@ async def test_new_runtime_rebuilds_adapter_for_each_run(
     workspace.mkdir()
     session = FakeRuntimeSession()
     session.runtime_version = RUNTIME_VERSION_NEW
+    session.provider = object()
     cached_pipeline = object()
     cached_ctx = types.SimpleNamespace(
         config={}, tape=types.SimpleNamespace(tape_id="tape-old")
@@ -169,8 +170,13 @@ async def test_new_runtime_rebuilds_adapter_for_each_run(
     session.runtime_adapter = FakeRuntimeAdapter()
     created_for: list[str] = []
 
-    async def build_new_adapter(runtime_session, request: RunRequest) -> object:
+    async def build_new_adapter(
+        runtime_session,
+        request: RunRequest,
+        runtime_ctx,
+    ) -> object:
         assert runtime_session is session
+        assert runtime_ctx is cached_ctx
         created_for.append(request.run_id)
         return FakeRuntimeAdapter(result=request.run_id)
 
@@ -217,6 +223,67 @@ async def test_new_runtime_rebuilds_adapter_for_each_run(
     assert first.adapter.result == "run-1"
     assert second.adapter.result == "run-2"
     assert created_for == ["run-1", "run-2"]
+
+
+@pytest.mark.asyncio
+async def test_new_runtime_materializes_provider_before_adapter_factory(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    session = FakeRuntimeSession()
+    session.runtime_version = RUNTIME_VERSION_NEW
+    stream_provider = object()
+    provide_calls = 0
+
+    def provide_llm() -> object:
+        nonlocal provide_calls
+        provide_calls += 1
+        return stream_provider
+
+    llm_plugin = types.SimpleNamespace(_instance=None, provide_llm=provide_llm)
+    pipeline = types.SimpleNamespace(
+        _registry=types.SimpleNamespace(get=lambda name: llm_plugin)
+    )
+    ctx = types.SimpleNamespace(
+        config={},
+        tape=types.SimpleNamespace(tape_id="tape-new"),
+    )
+
+    async def build_new_adapter(
+        runtime_session,
+        request: RunRequest,
+        runtime_ctx,
+    ) -> object:
+        assert runtime_session.provider is stream_provider
+        assert runtime_ctx is ctx
+        return FakeRuntimeAdapter(result=request.run_id)
+
+    async def restore_tape(tape_id: str | None) -> object:
+        return types.SimpleNamespace(tape_id=tape_id)
+
+    async def persist_session(runtime_session) -> None:
+        del runtime_session
+
+    provider = LocalDaemonSessionRuntimeProvider(
+        session=session,
+        resolve_environment=lambda target: target,
+        workspace_root_for_environment=lambda environment: workspace.resolve(),
+        workspace_root_for_runtime=lambda runtime_ctx: workspace.resolve(),
+        close_runtime=lambda runtime_session: None,
+        create_agent_for_session=lambda **kwargs: (pipeline, ctx),
+        restore_tape=restore_tape,
+        persist_session=persist_session,
+        adapter_factory=lambda runtime_pipeline, runtime_ctx: FakeRuntimeAdapter(),
+        new_runtime_adapter_factory=build_new_adapter,
+    )
+
+    binding = await provider.prepare_runtime(
+        _local_request_for_path(str(workspace), run_id="run-materialized")
+    )
+
+    assert binding.adapter.result == "run-materialized"
+    assert provide_calls == 1
 
 
 @pytest.mark.asyncio
@@ -290,7 +357,7 @@ async def test_local_daemon_session_runtime_provider_rebuilds_changed_workspace(
 
     assert closed == ["session-1"]
     assert restored == ["tape-old"]
-    assert persisted == ["tape-new"]
+    assert persisted == ["tape-old"]
     assert create_kwargs["workspace_root"] == new_workspace.resolve()
     assert create_kwargs["model_override"] == "model-1"
     assert create_kwargs["provider_override"] == provider_name
@@ -300,7 +367,8 @@ async def test_local_daemon_session_runtime_provider_rebuilds_changed_workspace(
     assert create_kwargs["session_id_override"] == "session-1"
     assert create_kwargs["run_id_override"] == "run-1"
     assert create_kwargs["api_key"] == expected_api_key
-    assert session.tape_id == "tape-new"
+    assert session.tape_id == "tape-old"
+    assert fake_ctx.tape.tape_id == "tape-old"
     assert fake_ctx.runtime_message_bus is session.runtime_message_bus
     assert fake_ctx.config == {"wire_consumer": None, "agent_id": ""}
     assert session.runtime_pipeline is fake_pipeline

@@ -16,6 +16,7 @@ import {
   isCodexProvider,
   isTapeReboundError,
   listableProviders,
+  providerKind,
   resolveProviderAccount,
 } from "@/lib/session-settings";
 
@@ -104,11 +105,12 @@ export function SettingsPanel({
     };
   }, [client, provider]);
 
+  const kind = providerKind(provider);
   const providerOptions = useMemo(() => {
-    const listed = listableProviders(oauthProviders);
-    const current = resolveProviderAccount(provider, oauthProviders);
-    return [...new Set([current, ...listed].filter((item) => item.trim()))];
-  }, [provider, oauthProviders]);
+    const listed = listableProviders();
+    return [...new Set([kind, ...listed].filter((item) => item.trim()))];
+  }, [kind]);
+  const accountOptions = accounts.filter((account) => isCodexProvider(account.provider));
   const hideApiKey = isCodexProvider(provider);
 
   if (!open) return null;
@@ -162,16 +164,35 @@ export function SettingsPanel({
         {t("provider")}
         <Select
           id="settings-provider"
-          value={provider}
-          onChange={(event) => setProvider(event.target.value)}
+          value={kind}
+          onChange={(event) => {
+            const next = event.target.value;
+            setProvider(next === "codex" ? resolveProviderAccount("codex", oauthProviders) : next);
+          }}
         >
           {providerOptions.map((item) => (
             <option key={item} value={item}>
-              {formatProviderAccountLabel(item, accounts)}
+              {formatProviderAccountLabel(item, [])}
             </option>
           ))}
         </Select>
       </label>
+      {kind === "codex" ? (
+        <label className="settings-field" htmlFor="settings-account">
+          {t("account")}
+          <Select
+            id="settings-account"
+            value={isCodexProvider(provider) ? provider : ""}
+            onChange={(event) => setProvider(event.target.value)}
+          >
+            {accountOptions.map((account) => (
+              <option key={account.provider} value={account.provider}>
+                {account.label.trim() || account.provider}
+              </option>
+            ))}
+          </Select>
+        </label>
+      ) : null}
       <label className="settings-field" htmlFor="settings-model">
         {t("model")}
         <ModelCombobox

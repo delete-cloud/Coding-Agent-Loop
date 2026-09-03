@@ -5,6 +5,10 @@ from dataclasses import dataclass
 from typing import Protocol
 
 
+class SessionTapeTarget(Protocol):
+    tape_id: str | None
+
+
 class RuntimeEnsureSession(Protocol):
     id: str
     runtime_ctx: object | None
@@ -29,6 +33,18 @@ RuntimeEnsureOwnerAsserter = Callable[[str], Awaitable[None]]
 RuntimeEnsureSessionLoader = Callable[[str], Awaitable[RuntimeEnsureSession]]
 
 
+def retain_session_tape(session: SessionTapeTarget, ctx: object) -> None:
+    tape = getattr(ctx, "tape", None)
+    tape_id = getattr(tape, "tape_id", None)
+    if not isinstance(tape_id, str) or not tape_id:
+        raise RuntimeError("runtime context is missing tape_id")
+    if session.tape_id is None:
+        session.tape_id = tape_id
+        return
+    if tape_id != session.tape_id:
+        tape.tape_id = session.tape_id
+
+
 @dataclass(frozen=True)
 class RuntimeEnsureService:
     async def ensure_runtime(
@@ -47,7 +63,7 @@ class RuntimeEnsureService:
             ctx=ctx,
             adapter=adapter,
         )
-        session.tape_id = ctx.tape.tape_id
+        retain_session_tape(session, ctx)
         await persist_session(session)
         return ctx
 
@@ -78,4 +94,6 @@ __all__ = [
     "RuntimeEnsureService",
     "RuntimeEnsureSession",
     "RuntimeEnsureSessionLoader",
+    "SessionTapeTarget",
+    "retain_session_tape",
 ]

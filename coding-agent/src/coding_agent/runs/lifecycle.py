@@ -916,7 +916,8 @@ class RuntimeTurnFinalizer:
         run_id: str,
         resume_context: RuntimeRunResumeContext | None = None,
     ) -> None:
-        session.tape_id = ctx.tape.tape_id
+        if session.tape_id is None:
+            session.tape_id = ctx.tape.tape_id
         if self.has_runtime_store:
             turn_outcome = require_runtime_turn_outcome(outcome)
             turn_status = runtime_status_from_turn_outcome(turn_outcome)

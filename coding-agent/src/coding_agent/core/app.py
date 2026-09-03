@@ -874,7 +874,7 @@ def create_agent(
 ) -> tuple[Any, Any]:
     return create_child_pipeline(
         parent_provider=None,
-        tape_fork=tape or Tape(),
+        tape_fork=tape if tape is not None else Tape(),
         tool_filter=None,
         config_path=config_path,
         data_dir=data_dir,

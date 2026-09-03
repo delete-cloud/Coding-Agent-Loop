@@ -8,7 +8,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   formatProviderAccountLabel,
+  isCodexProvider,
   listableProviders,
+  providerKind,
   resolveProviderAccount,
 } from "@/lib/session-settings";
 
@@ -153,13 +155,15 @@ export function ModelPicker({
   const rootRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
   const resolved = resolveProviderAccount(provider, oauthProviders);
+  const kind = providerKind(resolved);
 
   usePopupDismiss(open, rootRef, setOpen, true);
 
   const providers = useMemo(() => {
-    const listed = listableProviders(oauthProviders);
-    return [...new Set([resolved, ...listed].filter((item) => item.trim()))];
-  }, [resolved, oauthProviders]);
+    const listed = listableProviders();
+    return [...new Set([kind, ...listed].filter((item) => item.trim()))];
+  }, [kind]);
+  const accountOptions = accounts.filter((account) => isCodexProvider(account.provider));
 
   const providerLabel = formatProviderAccountLabel(resolved, accounts);
   const chipName = [model.trim(), providerLabel.trim()].filter((part) => part.length > 0).join(" · ");
@@ -191,16 +195,35 @@ export function ModelPicker({
                 type="button"
                 variant="ghost"
                 role="option"
-                aria-selected={item === resolved}
+                aria-selected={item === kind}
                 className="model-picker-provider"
                 onClick={() => {
-                  const next = resolveProviderAccount(item, oauthProviders);
+                  const next = item === "codex" ? resolveProviderAccount("codex", oauthProviders) : item;
                   if (next !== provider) onProviderChange(next);
                 }}
               >
-                {formatProviderAccountLabel(item, accounts)}
+                {formatProviderAccountLabel(item, [])}
               </Button>
             ))}
+            {kind === "codex" && accountOptions.length > 0 ? (
+              <div className="model-picker-accounts" role="listbox" aria-label={t("account")}>
+                {accountOptions.map((account) => (
+                  <Button
+                    key={account.provider}
+                    type="button"
+                    variant="ghost"
+                    role="option"
+                    aria-selected={account.provider === resolved}
+                    className="model-picker-provider"
+                    onClick={() => {
+                      if (account.provider !== provider) onProviderChange(account.provider);
+                    }}
+                  >
+                    {account.label.trim() || account.provider}
+                  </Button>
+                ))}
+              </div>
+            ) : null}
           </div>
           <ul className="model-picker-models" role="listbox" aria-label={t("model")}>
             {status === "loading" ? (
