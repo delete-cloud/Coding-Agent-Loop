@@ -340,22 +340,7 @@ def project_chat_event(
     if not include_in_parent_wire(record.event_kind, payload):
         return None
     payload_run_id = payload.pop("run_id", None)
-    if record.event_kind == "approval_requested":
-        public_fields = (
-            "approval_request_id",
-            "tool_call_id",
-            "tool_name",
-            "arguments",
-            "effect_id",
-            "attempt_id",
-            "target_run_id",
-            "target_parent_effect_id",
-        )
-        payload = {
-            field_name: payload[field_name]
-            for field_name in public_fields
-            if field_name in payload
-        }
+    payload = _projected_chat_payload(record.event_kind, payload)
     if payload_run_id is not None and not isinstance(payload_run_id, str):
         raise TypeError("chat event run_id must be a string")
     if run is not None:
@@ -378,6 +363,51 @@ def project_chat_event(
         created_at=record.created_at,
         payload=payload,
     )
+
+
+def _projected_chat_payload(
+    event_kind: str,
+    payload: JSONObject,
+) -> JSONObject:
+    if event_kind == "assistant_message":
+        return {"text": payload.get("text", payload.get("content"))}
+    if event_kind == "tool_call":
+        return {
+            "call_id": payload.get("call_id", payload.get("tool_call_id")),
+            "tool_name": payload.get("tool_name"),
+            "arguments": payload.get("arguments"),
+        }
+    if event_kind == "tool_result":
+        output = payload.get("output")
+        if not isinstance(output, str):
+            result = payload.get("result")
+            output = (
+                result
+                if isinstance(result, str)
+                else json.dumps(result, ensure_ascii=False, sort_keys=True)
+            )
+        return {
+            "call_id": payload.get("call_id", payload.get("tool_call_id")),
+            "output": output,
+            "is_error": payload.get("is_error"),
+        }
+    if event_kind == "approval_requested":
+        public_fields = (
+            "approval_request_id",
+            "tool_call_id",
+            "tool_name",
+            "arguments",
+            "effect_id",
+            "attempt_id",
+            "target_run_id",
+            "target_parent_effect_id",
+        )
+        return {
+            field_name: payload[field_name]
+            for field_name in public_fields
+            if field_name in payload
+        }
+    return payload
 
 
 def _validate_chat_payload(kind: ChatEventKind, payload: JSONObject) -> None:

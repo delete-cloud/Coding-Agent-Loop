@@ -6068,3 +6068,72 @@ async def test_cancelled_forked_turn_next_prompt_does_not_rebind_tape(
     assert session.tape_id == stable_tape_id
     assert session.turn_in_progress is False
     assert session.task is None
+
+
+@pytest.mark.asyncio
+async def test_completed_turn_next_prompt_does_not_rebind_tape(
+    tmp_path: Path,
+) -> None:
+    class SecondTurnProvider:
+        state_key = "llm_provider"
+
+        def hooks(self) -> dict[str, object]:
+            return {
+                "provide_llm": self.provide_llm,
+                "get_tools": self.get_tools,
+                "build_context": self.build_context,
+            }
+
+        def provide_llm(self, **kwargs: object) -> "SecondTurnProvider":
+            del kwargs
+            return self
+
+        def get_tools(self, **kwargs: object) -> list[object]:
+            del kwargs
+            return []
+
+        def build_context(self, **kwargs: object) -> list[dict[str, object]]:
+            del kwargs
+            return []
+
+        async def stream(self, messages, tools=None, **kwargs):
+            del messages, tools, kwargs
+            yield TextEvent(text="turn completed")
+            yield DoneEvent()
+
+    manager = SessionManager(
+        storage_config=local_sqlite_storage_config(tmp_path),
+        owner_store=SQLiteSessionOwnerStore(local_sqlite_path(tmp_path)),
+        owner_id="owner-a",
+        fencing_token=999,
+    )
+    plugin = SecondTurnProvider()
+
+    def fake_create_agent(**kwargs):
+        registry = PluginRegistry()
+        registry.register(plugin)
+        runtime = HookRuntime(registry)
+        pipeline = Pipeline(runtime=runtime, registry=registry)
+        return pipeline, PipelineContext(
+            tape=Tape(),
+            session_id=kwargs["session_id_override"],
+            config={"system_prompt": "test system instruction"},
+        )
+
+    session_id = await manager.create_session()
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("coding_agent.__main__.create_agent", fake_create_agent)
+        await manager.run_agent(session_id, "first prompt")
+        session = manager.get_session(session_id)
+        stable_tape_id = session.tape_id
+        assert stable_tape_id is not None
+        session.runtime_pipeline = None
+        session.runtime_ctx = None
+        session.runtime_adapter = None
+        await manager.run_agent(session_id, "second prompt")
+
+    session = manager.get_session(session_id)
+    assert session.tape_id == stable_tape_id
+    assert session.turn_in_progress is False
+    assert session.task is None

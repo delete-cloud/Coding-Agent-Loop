@@ -821,6 +821,7 @@ class SessionManager(
         self,
         session: Session,
         request: Any,
+        runtime_ctx: Any,
     ) -> Any:
         from coding_agent.runs.serving_runtime import (
             admit_blocked_approval,
@@ -836,6 +837,9 @@ class SessionManager(
         authority = self._owner_authorities.get(session.id)
         if authority is None:
             raise RuntimeError("new-runtime serving requires owner authority")
+        system_prompt = runtime_ctx.config.get("system_prompt")
+        if not isinstance(system_prompt, str):
+            raise RuntimeError("new-runtime serving requires a system prompt")
         state = await store.load_operation_state(session.id, request.run_id)
 
         async def durable_settlement(blocked: Any) -> Any:
@@ -899,5 +903,6 @@ class SessionManager(
             authority=authority,
             store=store,
             state_version=state,
+            system_prompt=system_prompt,
             resolve_blocked=resolve_blocked,
         )

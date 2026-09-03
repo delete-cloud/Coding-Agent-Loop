@@ -149,6 +149,9 @@ class _ManagerSession(_Session):
         self.id = SESSION_ID
         self.max_steps = max_steps
         self.current_turn_id = "run-serving-restart"
+        self.runtime_ctx = SimpleNamespace(
+            config={"system_prompt": "test system instruction"}
+        )
         self.approval_coordinator = ApprovalCoordinator()
 
     def begin_approval_request(self, request: object) -> None:
@@ -219,7 +222,10 @@ async def test_durable_segment_turn_adapter_does_not_use_pipeline() -> None:
         session_id="session-1",
         owner_id="owner-1",
         owner_epoch=1,
-        state_version=initial_operation_state("run-adapter"),
+        state_version=initial_operation_state(
+            "run-adapter",
+            system_prompt="test system instruction",
+        ),
         max_rounds=1,
         control_probe=_Probe(),
         frame_sink=_Sink(),
@@ -247,6 +253,7 @@ async def test_serving_factory_builds_coordinator_and_commit_port(
         authority=owner,
         store=store,
         state_version=None,
+        system_prompt="configured system instruction",
     )
     assert isinstance(adapter, DurableSegmentTurnAdapter)
     assert isinstance(adapter.runner.coordinator, SegmentCoordinator)
@@ -254,6 +261,9 @@ async def test_serving_factory_builds_coordinator_and_commit_port(
     assert owner.session_id == SESSION_ID
     assert owner.owner_id == OWNER_ID
     assert isinstance(owner, OwnerAuthority)
+    assert adapter.state_version.value["context"]["messages"] == (
+        {"role": "system", "content": "configured system instruction"},
+    )
 
 
 def test_session_model_adapter_wraps_stream_provider(tmp_path: Path) -> None:
@@ -401,6 +411,7 @@ async def test_new_runtime_run_turn_reaches_completed_outcome(
         authority=owner,
         store=store,
         state_version=None,
+        system_prompt="test system instruction",
     )
     outcome = await adapter.run_turn("hello")
     assert isinstance(outcome, CompletedOutcome)
@@ -426,6 +437,7 @@ async def test_interactive_tool_call_blocks_without_backend_execution(
         authority=owner,
         store=store,
         state_version=None,
+        system_prompt="test system instruction",
     )
     outcome = await adapter.run_turn("read the file")
     assert isinstance(outcome, BlockedOutcome)
@@ -461,6 +473,7 @@ async def test_interactive_allow_resumes_to_completed(
         authority=owner,
         store=store,
         state_version=None,
+        system_prompt="test system instruction",
         resolve_blocked=resolve_blocked,
     )
     outcome = await adapter.run_turn("read the file")
@@ -497,6 +510,7 @@ async def test_interactive_deny_resumes_to_completed(
         authority=owner,
         store=store,
         state_version=None,
+        system_prompt="test system instruction",
         resolve_blocked=resolve_blocked,
     )
     outcome = await adapter.run_turn("read the file")
@@ -526,6 +540,7 @@ async def test_reconstructed_adapter_consumes_durable_approval(
         authority=owner,
         store=store,
         state_version=None,
+        system_prompt="test system instruction",
     )
     blocked = await first_adapter.run_turn("read the file")
     assert isinstance(blocked, BlockedOutcome)
@@ -538,6 +553,7 @@ async def test_reconstructed_adapter_consumes_durable_approval(
     reconstructed = await manager._build_new_runtime_turn_adapter(
         session,
         SimpleNamespace(run_id=session.current_turn_id),
+        session.runtime_ctx,
     )
 
     outcome = await asyncio.wait_for(
@@ -572,6 +588,7 @@ async def test_reconstructed_adapter_enforces_persisted_round_budget(
         authority=owner,
         store=store,
         state_version=None,
+        system_prompt="test system instruction",
     )
     blocked = await first_adapter.run_turn("read the file")
     assert isinstance(blocked, BlockedOutcome)
@@ -583,6 +600,7 @@ async def test_reconstructed_adapter_enforces_persisted_round_budget(
     reconstructed = await manager._build_new_runtime_turn_adapter(
         session,
         SimpleNamespace(run_id=session.current_turn_id),
+        session.runtime_ctx,
     )
 
     outcome = await asyncio.wait_for(
@@ -662,7 +680,10 @@ async def test_adapter_does_not_resume_indeterminate_block() -> None:
         session_id="session-1",
         owner_id="owner-1",
         owner_epoch=1,
-        state_version=initial_operation_state("run-indeterminate-block"),
+        state_version=initial_operation_state(
+            "run-indeterminate-block",
+            system_prompt="test system instruction",
+        ),
         max_rounds=1,
         control_probe=_Probe(),
         frame_sink=_Sink(),
@@ -744,6 +765,9 @@ async def test_new_runtime_http_approval_bypasses_legacy_writer(
     session_id = await manager.create_session()
     session = await manager.get_session_async(session_id)
     session.runtime_version = RUNTIME_VERSION_NEW
+    session.runtime_ctx = SimpleNamespace(
+        config={"system_prompt": "test system instruction"}
+    )
     session.current_turn_id = "run-indeterminate"
     store = _NewRuntimeApprovalStore()
     owner = OwnerAuthority(session_id=session_id, owner_id="owner-1", epoch=1)
@@ -762,7 +786,9 @@ async def test_new_runtime_http_approval_bypasses_legacy_writer(
     adapter = await manager._build_new_runtime_turn_adapter(
         session,
         SimpleNamespace(run_id="run-indeterminate"),
+        session.runtime_ctx,
     )
+    assert captured["system_prompt"] == "test system instruction"
     blocked = _blocked_outcome(reason="approval_required")
     resolver = adapter.resolve_blocked
     assert resolver is not None
@@ -817,6 +843,9 @@ async def test_timeout_adopts_durable_human_decision(
     session_id = await manager.create_session()
     session = await manager.get_session_async(session_id)
     session.runtime_version = RUNTIME_VERSION_NEW
+    session.runtime_ctx = SimpleNamespace(
+        config={"system_prompt": "test system instruction"}
+    )
     session.current_turn_id = "run-indeterminate"
     store = _TimeoutWinnerStore()
     owner = OwnerAuthority(session_id=session_id, owner_id="owner-1", epoch=1)
@@ -834,6 +863,7 @@ async def test_timeout_adopts_durable_human_decision(
     adapter = await manager._build_new_runtime_turn_adapter(
         session,
         SimpleNamespace(run_id="run-indeterminate"),
+        session.runtime_ctx,
     )
     resolver = adapter.resolve_blocked
     assert resolver is not None
@@ -948,7 +978,10 @@ async def test_approval_resume_uses_remaining_round_budget() -> None:
         session_id="session-1",
         owner_id="owner-1",
         owner_epoch=1,
-        state_version=initial_operation_state("run-budget"),
+        state_version=initial_operation_state(
+            "run-budget",
+            system_prompt="test system instruction",
+        ),
         max_rounds=5,
         control_probe=_Probe(),
         frame_sink=_Sink(),
@@ -988,7 +1021,10 @@ async def test_exhausted_approval_wait_returns_round_limit() -> None:
         session_id="session-1",
         owner_id="owner-1",
         owner_epoch=1,
-        state_version=initial_operation_state("run-budget"),
+        state_version=initial_operation_state(
+            "run-budget",
+            system_prompt="test system instruction",
+        ),
         max_rounds=2,
         control_probe=_Probe(),
         frame_sink=_Sink(),

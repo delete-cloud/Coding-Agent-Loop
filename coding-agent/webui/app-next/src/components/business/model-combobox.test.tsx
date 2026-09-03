@@ -79,7 +79,7 @@ describe("ModelPicker open-on-click list", () => {
 });
 
 describe("ModelPicker providers", () => {
-  it("lists connected Codex accounts by label and hides bare codex", () => {
+  it("lists Codex once and shows connected accounts as account options", () => {
     renderPicker({
       provider: "codex",
       model: "gpt-5.4",
@@ -92,20 +92,45 @@ describe("ModelPicker providers", () => {
 
     expect(trigger().textContent).toContain("kina");
     expect(trigger().textContent).not.toContain("kina0630test-gmail-com");
-    expect(screen.getByRole("option", { name: "Codex · kina" })).toBeDefined();
-    expect(screen.queryByRole("option", { name: "codex" })).toBeNull();
+    expect(screen.getByRole("option", { name: "Codex" })).toBeDefined();
+    expect(screen.getByRole("option", { name: "kina" })).toBeDefined();
+    expect(screen.queryByRole("option", { name: "Codex · kina" })).toBeNull();
     expect(screen.queryByRole("option", { name: labeled })).toBeNull();
   });
 
-  it("commits a connected labeled Codex account from the provider list", () => {
-    const { onProviderChange } = renderPicker({
-      provider: "anthropic",
-      oauthProviders: [labeled],
-      accounts: [{ provider: labeled, label: "kina" }],
-    });
+  it("commits a connected labeled Codex account from the account list", () => {
+    function Harness({
+      onProviderChange,
+    }: {
+      onProviderChange: (provider: string) => void;
+    }) {
+      const [provider, setProvider] = useState("anthropic");
+      return (
+        <ModelPicker
+          provider={provider}
+          model="claude-sonnet-4"
+          oauthProviders={[labeled]}
+          accounts={[{ provider: labeled, label: "kina" }]}
+          models={["claude-sonnet-4"]}
+          status="ready"
+          onProviderChange={(next) => {
+            setProvider(next);
+            onProviderChange(next);
+          }}
+          onModelChange={vi.fn()}
+        />
+      );
+    }
+    const onProviderChange = vi.fn();
+    render(
+      <NextIntlClientProvider locale="zh" messages={zhMessages}>
+        <Harness onProviderChange={onProviderChange} />
+      </NextIntlClientProvider>,
+    );
 
     fireEvent.click(trigger());
-    fireEvent.click(screen.getByRole("option", { name: "Codex · kina" }));
+    fireEvent.click(screen.getByRole("option", { name: "Codex" }));
+    fireEvent.click(screen.getByRole("option", { name: "kina" }));
 
     expect(onProviderChange).toHaveBeenCalledWith(labeled);
   });

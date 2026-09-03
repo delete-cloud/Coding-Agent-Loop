@@ -6,15 +6,12 @@ import logging
 
 from fastapi import Depends, HTTPException, Request
 
+from coding_agent.core.config import validate_provider_value
 from coding_agent.server.auth import (
     verify_api_key,
 )
 from coding_agent.server.rate_limit import RateLimits, limiter
-from coding_agent.server.schemas import (
-    ProviderModelSchema,
-    ProviderModelsResponse,
-    validate_provider_value,
-)
+from coding_agent.server.schemas import ProviderModelSchema, ProviderModelsResponse
 
 from coding_agent.server.http import _bindings
 from coding_agent.server.http._bindings import LOGGER_NAME

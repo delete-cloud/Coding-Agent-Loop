@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
-from typing import Literal
+from typing import Literal, get_args
 
-from pydantic import BaseModel, SecretStr
+from pydantic import BaseModel, SecretStr, field_validator
 
 ProviderName = Literal[
     "openai",
@@ -20,15 +21,41 @@ ProviderName = Literal[
     "codex",
 ]
 
+CODEX_ACCOUNT_LABEL_PATTERN = r"^[a-z0-9][a-z0-9-]{0,30}$"
+_PROVIDER_NAME_VALUES = frozenset(get_args(ProviderName))
+
+
+def validate_provider_value(value: str | None) -> str | None:
+    """Allow known providers plus multi-account ``codex:<label>`` keys."""
+    if value is None or value in _PROVIDER_NAME_VALUES:
+        return value
+    if value.startswith("codex:"):
+        label = value.removeprefix("codex:")
+        if re.fullmatch(CODEX_ACCOUNT_LABEL_PATTERN, label):
+            return value
+        raise ValueError(
+            f"codex account label must match {CODEX_ACCOUNT_LABEL_PATTERN}: {value!r}"
+        )
+    message = f"provider must be one of {sorted(_PROVIDER_NAME_VALUES)} or 'codex:<label>', got {value!r}"
+    raise ValueError(message)
+
 
 class Config(BaseModel):
     """Validated agent configuration."""
 
     # Provider
-    provider: ProviderName = "openai"
+    provider: str = "openai"
     model: str = "gpt-4o"
     api_key: SecretStr | None = None
     base_url: str | None = None
+
+    @field_validator("provider")
+    @classmethod
+    def _validate_provider(cls, value: str) -> str:
+        validated = validate_provider_value(value)
+        if validated is None:
+            raise ValueError("provider must not be null")
+        return validated
 
     # Agent behavior
     max_steps: int = 30

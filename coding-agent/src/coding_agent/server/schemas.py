@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import re
 from datetime import datetime
-from typing import Annotated, Any, Literal, get_args
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     AliasChoices,
@@ -19,28 +18,10 @@ from pydantic import (
     model_validator,
 )
 
-from coding_agent.core.config import ProviderName
-
-CODEX_ACCOUNT_LABEL_PATTERN = r"^[a-z0-9][a-z0-9-]{0,30}$"
-
-_PROVIDER_NAME_VALUES = frozenset(get_args(ProviderName))
-
-
-def validate_provider_value(value: str | None) -> str | None:
-    """Allow ProviderName literals plus multi-account ``codex:<label>`` keys."""
-    if value is None or value in _PROVIDER_NAME_VALUES:
-        return value
-    if value.startswith("codex:"):
-        label = value.removeprefix("codex:")
-        if re.fullmatch(CODEX_ACCOUNT_LABEL_PATTERN, label):
-            return value
-        raise ValueError(
-            f"codex account label must match {CODEX_ACCOUNT_LABEL_PATTERN}: {value!r}"
-        )
-    raise ValueError(
-        f"provider must be one of {sorted(_PROVIDER_NAME_VALUES)} "
-        f"or 'codex:<label>', got {value!r}"
-    )
+from coding_agent.core.config import (
+    CODEX_ACCOUNT_LABEL_PATTERN,
+    validate_provider_value,
+)
 
 
 class DockerWorkspaceSourceRequest(BaseModel):

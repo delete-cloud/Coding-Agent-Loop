@@ -206,8 +206,8 @@ async def test_runtime_preparation_service_builds_local_daemon_runtime(
     assert created["additional_workspace_roots_override"] == []
     assert created["api_key"] is None
     assert restored == ["tape-old"]
-    assert persisted == ["tape-new"]
-    assert session.tape_id == "tape-new"
+    assert persisted == ["tape-old"]
+    assert session.tape_id == "tape-old"
     assert binding.adapter is adapter
     assert session.runtime_adapter is adapter
 

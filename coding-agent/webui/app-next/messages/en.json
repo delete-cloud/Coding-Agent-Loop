@@ -85,6 +85,7 @@
     "replayRequired": "The event stream has a gap — reload the session to continue.",
     "model": "Send model",
     "provider": "Provider",
+    "account": "Account",
     "searchModels": "Search models",
     "modelsLoading": "Loading models…",
     "modelsEmpty": "No remote models"
@@ -122,6 +123,7 @@
     "label": "Settings",
     "title": "Session settings",
     "provider": "Provider",
+    "account": "Account",
     "model": "Model",
     "apiKey": "API key",
     "apiKeyHint": "Kept in browser memory only. Never written to local storage.",

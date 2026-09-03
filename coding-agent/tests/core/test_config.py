@@ -50,6 +50,11 @@ class TestConfig:
         c = Config(provider=provider)
         assert c.provider == provider
 
+    def test_accepts_named_codex_provider(self):
+        config = Config(provider="codex:test-account")
+
+        assert config.provider == "codex:test-account"
+
 
 class TestLoadConfig:
     def test_env_vars_override_defaults(self, monkeypatch):

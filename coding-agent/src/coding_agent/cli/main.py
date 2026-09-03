@@ -9,7 +9,6 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
-from typing import get_args
 
 import click
 
@@ -22,7 +21,7 @@ from coding_agent.cli.remote_commands import attach, remote
 from coding_agent.cli.serve_command import daemon, serve
 from coding_agent.cli.stats_command import stats
 from coding_agent.cli.verify_command import verify
-from coding_agent.core.config import Config, load_config
+from coding_agent.core.config import Config, load_config, validate_provider_value
 from coding_agent.remote.approval import APPROVAL_POLICIES
 from coding_agent.approval import ApprovalPolicy
 from coding_agent.cli.local_runtime import (
@@ -37,9 +36,17 @@ from coding_agent.ui.rich_tui import CodingAgentTUI
 from coding_agent.wire.protocol import TurnEnd, WireMessage
 
 
-CLI_PROVIDER_CHOICES = click.Choice(
-    [str(provider) for provider in get_args(Config.model_fields["provider"].annotation)]
-)
+def _validate_cli_provider(
+    ctx: click.Context,
+    param: click.Parameter,
+    value: str | None,
+) -> str | None:
+    try:
+        return validate_provider_value(value)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), ctx=ctx, param=param) from exc
+
+
 REMOTE_APPROVAL_CHOICES = click.Choice(APPROVAL_POLICIES)
 
 
@@ -93,7 +100,8 @@ def _build_runtime_config(
     "--provider",
     "provider_name",
     default=None,
-    type=CLI_PROVIDER_CHOICES,
+    type=str,
+    callback=_validate_cli_provider,
 )
 @click.option("--base-url", default=None, help="OpenAI-compatible API base URL")
 @click.option("--api-key", default=None, help="API key")
