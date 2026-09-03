@@ -1037,3 +1037,14 @@ async def test_exhausted_approval_wait_returns_round_limit() -> None:
     assert isinstance(outcome, RoundLimitOutcome)
     assert outcome.steps_taken == 2
     assert resolver_called is False
+
+
+def test_initial_operation_state_uses_current_projection_epoch() -> None:
+    state = initial_operation_state(
+        "run-after-restore",
+        system_prompt="sys",
+        projection_epoch=2,
+    )
+    assert state.run_id == "run-after-restore"
+    assert state.revision == 0
+    assert state.projection_epoch == 2

@@ -300,3 +300,22 @@ async def test_new_runtime_capture_stamps_operation_state_version() -> None:
         },
         "value": {"phase": "ready"},
     }
+
+
+def test_serialize_operation_state_version_plain_json_nested_mapping() -> None:
+    import json
+
+    from agentkit.runtime.contracts import CommitRef, OperationStateVersion
+    from coding_agent.runs.checkpoint_capture import serialize_operation_state_version
+
+    state = OperationStateVersion(
+        run_id="run-1",
+        revision=1,
+        projection_epoch=0,
+        commit_ref=CommitRef(transition_id="t1", fact_seq_start="1", fact_seq_end="1"),
+        value={"nested": {"ok": True}},
+    )
+    payload = serialize_operation_state_version(state)
+    assert payload is not None
+    json.dumps(payload)
+    assert payload["value"] == {"nested": {"ok": True}}

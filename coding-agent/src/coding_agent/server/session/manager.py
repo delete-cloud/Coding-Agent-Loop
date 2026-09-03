@@ -830,6 +830,7 @@ class SessionManager(
             blocked_approval_tool,
             build_new_runtime_turn_adapter,
         )
+        from coding_agent.stores.runtime_store import parse_u64
         from coding_agent.wire.protocol import ApprovalRequest
 
         store = self._authoritative_store()
@@ -842,6 +843,15 @@ class SessionManager(
         if not isinstance(system_prompt, str):
             raise RuntimeError("new-runtime serving requires a system prompt")
         state = await store.load_operation_state(session.id, request.run_id)
+        projection_epoch = 0
+        if state is None:
+            load_fact = getattr(store, "load_session_fact_source", None)
+            if callable(load_fact):
+                fact = await load_fact(session.id)
+                if fact is not None:
+                    projection_epoch = parse_u64(
+                        fact.projection_epoch, field_name="projection_epoch"
+                    )
 
         async def durable_settlement(blocked: Any) -> Any:
             mailbox = await store.load_runtime_command_mailbox(session.id)
@@ -906,4 +916,5 @@ class SessionManager(
             state_version=state,
             system_prompt=system_prompt,
             resolve_blocked=resolve_blocked,
+            projection_epoch=projection_epoch,
         )

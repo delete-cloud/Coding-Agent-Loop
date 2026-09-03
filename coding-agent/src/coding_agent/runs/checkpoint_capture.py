@@ -12,7 +12,7 @@ from coding_agent.runtime_activation import (
     OPERATION_STATE_VERSION_KEY,
     RUNTIME_VERSION_NEW,
 )
-
+from coding_agent.stores.runtime_store import _plain_json
 
 from .checkpoint_restore import (
     CHECKPOINT_SESSION_CONFIG_KEY,
@@ -63,6 +63,9 @@ def serialize_operation_state_version(
 ) -> dict[str, Any] | None:
     if state is None:
         return None
+    value = _plain_json(state.value)
+    if not isinstance(value, dict):
+        raise TypeError("operation state value must be an object")
     return {
         "run_id": state.run_id,
         "revision": state.revision,
@@ -72,7 +75,7 @@ def serialize_operation_state_version(
             "fact_seq_start": state.commit_ref.fact_seq_start,
             "fact_seq_end": state.commit_ref.fact_seq_end,
         },
-        "value": dict(state.value),
+        "value": value,
     }
 
 
