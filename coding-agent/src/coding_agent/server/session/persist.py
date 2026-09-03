@@ -56,8 +56,13 @@ class PersistOps:
         event_kind: str,
         event_id_suffix: str | None = None,
         *,
-        projection_epoch: str = "0",
+        projection_epoch: str,
     ) -> str:
+        if not isinstance(projection_epoch, str) or not projection_epoch:
+            raise ValueError(
+                f"session {session.id} has invalid projection_epoch: "
+                f"{projection_epoch!r}"
+            )
         event_id = (
             f"{session.id}:{event_kind}:{session.current_turn_id or 'none'}"
             f":e{projection_epoch}"
@@ -67,6 +72,8 @@ class PersistOps:
         return event_id
 
     async def _current_projection_epoch(self, session_id: str) -> str:
+        # Load once per persist call. Do not cache across persists: restore can
+        # bump projection_epoch on the store without going through SessionManager.
         store = self._authoritative_store()
         if store is None:
             return "0"
@@ -78,7 +85,14 @@ class PersistOps:
             return "0"
         epoch = fact.projection_epoch
         if not isinstance(epoch, str) or not epoch:
-            raise ValueError("projection_epoch must be a non-empty string")
+            logger.error(
+                "invalid projection_epoch for session %s: %r",
+                session_id,
+                epoch,
+            )
+            raise ValueError(
+                f"session {session_id} has invalid projection_epoch: {epoch!r}"
+            )
         return epoch
 
     def _session_boundary_payload(self, session: Session) -> JSONObject:
@@ -303,6 +317,7 @@ class PersistOps:
             raise SessionOwnershipConflictError(
                 "chat event persist requires owner authority"
             )
+        projection_epoch = await self._current_projection_epoch(session.id)
         try:
             commit = await store.commit_authoritative_uow(
                 authority,
@@ -312,6 +327,7 @@ class PersistOps:
                             session,
                             event_kind,
                             uuid.uuid4().hex,
+                            projection_epoch=projection_epoch,
                         ),
                         session_id=session.id,
                         event_kind=event_kind,
