@@ -15,7 +15,6 @@ from coding_agent.adapter.types import (
     exception_error_message,
     turn_outcome_from_segment_outcome,
 )
-from coding_agent.runs.ensure import retain_session_tape
 from coding_agent.stores.runtime_store import AgentRunRecord, JSONObject
 from coding_agent.stores import RuntimeRunLifecycleStore
 from coding_agent.topics.context_pack import merged_context_pack_stash
@@ -917,7 +916,8 @@ class RuntimeTurnFinalizer:
         run_id: str,
         resume_context: RuntimeRunResumeContext | None = None,
     ) -> None:
-        retain_session_tape(session, ctx)
+        if session.tape_id is None:
+            session.tape_id = ctx.tape.tape_id
         if self.has_runtime_store:
             turn_outcome = require_runtime_turn_outcome(outcome)
             turn_status = runtime_status_from_turn_outcome(turn_outcome)
