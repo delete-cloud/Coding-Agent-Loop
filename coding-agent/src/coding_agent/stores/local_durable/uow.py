@@ -2437,34 +2437,23 @@ class LocalUnitOfWorkMixin:
                     raise ValueError("existing event must include session_seq")
                 if existing_event.projection_epoch is None:
                     raise ValueError("existing event must include projection_epoch")
-                next_seq = parse_u64(
-                    existing_event.session_seq, field_name="session_seq"
-                )
                 existing_epoch = parse_u64(
                     existing_event.projection_epoch, field_name="projection_epoch"
                 )
                 if existing_epoch != fact.projection_epoch_int:
-                    connection.execute(
-                        """
-                        UPDATE session_event_records
-                        SET projection_epoch = ?
-                        WHERE event_id = ?
-                        """,
-                        (fact.projection_epoch_int, unit.event.event_id),
+                    raise StateVersionConflictError(
+                        "committed event projection_epoch is immutable"
                     )
-                    promoted_row = connection.execute(
-                        """
-                        SELECT * FROM session_event_records
-                        WHERE event_id = ?
-                        """,
-                        (unit.event.event_id,),
-                    ).fetchone()
-                    if promoted_row is None:
-                        raise RuntimeError("failed to promote event projection_epoch")
-                    event = _event_record_from_sqlite_row(promoted_row)
-                else:
-                    event = existing_event
-                idempotent = True
+                return AuthoritativeCommit(
+                    event=existing_event,
+                    projection=fact.projection,
+                    projection_epoch=existing_event.projection_epoch,
+                    raw_cursor=RawCursor(
+                        session_id=authority.session_id,
+                        session_seq=existing_event.session_seq,
+                    ),
+                    idempotent=True,
+                )
             else:
                 next_seq = fact.session_seq_int + 1
                 connection.execute(

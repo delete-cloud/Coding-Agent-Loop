@@ -608,11 +608,12 @@ def initial_operation_state(
     run_id: str,
     *,
     system_prompt: str,
+    projection_epoch: int = 0,
 ) -> OperationStateVersion:
     return OperationStateVersion(
         run_id=run_id,
         revision=0,
-        projection_epoch=0,
+        projection_epoch=projection_epoch,
         commit_ref=CommitRef(transition_id=f"{run_id}:admission"),
         value={
             "context": {
@@ -633,6 +634,7 @@ def build_new_runtime_turn_adapter(
     model_adapter: object | None = None,
     effect_executor: object | None = None,
     resolve_blocked: ServingBlockedResolver | None = None,
+    projection_epoch: int = 0,
 ) -> DurableSegmentTurnAdapter:
     session_state: Mapping[str, object]
     to_store_data = getattr(session, "to_store_data", None)
@@ -668,6 +670,7 @@ def build_new_runtime_turn_adapter(
     resolved_state = state_version or initial_operation_state(
         run_id,
         system_prompt=system_prompt,
+        projection_epoch=projection_epoch,
     )
     return DurableSegmentTurnAdapter(
         runner=runner,

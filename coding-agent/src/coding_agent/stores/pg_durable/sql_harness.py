@@ -244,13 +244,6 @@ class PgHarnessSqlMixin:
     WHERE event_id = $1
     """
 
-    _PROMOTE_SESSION_EVENT_EPOCH_SQL = """
-    UPDATE session_event_records
-    SET projection_epoch = $2
-    WHERE event_id = $1
-    RETURNING *
-    """
-
     _DELETE_TURN_MAILBOX_SLOTS_SQL = """
     DELETE FROM session_mailbox_slots
     WHERE session_id = $1

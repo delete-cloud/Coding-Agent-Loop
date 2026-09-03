@@ -15,6 +15,7 @@ from agentkit.storage.sqlite import (
     _optional_entry_str,
 )
 from coding_agent.stores.runtime_store import (
+    StateVersionConflictError,
     _datetime_to_json,
 )
 from coding_agent.topics.store import (
@@ -32,7 +33,12 @@ from coding_agent.stores.local_durable.helpers import (
     _require_json_object,
     _require_non_empty,
 )
-from coding_agent.runtime_activation import assert_checkpoint_allowed
+from coding_agent.runtime_activation import (
+    assert_checkpoint_allowed,
+    is_new_runtime_restore_point,
+    restore_point_cas_matches,
+    restore_point_stamp,
+)
 
 
 class LocalCheckpointMixin:
@@ -46,7 +52,7 @@ class LocalCheckpointMixin:
             raise SessionOwnershipConflictError("checkpoint belongs to another session")
         session_payload = self.load_session(authority.session_id)
         if session_payload is not None:
-            assert_checkpoint_allowed(session_payload)
+            assert_checkpoint_allowed(session_payload, snapshot)
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._assert_authority(connection, authority)
@@ -141,7 +147,7 @@ class LocalCheckpointMixin:
         snapshot: CheckpointSnapshot,
         session_payload: SessionPayload,
     ) -> None:
-        assert_checkpoint_allowed(session_payload)
+        assert_checkpoint_allowed(session_payload, snapshot)
         meta = snapshot.meta
         if meta.session_id != authority.session_id:
             raise SessionOwnershipConflictError("checkpoint belongs to another session")
@@ -160,6 +166,11 @@ class LocalCheckpointMixin:
                 connection,
                 tape_id=meta.tape_id,
                 session_id=authority.session_id,
+            )
+            self._assert_restore_point_cas(
+                connection,
+                session_id=authority.session_id,
+                snapshot=snapshot,
             )
             checkpoint_row = connection.execute(
                 """
@@ -258,6 +269,42 @@ class LocalCheckpointMixin:
                 (authority.session_id,),
             )
             self._open_projection_epoch(connection, authority.session_id)
+
+    def _assert_restore_point_cas(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        session_id: str,
+        snapshot: CheckpointSnapshot,
+    ) -> None:
+        if not is_new_runtime_restore_point(snapshot):
+            return
+        stamp = restore_point_stamp(snapshot.extra or {})
+        if stamp is None:
+            return
+        run_id = stamp.get("run_id")
+        if not isinstance(run_id, str) or not run_id:
+            raise ValueError(
+                "operation_state_version.run_id must be a non-empty string"
+            )
+        row = connection.execute(
+            """
+            SELECT run_id, revision, projection_epoch, transition_id
+            FROM session_operation_states
+            WHERE session_id = ? AND run_id = ?
+            """,
+            (session_id, run_id),
+        ).fetchone()
+        if row is None or not restore_point_cas_matches(
+            stamp,
+            run_id=row["run_id"],
+            revision=int(row["revision"]),
+            projection_epoch=int(row["projection_epoch"]),
+            transition_id=row["transition_id"],
+        ):
+            raise StateVersionConflictError(
+                "restore point operation state does not match"
+            )
 
     def _reconcile_topics_after_checkpoint_restore(
         self,
