@@ -29,6 +29,7 @@ from coding_agent.stores.runtime_store import (
     EventRecord,
     MailboxDispositionSlot,
     ProjectionCursor,
+    StateVersionConflictError,
 )
 from coding_agent.wire.protocol import (
     ApprovalRequest,
@@ -163,14 +164,14 @@ async def test_duplicate_event_id_is_store_idempotent_and_keeps_mailbox(
     assert fact.session_seq == first.event.session_seq
     mailbox = await store.load_mailbox_slot(SESSION_ID, "mailbox-main")
     assert mailbox is not None
-    assert mailbox.disposition == "settled"
-    assert mailbox.payload == {"lane_cut": "replay"}
+    assert mailbox.disposition == "queued-one"
+    assert mailbox.payload == {"lane_cut": "one"}
     assert await store.load_event_record(SESSION_ID, "2") is None
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("store_kind", ["sqlite", "pg"])
-async def test_restore_then_same_event_id_is_visible_in_current_epoch(
+async def test_restore_then_same_event_id_fails_cas_without_write(
     store_kind: str,
     tmp_path: Path,
 ) -> None:
@@ -198,57 +199,19 @@ async def test_restore_then_same_event_id_is_visible_in_current_epoch(
             payload={"lane_cut": "replay-after-restore"},
         ),
     )
-    second = await store.commit_authoritative_uow(owner, replayed)
+    with pytest.raises(StateVersionConflictError, match="projection_epoch"):
+        await store.commit_authoritative_uow(owner, replayed)
 
-    assert second.idempotent is True
-    assert second.event.event_id == first.event.event_id
-    assert second.event.session_seq == first.event.session_seq
-    assert second.event.event_kind == first.event.event_kind
-    assert second.event.payload == first.event.payload
-    assert second.event.projection_epoch == "1"
-    assert second.projection_epoch == "1"
+    stored = await store.load_event_record(SESSION_ID, first.event.session_seq)
+    assert stored is not None
+    assert stored.event_id == first.event.event_id
+    assert stored.projection_epoch == "0"
     after = await store.load_session_fact_source(SESSION_ID)
     assert after is not None
     assert after.session_seq == first.event.session_seq
     assert after.projection_epoch == "1"
-
-    current = ProjectionCursor(
-        kind="delta",
-        session_id=SESSION_ID,
-        projection=DEFAULT_HARNESS_PROJECTION,
-        epoch="1",
-        session_seq="0",
-    )
-    visible = await store.replay_projection(current)
-    assert [event.event_id for event in visible] == ["event-one"]
-    assert visible[0].event_kind == "harness.TurnCommitted"
-    assert visible[0].payload == {"suffix": "one"}
-    assert visible[0].projection_epoch == "1"
-
-    third = await store.commit_authoritative_uow(
-        owner,
-        AuthoritativeUnitOfWork(
-            event=_event("one"),
-            session_state={**SESSION_PAYLOAD, "turn": "same-epoch-again"},
-            mailbox=MailboxDispositionSlot(
-                slot_id="mailbox-main",
-                lane="user",
-                disposition="settled",
-                payload={"lane_cut": "same-epoch-again"},
-            ),
-        ),
-    )
-    assert third.idempotent is True
-    assert third.event.session_seq == first.event.session_seq
-    assert third.event.projection_epoch == "1"
-    fact_again = await store.load_session_fact_source(SESSION_ID)
-    assert fact_again is not None
-    assert fact_again.session_seq == first.event.session_seq
-    mailbox = await store.load_mailbox_slot(SESSION_ID, "mailbox-main")
-    assert mailbox is not None
-    assert mailbox.disposition == "settled"
-    assert mailbox.payload == {"lane_cut": "same-epoch-again"}
     assert await store.load_event_record(SESSION_ID, "2") is None
+
 
 
 @pytest.mark.asyncio
@@ -287,7 +250,7 @@ async def test_duplicate_boundary_uow_keeps_mailbox_settled(tmp_path: Path) -> N
 
     mailbox = await store.load_mailbox_slot(session_id, slot_id)
     assert mailbox is not None
-    assert mailbox.disposition == "settled"
+    assert mailbox.disposition == "in_flight"
     replay = await store.replay_from_retention_floor(session_id)
     settled = [event for event in replay.events if event.event_kind == _TURN_SETTLED]
     assert len(settled) == 1
@@ -550,11 +513,10 @@ async def test_restore_then_reapprove_reuses_same_effect_id(tmp_path: Path) -> N
     clobbered = await store.load_effect_slot(session_id, effect_id)
     assert clobbered is not None
     assert clobbered.status == "stale-after-restore"
-
     session.begin_approval_request(request)
-    await manager._persist_approval_requested(session)
+    with pytest.raises(StateVersionConflictError, match="projection_epoch"):
+        await manager._persist_approval_requested(session)
     reused = await store.load_effect_slot(session_id, effect_id)
     assert reused is not None
     assert reused.effect_id == effect_id
-    assert reused.status == "prepared"
-    assert reused.payload["request_id"] == request.request_id
+    assert reused.status == "stale-after-restore"
