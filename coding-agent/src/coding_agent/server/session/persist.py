@@ -55,11 +55,31 @@ class PersistOps:
         session: Session,
         event_kind: str,
         event_id_suffix: str | None = None,
+        *,
+        projection_epoch: str = "0",
     ) -> str:
-        event_id = f"{session.id}:{event_kind}:{session.current_turn_id or 'none'}"
+        event_id = (
+            f"{session.id}:{event_kind}:{session.current_turn_id or 'none'}"
+            f":e{projection_epoch}"
+        )
         if event_id_suffix:
             return f"{event_id}:{event_id_suffix}"
         return event_id
+
+    async def _current_projection_epoch(self, session_id: str) -> str:
+        store = self._authoritative_store()
+        if store is None:
+            return "0"
+        load_fact = getattr(store, "load_session_fact_source", None)
+        if not callable(load_fact):
+            return "0"
+        fact = await load_fact(session_id)
+        if fact is None:
+            return "0"
+        epoch = fact.projection_epoch
+        if not isinstance(epoch, str) or not epoch:
+            raise ValueError("projection_epoch must be a non-empty string")
+        return epoch
 
     def _session_boundary_payload(self, session: Session) -> JSONObject:
         return {
@@ -335,6 +355,7 @@ class PersistOps:
                 payload={"run_id": session.current_turn_id},
             )
         session_state = cast(JSONObject, session.to_store_data())
+        projection_epoch = await self._current_projection_epoch(session.id)
         await store.commit_authoritative_uow(
             authority,
             AuthoritativeUnitOfWork(
@@ -343,6 +364,7 @@ class PersistOps:
                         session,
                         event_kind,
                         event_id_suffix,
+                        projection_epoch=projection_epoch,
                     ),
                     session_id=session.id,
                     event_kind=event_kind,

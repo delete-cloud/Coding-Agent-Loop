@@ -213,7 +213,6 @@ async def test_restore_then_same_event_id_fails_cas_without_write(
     assert await store.load_event_record(SESSION_ID, "2") is None
 
 
-
 @pytest.mark.asyncio
 async def test_duplicate_boundary_uow_keeps_mailbox_settled(tmp_path: Path) -> None:
     manager = _durable_manager(tmp_path)
@@ -514,9 +513,9 @@ async def test_restore_then_reapprove_reuses_same_effect_id(tmp_path: Path) -> N
     assert clobbered is not None
     assert clobbered.status == "stale-after-restore"
     session.begin_approval_request(request)
-    with pytest.raises(StateVersionConflictError, match="projection_epoch"):
-        await manager._persist_approval_requested(session)
+    await manager._persist_approval_requested(session)
     reused = await store.load_effect_slot(session_id, effect_id)
     assert reused is not None
     assert reused.effect_id == effect_id
-    assert reused.status == "stale-after-restore"
+    assert reused.status == "prepared"
+    assert reused.payload["request_id"] == request.request_id

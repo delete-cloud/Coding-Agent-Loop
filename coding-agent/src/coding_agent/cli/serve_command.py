@@ -462,6 +462,41 @@ def daemon_tui(
     raise SystemExit(status)
 
 
+@daemon.command("runtime-activation")
+@click.option(
+    "--enable", is_flag=True, help="Create new sessions on the durable runtime."
+)
+@click.option(
+    "--disable",
+    is_flag=True,
+    help="Create new sessions on the legacy runtime.",
+)
+def daemon_runtime_activation(*, enable: bool, disable: bool) -> None:
+    """Show or set whether new sessions use the durable AgentKit runtime."""
+    import asyncio
+
+    from coding_agent.stores.durable_local import SQLiteLocalDurableStore
+    from coding_agent.stores.local import local_sqlite_path
+
+    if enable and disable:
+        raise click.UsageError("use either --enable or --disable")
+    path = local_sqlite_path()
+
+    async def run() -> None:
+        store = SQLiteLocalDurableStore(path)
+        if enable:
+            state = await store.set_new_session_runtime_activation(enabled=True)
+        elif disable:
+            state = await store.set_new_session_runtime_activation(enabled=False)
+        else:
+            state = await store.load_runtime_activation()
+        click.echo(f"new_sessions_enabled={int(state.new_sessions_enabled)}")
+        if enable or disable:
+            click.echo("SQLite barrier: restart the daemon process.")
+
+    asyncio.run(run())
+
+
 def _create_daemon_local_session(
     *,
     repo: str,

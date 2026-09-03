@@ -97,6 +97,39 @@ def test_daemon_help_lists_daemon_backed_run_client() -> None:
     assert "Start local daemon control plane" in result.output
     assert "run" in result.output
     assert "tui" in result.output
+    assert "runtime-activation" in result.output
+
+
+def test_daemon_runtime_activation_flips_sqlite_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AGENT_DATA_DIR", str(tmp_path))
+    env = _click_credential_free_env()
+    env["AGENT_DATA_DIR"] = str(tmp_path)
+    runner = CliRunner(env=env)
+
+    shown = runner.invoke(
+        main, ["daemon", "runtime-activation"], catch_exceptions=False
+    )
+    assert shown.exit_code == 0
+    assert "new_sessions_enabled=0" in shown.output
+
+    enabled = runner.invoke(
+        main,
+        ["daemon", "runtime-activation", "--enable"],
+        catch_exceptions=False,
+    )
+    assert enabled.exit_code == 0
+    assert "new_sessions_enabled=1" in enabled.output
+    assert "restart the daemon" in enabled.output
+
+    disabled = runner.invoke(
+        main,
+        ["daemon", "runtime-activation", "--disable"],
+        catch_exceptions=False,
+    )
+    assert disabled.exit_code == 0
+    assert "new_sessions_enabled=0" in disabled.output
 
 
 def test_acp_help_is_stdio_agent_surface() -> None:
