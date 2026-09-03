@@ -22,6 +22,7 @@ class FakeSession:
     max_steps: int = 17
     approval_policy: ApprovalPolicy = ApprovalPolicy.INTERACTIVE
     provider: object | None = None
+    runtime_version: str = "legacy"
 
     def attach_runtime_binding(
         self,
@@ -37,6 +38,7 @@ class RecordingCheckpointBackend:
     def __init__(self, checkpoint: CheckpointMeta) -> None:
         self.checkpoint = checkpoint
         self.calls: list[tuple[object, str | None, dict[str, Any] | None]] = []
+        self.restore_point_calls: list[dict[str, Any]] = []
 
     async def capture(
         self,
@@ -46,6 +48,24 @@ class RecordingCheckpointBackend:
         extra: dict[str, Any] | None = None,
     ) -> CheckpointMeta:
         self.calls.append((ctx, label, extra))
+        return self.checkpoint
+
+    async def capture_restore_point(
+        self,
+        *,
+        tape_id: str,
+        session_id: str,
+        label: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> CheckpointMeta:
+        self.restore_point_calls.append(
+            {
+                "tape_id": tape_id,
+                "session_id": session_id,
+                "label": label,
+                "extra": extra,
+            }
+        )
         return self.checkpoint
 
 
@@ -169,3 +189,48 @@ async def test_capture_reads_checkpoint_backend_provider_at_call_time() -> None:
     assert checkpoint.checkpoint_id == "cp-later"
     assert backend_a.calls == []
     assert len(backend_b.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_new_runtime_capture_uses_restore_point_backend() -> None:
+    from coding_agent.runtime_activation import (
+        CHECKPOINT_FORMAT_KEY,
+        RUNTIME_VERSION_NEW,
+    )
+
+    session = FakeSession(runtime_version=RUNTIME_VERSION_NEW)
+    ctx = types.SimpleNamespace(tape=types.SimpleNamespace(tape_id="stable-tape"))
+    backend = RecordingCheckpointBackend(_checkpoint())
+
+    async def ensure_runtime(session_id: str):
+        del session_id
+        return ctx
+
+    async def persist_session(current_session: FakeSession) -> None:
+        del current_session
+
+    checkpoint = await RuntimeCheckpointCaptureService(
+        checkpoint_service=lambda: backend,
+        ensure_runtime=ensure_runtime,
+        persist_session=persist_session,
+    ).capture(session, label="g1")
+
+    assert checkpoint == backend.checkpoint
+    assert backend.calls == []
+    assert backend.restore_point_calls == [
+        {
+            "tape_id": "stable-tape",
+            "session_id": "session-1",
+            "label": "g1",
+            "extra": {
+                CHECKPOINT_FORMAT_KEY: RUNTIME_VERSION_NEW,
+                "session_restart_config": {
+                    "provider_name": "anthropic",
+                    "model_name": "claude-checkpoint",
+                    "base_url": "http://checkpoint.local",
+                    "max_steps": 17,
+                    "approval_policy": "interactive",
+                },
+            },
+        }
+    ]

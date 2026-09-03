@@ -46,7 +46,7 @@ class LocalCheckpointMixin:
             raise SessionOwnershipConflictError("checkpoint belongs to another session")
         session_payload = self.load_session(authority.session_id)
         if session_payload is not None:
-            assert_checkpoint_allowed(session_payload)
+            assert_checkpoint_allowed(session_payload, snapshot)
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._assert_authority(connection, authority)
@@ -141,7 +141,7 @@ class LocalCheckpointMixin:
         snapshot: CheckpointSnapshot,
         session_payload: SessionPayload,
     ) -> None:
-        assert_checkpoint_allowed(session_payload)
+        assert_checkpoint_allowed(session_payload, snapshot)
         meta = snapshot.meta
         if meta.session_id != authority.session_id:
             raise SessionOwnershipConflictError("checkpoint belongs to another session")

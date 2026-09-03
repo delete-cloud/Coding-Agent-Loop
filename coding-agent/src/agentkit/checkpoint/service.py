@@ -45,6 +45,36 @@ class CheckpointService:
         await self._store.save(snapshot)
         return meta
 
+    async def capture_restore_point(
+        self,
+        *,
+        tape_id: str,
+        session_id: str,
+        label: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> CheckpointMeta:
+        payload = extra or {}
+        validate_json_safe(payload, name="extra")
+        if payload.get("checkpoint_format") != "agentkit-1":
+            raise ValueError("RestorePoint extra must set checkpoint_format=agentkit-1")
+        meta = CheckpointMeta(
+            checkpoint_id=uuid4().hex,
+            tape_id=tape_id,
+            session_id=session_id,
+            entry_count=0,
+            window_start=0,
+            created_at=datetime.now(UTC),
+            label=label,
+        )
+        snapshot = CheckpointSnapshot(
+            meta=meta,
+            tape_entries=(),
+            plugin_states={},
+            extra=payload,
+        )
+        await self._store.save(snapshot)
+        return meta
+
     async def restore(self, checkpoint_id: str) -> CheckpointSnapshot:
         snapshot = await self._store.load(checkpoint_id)
         if snapshot is None:

@@ -72,6 +72,26 @@ async def test_capture_serializes_tape_entries_and_json_safe_plugin_states() -> 
 
 
 @pytest.mark.asyncio
+async def test_capture_restore_point_omits_tape_and_plugin_states() -> None:
+    from agentkit.checkpoint.service import CheckpointService
+
+    store = RecordingCheckpointStore()
+    meta = await CheckpointService(store).capture_restore_point(
+        tape_id="stable-tape-id",
+        session_id="session-1",
+        label="g1",
+        extra={"checkpoint_format": "agentkit-1", "workspace": "/tmp/repo"},
+    )
+    snapshot = store.saved_snapshot
+    assert snapshot is not None
+    assert meta == snapshot.meta
+    assert snapshot.tape_entries == ()
+    assert snapshot.plugin_states == {}
+    assert snapshot.extra["checkpoint_format"] == "agentkit-1"
+    assert snapshot.meta.entry_count == 0
+
+
+@pytest.mark.asyncio
 async def test_capture_rejects_non_json_safe_extra() -> None:
     from agentkit.checkpoint.service import CheckpointService
 

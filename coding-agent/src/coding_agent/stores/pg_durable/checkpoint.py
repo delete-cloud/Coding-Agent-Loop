@@ -31,7 +31,7 @@ class PgCheckpointMixin:
             )
         payload = await self.load_session_payload(authority.session_id)
         if payload is not None:
-            assert_checkpoint_allowed(payload)
+            assert_checkpoint_allowed(payload, snapshot)
 
         async def body(connection: Any) -> None:
             await self._require_owner(connection, authority)
@@ -68,7 +68,7 @@ class PgCheckpointMixin:
         snapshot: CheckpointSnapshot,
         session_payload: dict[str, Any],
     ) -> None:
-        assert_checkpoint_allowed(session_payload)
+        assert_checkpoint_allowed(session_payload, snapshot)
         _require_payload_session(authority, session_payload)
         meta = snapshot.meta
         if meta.session_id != authority.session_id:

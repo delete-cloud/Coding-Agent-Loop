@@ -6,6 +6,11 @@ from typing import Any, Protocol
 
 from agentkit.checkpoint.models import CheckpointMeta
 
+from coding_agent.runtime_activation import (
+    CHECKPOINT_FORMAT_KEY,
+    RUNTIME_VERSION_NEW,
+)
+
 from .checkpoint_restore import (
     CHECKPOINT_SESSION_CONFIG_KEY,
     CheckpointRestoreSession,
@@ -68,11 +73,26 @@ class RuntimeCheckpointCaptureService:
         payload[CHECKPOINT_SESSION_CONFIG_KEY] = serialize_checkpoint_session_config(
             session
         )
-        checkpoint = await self.checkpoint_service().capture(
-            ctx,
-            label=label,
-            extra=payload,
-        )
+        backend = self.checkpoint_service()
+        if getattr(session, "runtime_version", None) == RUNTIME_VERSION_NEW:
+            payload[CHECKPOINT_FORMAT_KEY] = RUNTIME_VERSION_NEW
+            capture_restore_point = getattr(backend, "capture_restore_point", None)
+            if capture_restore_point is None:
+                raise TypeError(
+                    "checkpoint backend missing capture_restore_point for new-runtime"
+                )
+            checkpoint = await capture_restore_point(
+                tape_id=ctx.tape.tape_id,
+                session_id=session.id,
+                label=label,
+                extra=payload,
+            )
+        else:
+            checkpoint = await backend.capture(
+                ctx,
+                label=label,
+                extra=payload,
+            )
         session.tape_id = ctx.tape.tape_id
         await self.persist_session(session)
         return checkpoint

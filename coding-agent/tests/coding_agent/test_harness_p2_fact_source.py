@@ -200,6 +200,19 @@ class HarnessFakePGConnection:
             self.in_txn = True
             self._transaction_snapshot = self._snapshot_transaction_state()
             return "BEGIN"
+        if "INSERT INTO agent_checkpoints" in query:
+            checkpoint_id = cast(str, args[0])
+            tape_id = cast(str, args[1])
+            meta = args[2]
+            self.checkpoints[checkpoint_id] = {
+                "checkpoint_id": checkpoint_id,
+                "tape_id": tape_id,
+                "meta": meta,
+                "entries": args[3],
+                "plugin_states": args[4],
+                "extra": args[5],
+            }
+            return "INSERT"
         if query.strip() == "COMMIT":
             self.in_txn = False
             self._transaction_snapshot = None
@@ -625,6 +638,10 @@ class HarnessFakePGConnection:
             if run is None or (len(args) > 1 and run["session_id"] != args[1]):
                 return None
             return run
+        if "INSERT INTO agent_checkpoints" in query:
+            await self.execute(query, *args)
+            return {"checkpoint_id": args[0]}
+
         if "FROM agent_checkpoints" in query or "FROM checkpoints" in query:
             return self.checkpoints.get(
                 cast(str, args[0]),
