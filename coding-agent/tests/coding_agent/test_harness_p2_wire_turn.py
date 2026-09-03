@@ -210,7 +210,10 @@ async def test_successful_turn_event_ids_are_deterministic(tmp_path: Path) -> No
     for event in replay.events:
         if event.event_kind in _CHAT_KINDS:
             continue
-        expected = f"{session_id}:{event.event_kind}:{session.current_turn_id}"
+        expected = (
+            f"{session_id}:{event.event_kind}:{session.current_turn_id}"
+            f":e{event.projection_epoch}"
+        )
         if event.event_kind in _APPROVAL_KINDS:
             assert event.event_id.startswith(f"{expected}:")
             continue

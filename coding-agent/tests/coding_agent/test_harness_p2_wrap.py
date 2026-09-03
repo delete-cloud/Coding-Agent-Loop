@@ -213,7 +213,6 @@ async def test_restore_then_same_event_id_fails_cas_without_write(
     assert await store.load_event_record(SESSION_ID, "2") is None
 
 
-
 @pytest.mark.asyncio
 async def test_duplicate_boundary_uow_keeps_mailbox_settled(tmp_path: Path) -> None:
     manager = _durable_manager(tmp_path)
@@ -514,9 +513,85 @@ async def test_restore_then_reapprove_reuses_same_effect_id(tmp_path: Path) -> N
     assert clobbered is not None
     assert clobbered.status == "stale-after-restore"
     session.begin_approval_request(request)
-    with pytest.raises(StateVersionConflictError, match="projection_epoch"):
-        await manager._persist_approval_requested(session)
+    await manager._persist_approval_requested(session)
     reused = await store.load_effect_slot(session_id, effect_id)
     assert reused is not None
     assert reused.effect_id == effect_id
-    assert reused.status == "stale-after-restore"
+    assert reused.status == "prepared"
+    assert reused.payload["request_id"] == request.request_id
+
+
+
+def test_boundary_event_id_requires_projection_epoch() -> None:
+    param = inspect.signature(SessionManager._boundary_event_id).parameters[
+        "projection_epoch"
+    ]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+    assert param.default is inspect.Parameter.empty
+
+
+@pytest.mark.asyncio
+async def test_invalid_projection_epoch_includes_session_id(tmp_path: Path) -> None:
+    manager = _durable_manager(tmp_path)
+    session_id = await manager.create_session()
+    store = manager._local_durable_store
+    assert store is not None
+
+    async def bad_fact(_session_id: str) -> object:
+        return types.SimpleNamespace(projection_epoch="")
+
+    store.load_session_fact_source = bad_fact  # type: ignore[method-assign]
+    with pytest.raises(ValueError, match=session_id):
+        await manager._current_projection_epoch(session_id)
+
+
+@pytest.mark.asyncio
+async def test_chat_event_ids_include_projection_epoch(tmp_path: Path) -> None:
+    manager = _durable_manager(tmp_path)
+    session_id = await manager.create_session()
+    store = manager._local_durable_store
+    assert store is not None
+    await _run_successful_turn(manager, session_id)
+    session = await manager.get_session_async(session_id)
+    replay = await store.replay_from_retention_floor(session_id)
+    chat = [
+        event
+        for event in replay.events
+        if event.event_kind
+        in {"assistant_message", "thinking", "tool_call", "tool_result"}
+    ]
+    assert chat
+    for event in chat:
+        assert f":e{event.projection_epoch}:" in event.event_id
+        assert event.event_id.startswith(
+            f"{session_id}:{event.event_kind}:{session.current_turn_id}:e"
+        )
+
+
+@pytest.mark.asyncio
+async def test_commit_session_uow_loads_projection_epoch_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = _durable_manager(tmp_path)
+    session_id = await manager.create_session()
+    await _run_successful_turn(manager, session_id)
+    session = await manager.get_session_async(session_id)
+    calls = {"n": 0}
+    original = manager._current_projection_epoch
+
+    async def counting(sid: str) -> str:
+        calls["n"] += 1
+        return await original(sid)
+
+    monkeypatch.setattr(manager, "_current_projection_epoch", counting)
+    await manager._commit_session_uow(
+        session,
+        event_kind=_TURN_SETTLED,
+        payload={
+            "turn_id": session.current_turn_id,
+            "turn_in_progress": session.turn_in_progress,
+        },
+        created_at=datetime.now(UTC),
+        include_mailbox=True,
+    )
+    assert calls["n"] == 1
