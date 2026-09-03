@@ -173,6 +173,23 @@ def test_project_chat_event_normalizes_agentkit_fact_payloads(
     assert projected.payload == expected_payload
 
 
+def test_project_chat_event_drops_empty_assistant_text() -> None:
+    # Tool-call-only model rounds persist assistant_message facts with empty
+    # content and no run_id. The projection must drop them instead of raising
+    # on the empty text payload.
+    record = EventRecord(
+        event_id="event-empty-assistant",
+        session_id=SESSION_ID,
+        event_kind="assistant_message",
+        payload={"content": ""},
+        created_at=datetime(2026, 8, 24, tzinfo=UTC),
+        session_seq="1",
+    )
+
+    assert project_chat_event(record, None) is None
+    assert project_chat_event(record, _run("run-active")) is None
+
+
 @pytest.mark.asyncio
 async def test_snapshot_chat_events_empty_and_nonempty_pages_are_bounded(
     store_kind: str,
