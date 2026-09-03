@@ -2255,24 +2255,23 @@ class PgUnitOfWorkMixin:
                     raise ValueError("existing event must include session_seq")
                 if existing_event.projection_epoch is None:
                     raise ValueError("existing event must include projection_epoch")
-                next_seq = parse_u64(
-                    existing_event.session_seq, field_name="session_seq"
-                )
                 existing_epoch = parse_u64(
                     existing_event.projection_epoch, field_name="projection_epoch"
                 )
                 if existing_epoch != fact.projection_epoch_int:
-                    promoted_row = await connection.fetchrow(
-                        self._PROMOTE_SESSION_EVENT_EPOCH_SQL,
-                        unit.event.event_id,
-                        fact.projection_epoch_int,
+                    raise StateVersionConflictError(
+                        "committed event projection_epoch is immutable"
                     )
-                    event = _event_record_from_pg_row(
-                        _required_row(promoted_row, "session event epoch promote")
-                    )
-                else:
-                    event = existing_event
-                idempotent = True
+                return AuthoritativeCommit(
+                    event=existing_event,
+                    projection=fact.projection,
+                    projection_epoch=existing_event.projection_epoch,
+                    raw_cursor=RawCursor(
+                        session_id=authority.session_id,
+                        session_seq=existing_event.session_seq,
+                    ),
+                    idempotent=True,
+                )
             else:
                 next_seq = fact.session_seq_int + 1
                 _ = await connection.fetchrow(
