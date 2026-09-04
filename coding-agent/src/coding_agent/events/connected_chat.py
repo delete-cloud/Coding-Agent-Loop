@@ -341,6 +341,11 @@ def project_chat_event(
         return None
     payload_run_id = payload.pop("run_id", None)
     payload = _projected_chat_payload(record.event_kind, payload)
+    if record.event_kind == "assistant_message" and not payload.get("text"):
+        # Tool-call-only model rounds persist assistant_message facts with empty
+        # content. They carry no displayable chat fact; exclude them from the
+        # projection instead of failing payload validation.
+        return None
     if payload_run_id is not None and not isinstance(payload_run_id, str):
         raise TypeError("chat event run_id must be a string")
     if run is not None:
