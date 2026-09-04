@@ -88,6 +88,17 @@ def test_subcommand_help_is_available_without_provider_credentials() -> None:
         assert command in result.output
 
 
+def test_serve_help_documents_night_console_webui_dist() -> None:
+    runner = CliRunner(env=_click_credential_free_env())
+
+    result = runner.invoke(main, ["serve", "--help"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert "WEBUI_DIST_DIR" in result.output
+    assert "Night Console" in result.output
+    assert "app-next" in result.output
+
+
 def test_daemon_help_lists_daemon_backed_run_client() -> None:
     runner = CliRunner(env=_click_credential_free_env())
 

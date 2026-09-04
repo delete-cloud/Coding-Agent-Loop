@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
@@ -156,19 +157,21 @@ async def send_prompt(
     if not _auth_context_can_access_session(auth_context, visible_session):
         return _chat_session_not_found_error()
 
-    # A command_id identifies the connected-chat contract. The optional
-    # event_format query remains only for backward-compatible legacy requests.
+    # A client command_id selects the connected-chat SSE contract. JSON body
+    # prompts still admit through that UoW so user_prompt is persisted even
+    # when command_id is omitted.
     connected_chat_request = body is not None and body.command_id is not None
     effective_event_format: Literal["wire", "display"] = (
         "display" if connected_chat_request else event_format
     )
     admission: ChatCommandAdmission | None = None
-    if connected_chat_request:
+    if body is not None:
+        command_id = body.command_id or uuid.uuid4().hex
         try:
             admission = await session_manager.admit_chat_command(
                 session_id,
                 prompt=prompt_text,
-                command_id=body.command_id,
+                command_id=command_id,
             )
         except (
             TurnInProgressError,
@@ -182,11 +185,12 @@ async def send_prompt(
             raise _owner_conflict_http_exception(exc, session_id=session_id) from exc
 
     if admission is not None:
-        canonical_stream = _admitted_chat_stream_response(
-            session_manager, session_id, admission
-        )
-        if canonical_stream is not None:
-            return canonical_stream
+        if connected_chat_request:
+            canonical_stream = _admitted_chat_stream_response(
+                session_manager, session_id, admission
+            )
+            if canonical_stream is not None:
+                return canonical_stream
         # Admission already performed the checked turn gate; load the session
         # directly instead of re-running the legacy admission check.
         session = visible_session

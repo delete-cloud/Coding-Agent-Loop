@@ -26,8 +26,11 @@ from coding_agent.events.connected_chat import (
 from coding_agent.runs.resume import DEFAULT_RESUME_PROMPT
 from coding_agent.server.http.routes import sessions as session_routes
 from coding_agent.server.http_server import app, session_manager
+import coding_agent.server.http_server as http_server
 from coding_agent.server.rate_limit import limiter
-from coding_agent.server.session_manager import Session
+from coding_agent.server.session_manager import Session, SessionManager
+from coding_agent.server.stores.session_owner_store import SQLiteSessionOwnerStore
+from coding_agent.stores.local import local_sqlite_storage_config
 
 FIXTURE = json.loads(
     (
@@ -219,6 +222,105 @@ async def test_session_catalog_omits_session_without_user_prompt_but_get_keeps_i
     assert get_response.status_code == 200
     assert get_response.json()["session_id"] == session.id
     assert get_response.json()["title"] is None
+
+
+async def _empty_chat_stream(*args, **kwargs):
+    del args, kwargs
+    if False:
+        yield None
+
+
+@pytest.fixture
+async def durable_http_session_manager(tmp_path) -> AsyncIterator[SessionManager]:
+    original = http_server.session_manager
+    manager = SessionManager(
+        storage_config=local_sqlite_storage_config(tmp_path),
+        owner_store=SQLiteSessionOwnerStore(tmp_path / "local.sqlite3"),
+        owner_id="http-user-prompt-owner",
+        fencing_token=1,
+    )
+    http_server.session_manager = manager
+    try:
+        yield manager
+    finally:
+        http_server.session_manager = original
+        await manager.close()
+
+
+async def _durable_registered_session(
+    manager: SessionManager, session_id: str = "session-no-command-id"
+) -> Session:
+    now = datetime.now(UTC)
+    session = Session(id=session_id, created_at=now, last_activity=now)
+    session.tape_id = f"tape-{session_id}"
+    manager._session_cache[session.id] = session
+    await manager._acquire_owner_for_session(session.id)
+    store = manager._authoritative_store()
+    assert store is not None
+    await store.save_session(
+        manager._owner_authorities[session.id], session.to_store_data()
+    )
+    return session
+
+
+async def test_prompt_without_command_id_writes_user_prompt(
+    client: AsyncClient,
+    durable_http_session_manager: SessionManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = await _durable_registered_session(durable_http_session_manager)
+    prompt_text = "Persist this prompt without command_id"
+
+    monkeypatch.setattr(
+        durable_http_session_manager, "run_agent", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr(
+        durable_http_session_manager, "stream_chat_command", _empty_chat_stream
+    )
+
+    response = await client.post(
+        f"/sessions/{session.id}/prompt",
+        json={"prompt": prompt_text},
+    )
+    assert response.status_code == 200
+
+    snapshot = await client.get(f"/sessions/{session.id}/chat-events")
+    assert snapshot.status_code == 200
+    user_prompts = [
+        event for event in snapshot.json()["events"] if event["kind"] == "user_prompt"
+    ]
+    assert len(user_prompts) == 1
+    assert user_prompts[0]["payload"]["text"] == prompt_text
+
+    catalog = await client.get("/sessions")
+    assert catalog.status_code == 200
+    sessions = catalog.json()["sessions"]
+    assert len(sessions) == 1
+    assert sessions[0]["session_id"] == session.id
+    assert sessions[0]["title"] == prompt_text
+
+
+async def test_rejected_prompt_without_command_id_writes_no_user_prompt(
+    client: AsyncClient,
+    durable_http_session_manager: SessionManager,
+) -> None:
+    session = await _durable_registered_session(durable_http_session_manager)
+
+    rejected = await client.post(
+        f"/sessions/{session.id}/prompt",
+        json={"prompt": ""},
+    )
+    assert rejected.status_code == 422
+
+    snapshot = await client.get(f"/sessions/{session.id}/chat-events")
+    assert snapshot.status_code == 200
+    assert [
+        event for event in snapshot.json()["events"] if event["kind"] == "user_prompt"
+    ] == []
+
+    catalog = await client.get("/sessions")
+    assert catalog.status_code == 200
+    assert catalog.json()["sessions"] == []
 
 
 async def test_snapshot_and_cursor_errors_match_fixture(

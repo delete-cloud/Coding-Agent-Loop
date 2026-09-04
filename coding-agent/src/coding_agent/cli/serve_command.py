@@ -188,7 +188,11 @@ def serve(
     config_path: Path | None,
     allow_unauthenticated: bool,
 ):
-    """Start HTTP API server."""
+    """Start HTTP API server.
+
+    Default is API-only. Set WEBUI_DIST_DIR to a Night Console
+    (`webui/app-next`) export directory to mount the UI at `/`.
+    """
     _run_http_control_plane(
         config_path=config_path,
         host=host,
