@@ -520,16 +520,29 @@ class _DurableCommitPort:
         terminal_action: bool | None = None,
         unstarted_dispatch_closeout: UnstartedDispatchCloseoutGuard | None = None,
     ) -> AuthoritativeUnitOfWork:
-        facts = tuple(
-            EventRecord(
-                event_id=fact.fact_id,
-                session_id=request.session_id,
-                event_kind=fact.fact_kind,
-                payload=cast(JSONObject, dict(fact.payload)),
-                created_at=self._clock(),
+        run_id = request.engine_request.state_version.run_id
+        if not isinstance(run_id, str) or not run_id:
+            raise ValueError(
+                "transition state_version.run_id must be a non-empty string"
             )
-            for fact in request.proposal.pending_facts
-        )
+        stamped_facts: list[EventRecord] = []
+        for fact in request.proposal.pending_facts:
+            payload = cast(JSONObject, dict(fact.payload))
+            existing = payload.get("run_id")
+            if existing is None:
+                payload["run_id"] = run_id
+            elif not isinstance(existing, str) or not existing:
+                raise ValueError("pending fact run_id must be a non-empty string")
+            stamped_facts.append(
+                EventRecord(
+                    event_id=fact.fact_id,
+                    session_id=request.session_id,
+                    event_kind=fact.fact_kind,
+                    payload=payload,
+                    created_at=self._clock(),
+                )
+            )
+        facts = tuple(stamped_facts)
         return AuthoritativeUnitOfWork(
             event=None,
             session_state=self._session_state,

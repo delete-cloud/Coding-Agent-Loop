@@ -174,6 +174,60 @@ async def _open_store(tmp_path: Path, store_kind: str):
     return store, owner
 
 
+def test_transition_unit_stamps_run_id_on_pending_facts() -> None:
+    from dataclasses import replace
+
+    port = SQLiteCommitPort(
+        cast(Any, object()),
+        session_state=SESSION_STATE,
+        clock=lambda: STAMP,
+    )
+    base = _prepare_request(_plan("effect-stamp"))
+    request = replace(
+        base,
+        proposal=replace(
+            base.proposal,
+            pending_facts=(
+                PendingFact(
+                    fact_id="fact-assistant",
+                    fact_kind="assistant_message",
+                    payload={"content": ""},
+                ),
+                PendingFact(
+                    fact_id="fact-tool",
+                    fact_kind="tool_call",
+                    payload={
+                        "tool_call_id": "call-1",
+                        "tool_name": "file_write",
+                        "arguments": {},
+                    },
+                ),
+                PendingFact(
+                    fact_id="fact-approval",
+                    fact_kind="approval_requested",
+                    payload={"approval_request_id": "approval-1"},
+                ),
+                PendingFact(
+                    fact_id="fact-child",
+                    fact_kind="assistant_message",
+                    payload={"content": "child", "run_id": "child-run"},
+                ),
+            ),
+            effect_plans=(),
+        ),
+    )
+    unit = port._transition_unit(
+        request,
+        effect_mutations=(),
+        create_child_bindings=False,
+    )
+    payloads = [dict(fact.payload) for fact in unit.facts]
+    assert payloads[0]["run_id"] == "run-commit-port"
+    assert payloads[1]["run_id"] == "run-commit-port"
+    assert payloads[2]["run_id"] == "run-commit-port"
+    assert payloads[3]["run_id"] == "child-run"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("store_kind", "port_type"), PORT_CASES)
 async def test_concrete_commit_ports_prepare_all_plans_and_restore_exact_receipt(

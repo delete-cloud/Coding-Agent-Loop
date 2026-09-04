@@ -190,6 +190,23 @@ def test_project_chat_event_drops_empty_assistant_text() -> None:
     assert project_chat_event(record, _run("run-active")) is None
 
 
+def test_project_chat_event_hides_superseded_run_facts() -> None:
+    record = EventRecord(
+        event_id="event-superseded-write",
+        session_id=SESSION_ID,
+        event_kind="assistant_message",
+        payload={"content": "wrote file", "run_id": "run-old"},
+        created_at=datetime(2026, 8, 24, tzinfo=UTC),
+        session_seq="1",
+    )
+
+    assert project_chat_event(record, _run("run-old", superseded=True)) is None
+    projected = project_chat_event(record, _run("run-old"))
+    assert projected is not None
+    assert projected.payload == {"text": "wrote file"}
+    assert projected.run_id == "run-old"
+
+
 @pytest.mark.asyncio
 async def test_snapshot_chat_events_empty_and_nonempty_pages_are_bounded(
     store_kind: str,
