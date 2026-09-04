@@ -22,9 +22,10 @@ As of `origin/main` `903c4db0` (2026-09-04):
   conversation, checkpoint, restore, reapprove, and one Night Console reply.
   Production `runtime_activation.new_sessions_enabled` stays off.
 - ADR-0085 keeps Phases G and H from 0083: H is the later package extract, and
-  it removes the legacy pipeline only after migration gates. This product map
-  does not perform H or pipeline deletion. Accept this record and finish the
-  MVP journey before any H ADR. Pipeline removal stays after productization.
+  it removes the legacy pipeline only after 0085 migration gates. This product
+  map does not perform H or pipeline deletion. This record decides that any
+  H ADR waits until this file is Accepted and the Night Console journey works.
+  Pipeline removal stays after productization.
 
 The 2026-08-26 draft of this record claimed main still lacked connected-chat
 and that the work lived only in dirty worktrees. That is false on current main.
@@ -103,7 +104,8 @@ Unfinished / not this MVP:
 - ADR-0076 P3 OpenRPC / P4 unix socket / writer lease
 - Tape Inspector; approvals/checkpoints/memory/diff as first-class Night
   Console panels
-- `run --tui` is still in-process DisplayEvents. `daemon tui` already
+- `run --tui` is still an in-process managed-session TUI (`WireMessage` /
+  `RichConsumer`); it does not talk to `daemon`. `daemon tui` already
   admits with `command_id` and consumes canonical `chat_event` SSE (the
   `event_format=display` query is ignored on that path), then adapts frames
   into the Rich Display consumer. See TUI section.
@@ -152,8 +154,11 @@ MVP UI is Night Console over HTTP (`command_id` + JSON snapshot + chat SSE).
 
 There are two Rich TUI entrypoints today:
 
-- `run --tui`: in-process one-shot. It constructs a local runtime
-  (`PipelineAdapter`) and renders DisplayEvents. It does not talk to `daemon`.
+- `run --tui`: in-process one-shot managed session. It does not talk to
+  `daemon`. Display is `LocalWire` `WireMessage`s into `RichConsumer`
+  (`CodingAgentTUI`). Execution follows the session's immutable
+  `runtime_version`: legacy sessions use `PipelineAdapter`; `agentkit-1`
+  uses `DurableSegmentRunner`. It does not render DisplayEvent records.
 - `daemon tui --goal`: HTTP client of a running daemon. It sends `command_id`,
   so admission writes `user_prompt` and the stream is canonical `chat_event`
   SSE (`stream_chat_command`). The `event_format=display` query is ignored
@@ -165,8 +170,10 @@ Unification lean (not this MVP): drop the in-process TUI so local and daemon
 share one control plane. Interactive TUI becomes `daemon tui` (or equivalent)
 against `serve`/`daemon`, same EventRecord projection as Night Console
 (`GET /chat-events` snapshot + prompt/follow SSE). Whether to delete
-`run --tui` is **undecided**; `tests/coding_agent/test_cli_pipeline.py` still
-covers it. MVP work must not delete it.
+`run --tui` is **undecided**. `tests/cli/test_entrypoint_contract.py` still
+routes the flag. `tests/coding_agent/test_cli_pipeline.py::TestTuiRunUsesPipeline`
+is strict-xfail (direct `PipelineAdapter` CLI contract was replaced) and is
+not behavioral coverage. MVP work must not delete `run --tui`.
 
 If some in-process UI remains (for example a future REPL renderer), prefer
 calling `project_chat_event` in-process rather than embedding an HTTP SSE
@@ -174,14 +181,17 @@ client in that process. That lean does not apply to `daemon tui`.
 
 ### Sequencing versus Phase H
 
-Accept this record before drafting a Phase H ADR. Authority for H/pipeline
-timing is ADR-0085, not this file: H extracts the host-neutral
+Accept this record before drafting a Phase H ADR. ADR-0085 defines what H
+contains, not when this repo may start it: H extracts the host-neutral
 `AgentEngine` + `SegmentCoordinator` package and removes the legacy pipeline
-only after migration gates. This MVP does not start that work.
+only after 0085 migration gates. ADR-0085 does not wait on this file. This
+record's decision is that drafting that H ADR waits until this file is
+Accepted and the Night Console journey works. This MVP does not start that
+work.
 
 H must not redefine Tape, EventRecord, CLI defaults, or the Night Console
-journey. Pipeline removal happens after this product map is Accepted and the
-Night Console journey works.
+journey. Pipeline removal stays after productization (0085 H gates), and
+after this product map is Accepted and the Night Console journey works.
 
 Until this record is Accepted, do not change `src/agentkit`, `src/coding_agent`,
 frontend, or tests for the MVP gaps above.
@@ -190,11 +200,13 @@ frontend, or tests for the MVP gaps above.
 
 After acceptance only:
 
-- Persist `user_prompt` on the HTTP `/sessions/{id}/prompt` admission UoW the
-  same way Night Console's create+send path does (`connected_chat.py` already
-  knows the kind). Target: `src/coding_agent/server/http/routes/prompts.py`
-  and the session persist/admission path it calls. Do not invent a second chat
-  fact source.
+- Persist `user_prompt` on HTTP `POST /sessions/{id}/prompt` admission,
+  including the path without `command_id`. Night Console create+send already
+  sends `command_id` (`connected_chat.py` already knows the kind). Target:
+  `src/coding_agent/server/http/routes/prompts.py` and the session
+  persist/admission path it calls. Do not invent a second chat fact source.
+  Existing admission/HTTP tests only lock the `command_id` path; add a test
+  that fails on current main for POST without `command_id`.
 - Mount or document the Night Console export on `serve` via `WEBUI_DIST_DIR`.
   Do not extend old `webui/app` for this MVP.
 - Keep CLI labels in `src/coding_agent/cli/main.py`. Do not make `run --goal`
@@ -210,8 +222,9 @@ After acceptance only:
   session identity or persisted user prompts (ADR-0077 rejected this).
 - Delete `run --goal` in this MVP — still used as a testkit/CI seam; whether
   to delete it after that seam is gone is undecided (later ADR, not this one).
-- Delete `run --tui` in this MVP — still covered by CLI tests; unification
-  onto `daemon tui` is a later ADR.
+- Delete `run --tui` in this MVP — flag routing still exists; unification
+  onto `daemon tui` is a later ADR. Do not treat the strict-xfail
+  `TestTuiRunUsesPipeline` as coverage.
 - Build the MVP in old `webui/app` — forks Alma and keeps client-only user
   bubbles.
 - Treat `RuntimeMessageBus` as the product bus — it is ephemeral inbound
@@ -234,7 +247,14 @@ After acceptance only:
 - [ ] `run --goal` remains a labeled one-shot; default CLI remains interactive.
 - [ ] Visible EventRecord kinds include `approval_requested`.
 - [ ] HTTP projection maps JSON snapshot vs SSE follow/prompt streams.
-- [ ] After acceptance, HTTP prompt admission writes `user_prompt`:
+- [ ] After acceptance, HTTP prompt admission writes `user_prompt` even
+      without `command_id`. Existing
+      `test_connected_chat_admission.py` / `test_connected_chat_http.py`
+      only lock the `command_id` path (already green on main). Add a test
+      that fails today: `POST /sessions/{id}/prompt` without `command_id`
+      persists exactly one `user_prompt` visible in the chat snapshot and
+      session catalog; a rejected admission writes none. Keep the
+      `command_id` regression gate:
 
 ```sh
 uv run pytest tests/coding_agent/test_connected_chat_admission.py tests/coding_agent/test_connected_chat_projection.py tests/ui/test_connected_chat_http.py -q
