@@ -17,6 +17,16 @@ from agentkit.config.loader import load_config
 from agentkit.tools import tool
 
 _DISALLOWED_TOKENS = {"&&", "||", "|", ";", ">", ">>", "<", "2>", "&"}
+_REMOTE_URL_SCHEMES = (
+    "https://",
+    "http://",
+    "git+https://",
+    "git+http://",
+    "git+ssh://",
+    "ssh://",
+    "git://",
+)
+
 _STRUCTURED_RESULTS: ContextVar[bool] = ContextVar(
     "coding_agent_shell_structured_results", default=False
 )
@@ -295,12 +305,22 @@ def _validated_execution_cwd(
     return str(resolved_cwd)
 
 
+def _looks_like_remote_url(arg: str) -> bool:
+    stripped = arg.strip().strip("'\"")
+    lowered = stripped.lower()
+    if lowered.startswith(_REMOTE_URL_SCHEMES):
+        return True
+    return lowered.startswith("git@") and ":" in stripped[4:]
+
+
 def _validate_no_path_escape(
     args: list[str],
     workspace_root: Path,
     additional_roots: tuple[Path, ...] = (),
 ) -> None:
     for arg in args[1:]:
+        if _looks_like_remote_url(arg):
+            continue
         for match in re.findall(r"(?<![A-Za-z0-9_.-])/[A-Za-z0-9_./-]+", arg):
             candidate = Path(match).expanduser().resolve()
             if not _path_under_any_root(candidate, workspace_root, additional_roots):
