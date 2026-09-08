@@ -175,6 +175,91 @@ class TestShellTool:
         assert str(workspace).lower() in blocked_text
         assert "secret" not in blocked_text
 
+
+    def test_none_sandbox_allows_https_git_url_argument(self, tmp_path: Path):
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        pipeline_ctx = SimpleNamespace(
+            config={"workspace_root": str(workspace), "shell": {"sandbox_mode": "none"}}
+        )
+        url = "https://github.com/delete-cloud/Coding-Agent-Loop.git"
+        result = bash_run(
+            command=f"echo {url}",
+            cwd=str(workspace),
+            __pipeline_ctx__=pipeline_ctx,
+        )
+        result_text = _as_text(result)
+        assert "outside sandbox workspace" not in result_text.lower()
+        assert url in result_text
+
+    def test_none_sandbox_allows_ssh_git_url_argument(self, tmp_path: Path):
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        pipeline_ctx = SimpleNamespace(
+            config={"workspace_root": str(workspace), "shell": {"sandbox_mode": "none"}}
+        )
+        url = "git@github.com:delete-cloud/Coding-Agent-Loop.git"
+        result = bash_run(
+            command=f"echo {url}",
+            cwd=str(workspace),
+            __pipeline_ctx__=pipeline_ctx,
+        )
+        result_text = _as_text(result)
+        assert "outside sandbox workspace" not in result_text.lower()
+        assert "github.com:delete-cloud/Coding-Agent-Loop.git" in result_text
+
+    def test_none_sandbox_allows_ssh_scheme_git_url_argument(self, tmp_path: Path):
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        pipeline_ctx = SimpleNamespace(
+            config={"workspace_root": str(workspace), "shell": {"sandbox_mode": "none"}}
+        )
+        url = "ssh://git@github.com/delete-cloud/Coding-Agent-Loop.git"
+        result = bash_run(
+            command=f"echo {url}",
+            cwd=str(workspace),
+            __pipeline_ctx__=pipeline_ctx,
+        )
+        result_text = _as_text(result)
+        assert "outside sandbox workspace" not in result_text.lower()
+        assert url in result_text
+
+    def test_none_sandbox_allows_git_plus_ssh_url_argument(self, tmp_path: Path):
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        pipeline_ctx = SimpleNamespace(
+            config={"workspace_root": str(workspace), "shell": {"sandbox_mode": "none"}}
+        )
+        url = "git+ssh://git@github.com/delete-cloud/Coding-Agent-Loop.git"
+        result = bash_run(
+            command=f"echo {url}",
+            cwd=str(workspace),
+            __pipeline_ctx__=pipeline_ctx,
+        )
+        result_text = _as_text(result)
+        assert "outside sandbox workspace" not in result_text.lower()
+        assert url in result_text
+
+    def test_none_sandbox_blocks_escape_path_next_to_git_url(self, tmp_path: Path):
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        pipeline_ctx = SimpleNamespace(
+            config={"workspace_root": str(workspace), "shell": {"sandbox_mode": "none"}}
+        )
+        result = bash_run(
+            command=(
+                "git clone https://github.com/delete-cloud/Coding-Agent-Loop.git "
+                f"{outside}"
+            ),
+            cwd=str(workspace),
+            __pipeline_ctx__=pipeline_ctx,
+        )
+        result_text = _as_text(result).lower()
+        assert "outside sandbox workspace" in result_text
+        assert str(workspace).lower() in result_text
+
     def test_none_sandbox_allows_absolute_path_under_additional_root(
         self, tmp_path: Path
     ):
