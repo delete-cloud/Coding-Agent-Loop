@@ -912,8 +912,8 @@ Notes on current implementation:
 | `AGENT_ENABLE_PARALLEL_TOOLS` | `enable_parallel_tools` |
 | `AGENT_MAX_PARALLEL_TOOLS` | `max_parallel_tools` |
 | `AGENT_HTTP_API_KEY` | `http_api_key` |
-| `AGENT_SANDBOX_MODE` | `shell.sandbox_mode` (overrides `[shell]` table and pipeline config; `none`/`native`/`podman`/`docker`) |
-| `AGENT_SHELL_ADDITIONAL_ROOTS` | `shell.additional_workspace_roots` (OS-path-separator-separated list) |
+| `AGENT_SANDBOX_MODE` | `shell.sandbox_mode` (overrides `[shell]` table and pipeline config; `none`/`native`/`podman`/`docker`) — escape hatch for pre-isolated hosts only (eval/benchmark containers); `none` disables the process jail |
+| `AGENT_SHELL_ADDITIONAL_ROOTS` | `shell.additional_workspace_roots` (OS-path-separator-separated list; overrides pipeline config too) — pre-isolated hosts only; `/` disables path fencing entirely |
 
 ### Provider-Specific Key Resolution
 

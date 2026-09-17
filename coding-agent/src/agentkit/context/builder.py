@@ -126,13 +126,10 @@ class ContextBuilder:
         return [system] + messages
 
     def grounding_insert_index(self, core_messages: list[dict[str, Any]]) -> int:
-        # Grounding blocks carry per-turn volatile fields (elapsed time,
-        # active approvals, runtime messages, plugin recall). Inserting them
-        # before the last user message placed this volatile block at the head
-        # of the request in single-instruction runs, which invalidated the
-        # entire prompt prefix for provider-side caching. Appending at the
-        # tail keeps the conversation prefix stable; the grounding block is
-        # part of the always-fresh tail either way.
+        # Grounding carries per-call volatile fields (elapsed time, approvals,
+        # runtime messages). It must append at the tail so the stable
+        # conversation prefix stays byte-identical for provider-side prompt
+        # caching. See PM-0029.
         return len(core_messages)
 
     def patch_messages(

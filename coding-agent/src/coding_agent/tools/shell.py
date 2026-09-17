@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import lru_cache
 import importlib
+import logging
 import os
 import platform
 import re
@@ -18,6 +19,9 @@ from agentkit.config.loader import load_config
 from agentkit.tools import tool
 
 _DISALLOWED_TOKENS = {"&&", "||", "|", ";", ">", ">>", "<", "2>", "&"}
+
+logger = logging.getLogger(__name__)
+_env_override_warned: set[str] = set()
 _REMOTE_URL_SCHEMES = (
     "https://",
     "http://",
@@ -149,7 +153,19 @@ def _pipeline_shell_config(__pipeline_ctx__: object | None) -> dict[str, object]
     env_mode = os.environ.get("AGENT_SANDBOX_MODE")
     if env_mode is not None:
         merged["sandbox_mode"] = env_mode
+        _warn_env_override_once("AGENT_SANDBOX_MODE", env_mode)
     return merged
+
+
+def _warn_env_override_once(name: str, value: str) -> None:
+    if name not in _env_override_warned:
+        _env_override_warned.add(name)
+        logger.warning(
+            "%s=%s overrides shell config for this process; intended only for "
+            "hosts that already provide an isolation boundary",
+            name,
+            value,
+        )
 
 
 def _default_shell_config_for_execution(
@@ -205,6 +221,7 @@ def _resolve_additional_workspace_roots(
     env_roots = os.environ.get("AGENT_SHELL_ADDITIONAL_ROOTS")
     if env_roots:
         roots: object = [root for root in env_roots.split(os.pathsep) if root]
+        _warn_env_override_once("AGENT_SHELL_ADDITIONAL_ROOTS", env_roots)
     else:
         roots = pipeline_config.get("additional_workspace_roots")
         if roots is None:
