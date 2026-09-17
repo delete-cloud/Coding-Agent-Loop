@@ -2,6 +2,7 @@
 
 import builtins
 import importlib
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -751,6 +752,37 @@ class TestNativeSandboxResolution:
             )
             is True
         )
+
+    def test_env_sandbox_mode_overrides_configured_mode(self, monkeypatch):
+        from coding_agent.tools.shell import _pipeline_shell_config
+
+        monkeypatch.setenv("AGENT_SANDBOX_MODE", "none")
+        pipeline_ctx = SimpleNamespace(
+            config={"shell": {"sandbox_mode": "native"}}
+        )
+
+        merged = _pipeline_shell_config(pipeline_ctx)
+
+        assert merged["sandbox_mode"] == "none"
+
+    def test_env_additional_roots_extend_configured_roots(self, monkeypatch):
+        from coding_agent.tools.shell import _pipeline_shell_config
+
+        monkeypatch.setenv("AGENT_SHELL_ADDITIONAL_ROOTS", os.pathsep.join(["/", "/tmp"]))
+        pipeline_ctx = SimpleNamespace(config={"shell": {}})
+
+        merged = _pipeline_shell_config(pipeline_ctx)
+
+        assert merged["additional_workspace_roots"] == ["/", "/tmp"]
+
+    def test_env_sandbox_mode_applies_without_pipeline_ctx(self, monkeypatch):
+        from coding_agent.tools.shell import _pipeline_shell_config
+
+        monkeypatch.setenv("AGENT_SANDBOX_MODE", "none")
+
+        merged = _pipeline_shell_config(None)
+
+        assert merged["sandbox_mode"] == "none"
 
 
 class TestMacosSeatbeltSandbox:

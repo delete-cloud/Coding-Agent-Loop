@@ -156,7 +156,7 @@ class TestContextBuilder:
             {"role": "assistant", "content": "visible reply"},
         ]
 
-    def test_grounding_injected_before_last_user_message(self):
+    def test_grounding_appended_at_tail(self):
         tape = Tape()
         tape.append(
             Entry(kind="message", payload={"role": "user", "content": "fix the bug"})
@@ -164,10 +164,11 @@ class TestContextBuilder:
         builder = ContextBuilder(system_prompt="system")
         grounding = [{"role": "system", "content": "[Memory] User prefers Python."}]
         messages = builder.build(tape, grounding=grounding)
-        # system + grounding + user
+        # system + user + grounding (tail placement keeps the prompt prefix
+        # stable across turns for provider-side prompt caching)
         assert len(messages) == 3
-        assert messages[1]["content"] == "[Memory] User prefers Python."
-        assert messages[2]["content"] == "fix the bug"
+        assert messages[1]["content"] == "fix the bug"
+        assert messages[2]["content"] == "[Memory] User prefers Python."
 
     def test_anchor_entries_are_preserved(self):
         tape = Tape()
@@ -434,7 +435,7 @@ class TestContextBuilderWithView:
         grounding = [{"role": "system", "content": "[Memory] Use pytest"}]
         messages = builder.build(view, grounding=grounding)
         assert len(messages) == 3
-        assert messages[1]["content"] == "[Memory] Use pytest"
+        assert messages[2]["content"] == "[Memory] Use pytest"
 
     def test_build_from_windowed_view(self):
         tape = Tape()

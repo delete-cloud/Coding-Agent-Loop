@@ -721,3 +721,24 @@ patterns:
   - safe-yield
   - indeterminate
   - duplicate-effect
+- id: PM-0029
+  title: Keep volatile grounding out of the stable prompt prefix
+  path: patterns/PM-0029-keep-volatile-grounding-out-of-stable-prompt-prefix.md
+  severity: high
+  confidence: high
+  subsystems:
+  - agentkit
+  related_files:
+  - src/agentkit/context/builder.py
+  - src/agentkit/runtime/pipeline.py
+  - tests/agentkit/context/test_builder.py
+  - tests/agentkit/test_incremental_context.py
+  related_commits: []
+  keywords:
+  - prompt
+  - cache
+  - grounding
+  - prefix
+  - volatile
+  - runtime
+  - context

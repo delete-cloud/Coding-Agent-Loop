@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import lru_cache
 import importlib
+import os
 import platform
 import re
 import shlex
@@ -133,14 +134,26 @@ def _parse_command(command: str) -> list[str]:
 def _pipeline_shell_config(__pipeline_ctx__: object | None) -> dict[str, object]:
     defaults = _default_shell_config()
     if __pipeline_ctx__ is None:
-        return _default_shell_config_for_execution(defaults)
-    config = getattr(__pipeline_ctx__, "config", None)
-    if not isinstance(config, dict):
-        raise ValueError("pipeline context config must be a dict")
-    typed_config = cast(dict[str, object], config)
-    raw_shell_config = typed_config.get("shell", {})
-    merged = _default_shell_config_for_execution(defaults)
-    merged.update(_normalize_shell_config(raw_shell_config))
+        merged = _default_shell_config_for_execution(defaults)
+    else:
+        config = getattr(__pipeline_ctx__, "config", None)
+        if not isinstance(config, dict):
+            raise ValueError("pipeline context config must be a dict")
+        typed_config = cast(dict[str, object], config)
+        raw_shell_config = typed_config.get("shell", {})
+        merged = _default_shell_config_for_execution(defaults)
+        merged.update(_normalize_shell_config(raw_shell_config))
+    # Explicit env contract for hosts that provide their own isolation
+    # boundary (eval/benchmark containers without bwrap): they select
+    # sandbox_mode=none instead of silently degrading native mode.
+    env_mode = os.environ.get("AGENT_SANDBOX_MODE")
+    if env_mode is not None:
+        merged["sandbox_mode"] = env_mode
+    env_roots = os.environ.get("AGENT_SHELL_ADDITIONAL_ROOTS")
+    if env_roots:
+        merged["additional_workspace_roots"] = [
+            root for root in env_roots.split(os.pathsep) if root
+        ]
     return merged
 
 
@@ -459,8 +472,6 @@ def bash_run(
 def _build_env(env: dict[str, str] | None) -> dict[str, str] | None:
     if env is None:
         return None
-    import os
-
     merged = dict(os.environ)
     merged.update(env)
     return merged
