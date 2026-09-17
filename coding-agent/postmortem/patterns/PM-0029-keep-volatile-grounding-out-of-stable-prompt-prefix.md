@@ -47,3 +47,13 @@ stable; the grounding block is part of the always-fresh tail either way.
 - Run `uv run pytest tests/agentkit/context/test_builder.py tests/agentkit/test_incremental_context.py -q`.
 - For any new grounding content, confirm it lands after all core messages, or
   that it is byte-stable across calls within a run.
+
+# Known limitation
+
+Tail placement only helps providers that preserve message order on the wire
+(openai-compatible chat completions). `providers/anthropic.py` and
+`providers/codex_responses.py` merge every `system` message into the global
+`system`/`instructions` field, so volatile grounding still lands in the
+request head for those providers. Closing that gap means either demoting
+tail grounding to a non-system role or adding provider-level volatile-block
+handling — a protocol-semantics change that needs its own ADR.

@@ -766,14 +766,26 @@ class TestNativeSandboxResolution:
         assert merged["sandbox_mode"] == "none"
 
     def test_env_additional_roots_extend_configured_roots(self, monkeypatch):
-        from coding_agent.tools.shell import _pipeline_shell_config
+        from coding_agent.tools.shell import _resolve_additional_workspace_roots
 
         monkeypatch.setenv("AGENT_SHELL_ADDITIONAL_ROOTS", os.pathsep.join(["/", "/tmp"]))
         pipeline_ctx = SimpleNamespace(config={"shell": {}})
 
-        merged = _pipeline_shell_config(pipeline_ctx)
+        roots = _resolve_additional_workspace_roots(pipeline_ctx, {})
 
-        assert merged["additional_workspace_roots"] == ["/", "/tmp"]
+        assert roots == (Path("/"), Path("/tmp"))
+
+    def test_env_additional_roots_beat_pipeline_roots(self, monkeypatch):
+        from coding_agent.tools.shell import _resolve_additional_workspace_roots
+
+        monkeypatch.setenv("AGENT_SHELL_ADDITIONAL_ROOTS", "/")
+        pipeline_ctx = SimpleNamespace(
+            config={"additional_workspace_roots": ["/tmp/extra"], "shell": {}}
+        )
+
+        roots = _resolve_additional_workspace_roots(pipeline_ctx, {})
+
+        assert roots == (Path("/"),)
 
     def test_env_sandbox_mode_applies_without_pipeline_ctx(self, monkeypatch):
         from coding_agent.tools.shell import _pipeline_shell_config

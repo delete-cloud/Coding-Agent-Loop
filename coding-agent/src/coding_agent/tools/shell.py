@@ -149,11 +149,6 @@ def _pipeline_shell_config(__pipeline_ctx__: object | None) -> dict[str, object]
     env_mode = os.environ.get("AGENT_SANDBOX_MODE")
     if env_mode is not None:
         merged["sandbox_mode"] = env_mode
-    env_roots = os.environ.get("AGENT_SHELL_ADDITIONAL_ROOTS")
-    if env_roots:
-        merged["additional_workspace_roots"] = [
-            root for root in env_roots.split(os.pathsep) if root
-        ]
     return merged
 
 
@@ -205,9 +200,15 @@ def _resolve_additional_workspace_roots(
     if not isinstance(raw_pipeline_config, dict):
         raise ValueError("pipeline context config must be a dict")
     pipeline_config = cast(dict[str, object], raw_pipeline_config)
-    roots = pipeline_config.get("additional_workspace_roots")
-    if roots is None:
-        roots = shell_config.get("additional_workspace_roots", ())
+    # Env override wins over both config layers so hosts with their own
+    # isolation boundary can widen the path fence explicitly.
+    env_roots = os.environ.get("AGENT_SHELL_ADDITIONAL_ROOTS")
+    if env_roots:
+        roots: object = [root for root in env_roots.split(os.pathsep) if root]
+    else:
+        roots = pipeline_config.get("additional_workspace_roots")
+        if roots is None:
+            roots = shell_config.get("additional_workspace_roots", ())
     if roots is None:
         return ()
     if not isinstance(roots, (list, tuple)):
