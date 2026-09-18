@@ -742,3 +742,28 @@ patterns:
   - volatile
   - runtime
   - context
+- id: PM-0030
+  title: Never emit orphan tool results or split tool-call groups
+  path: patterns/PM-0030-never-emit-orphan-or-split-tool-call-groups.md
+  severity: high
+  confidence: high
+  subsystems:
+  - agentkit
+  - coding_agent
+  related_files:
+  - src/agentkit/runtime/pipeline.py
+  - src/agentkit/context/builder.py
+  - src/coding_agent/plugins/summarizer.py
+  - src/coding_agent/providers/openai_compat.py
+  - tests/agentkit/runtime/test_pipeline.py
+  - tests/coding_agent/plugins/test_summarizer.py
+  - tests/providers/test_openai_compat.py
+  related_commits: []
+  keywords:
+  - tool_call
+  - tool_result
+  - orphan
+  - window
+  - summarizer
+  - kimi
+  - provider-400

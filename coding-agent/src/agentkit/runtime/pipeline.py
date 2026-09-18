@@ -893,12 +893,18 @@ class Pipeline:
                 executable_calls: list[ToolCallRequest] = []
                 checkpoint_entry_count: int | None = None
 
+                # All tool_call entries land first so the tape keeps the
+                # call group contiguous; rejection results interleaved between
+                # calls would split the group and produce adjacent assistant
+                # tool_calls messages that strict providers reject.
+                requests: list[ToolCallRequest] = []
                 for i, tc in enumerate(tool_calls):
                     tool_call = ToolCallRequest(
                         tool_call_id=tc["id"],
                         name=tc["name"],
                         arguments=tc["arguments"],
                     )
+                    requests.append(tool_call)
                     tc_payload: dict[str, Any] = {
                         "id": tool_call.tool_call_id,
                         "name": tool_call.name,
@@ -914,6 +920,7 @@ class Pipeline:
                         )
                     )
 
+                for tool_call in requests:
                     validation_error = toolset.validate_tool_call(
                         tool_call,
                         schemas=ctx.tool_schemas,

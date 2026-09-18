@@ -1334,6 +1334,65 @@ class TestPipeline:
         assert entries[-1].payload["role"] == "assistant"
 
     @pytest.mark.asyncio
+    async def test_rejected_call_does_not_split_tool_call_group(self, setup):
+        """Rejection results must not land between tool_call tape entries.
+
+        Interleaved call/result entries split the wire into adjacent assistant
+        tool_calls messages, which strict providers (kimi) reject.
+        """
+        pipeline, plugin = setup
+        registry = pipeline._registry
+        registry.register(SkillsLikePlugin())
+        tape = Tape()
+        tape.append(
+            Entry(kind="message", payload={"role": "user", "content": "go"})
+        )
+        ctx = PipelineContext(tape=tape, session_id="s1")
+        await pipeline.mount(ctx)
+
+        from agentkit.providers.models import TextEvent, ToolCallEvent, DoneEvent
+
+        call_count = 0
+
+        async def mock_stream(messages, tools=None, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                yield ToolCallEvent(
+                    tool_call_id="tc1",
+                    name="skill_invoke",
+                    arguments={"name": "alpha"},
+                )
+                yield ToolCallEvent(
+                    tool_call_id="tc2",
+                    name="skill_invoke",
+                    arguments={"name": 123},  # fails schema validation
+                )
+                yield ToolCallEvent(
+                    tool_call_id="tc3",
+                    name="skill_invoke",
+                    arguments={"name": "gamma"},
+                )
+                yield DoneEvent()
+            else:
+                yield TextEvent(text="done")
+                yield DoneEvent()
+
+        mock_llm = MagicMock()
+        mock_llm.stream = mock_stream
+        plugin._mock_llm = mock_llm
+
+        await pipeline.run_turn(ctx)
+        kinds = [e.kind for e in ctx.tape]
+        tc_idx = [i for i, k in enumerate(kinds) if k == "tool_call"]
+        tr_idx = [i for i, k in enumerate(kinds) if k == "tool_result"]
+        assert len(tc_idx) == 3
+        assert len(tr_idx) == 3
+        assert max(tc_idx) < min(tr_idx), (
+            f"tool_call entries must stay contiguous, got kinds={kinds}"
+        )
+
+    @pytest.mark.asyncio
     async def test_prompt_runtime_message_before_tool_execution_survives_failed_turn(
         self, setup
     ):

@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import random
+import uuid
 from typing import Any, AsyncIterator
 
 import httpx
@@ -184,11 +185,16 @@ class OpenAICompatProvider:
                             idx = tc.index
                             if idx not in accumulating_calls:
                                 accumulating_calls[idx] = {
-                                    "id": tc.id or "",
+                                    "id": "",
                                     "name": "",
                                     "arguments": "",
                                 }
 
+                            # Some providers emit the id on a later delta than
+                            # the first one for an index; capture it whenever it
+                            # arrives so the call/result pair stays consistent.
+                            if tc.id:
+                                accumulating_calls[idx]["id"] = tc.id
                             if tc.function:
                                 if tc.function.name:
                                     accumulating_calls[idx]["name"] = tc.function.name
@@ -210,8 +216,12 @@ class OpenAICompatProvider:
                             except json.JSONDecodeError:
                                 args = {}
 
+                            # A call with no id pairs with no tool result; some
+                            # providers (kimi) hard-reject empty tool_call_ids,
+                            # so synthesize one when the stream never sent it.
                             yield ToolCallEvent(
-                                tool_call_id=call_data["id"],
+                                tool_call_id=call_data["id"]
+                                or f"call_{uuid.uuid4().hex[:24]}",
                                 name=call_data["name"],
                                 arguments=args,
                             )

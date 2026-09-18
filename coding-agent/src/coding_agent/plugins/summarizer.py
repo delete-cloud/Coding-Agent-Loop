@@ -56,16 +56,37 @@ class SummarizerPlugin:
         # Strategy 1: find the last topic_finalized anchor
         last_finalized_idx = self._find_last_finalized(visible)
         if last_finalized_idx is not None:
-            split_point = last_finalized_idx + 1
+            split_point = self._group_safe_split(visible, last_finalized_idx + 1)
             old_entries = visible[:split_point]
             summary_anchor = self._build_topic_summary(old_entries)
             return (split_point, summary_anchor)
 
         # Strategy 2: fallback to entry-count truncation
-        split_point = len(visible) - self._keep_recent
+        split_point = self._group_safe_split(
+            visible, len(visible) - self._keep_recent
+        )
         old_entries = visible[:split_point]
         summary_anchor = self._build_entry_summary(old_entries)
         return (split_point, summary_anchor)
+
+    @staticmethod
+    def _group_safe_split(visible: list[Entry], split_point: int) -> int:
+        """Back the split off to a tool-call group boundary.
+
+        A window that opens inside a ``tool_call…tool_result`` run leaves a
+        ``tool`` message whose call was folded away; strict providers (kimi)
+        reject that history. Keeping the whole group visible is the safe
+        direction — the summary simply covers slightly fewer entries.
+        """
+        split_point = max(0, min(split_point, len(visible)))
+        while split_point > 0 and visible[split_point].kind == "tool_result":
+            split_point -= 1
+        while (
+            split_point > 0
+            and visible[split_point - 1].kind == "tool_call"
+        ):
+            split_point -= 1
+        return split_point
 
     def _find_last_finalized(self, entries: list[Entry]) -> int | None:
         for i in range(len(entries) - 1, -1, -1):

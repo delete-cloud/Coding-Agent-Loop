@@ -205,6 +205,126 @@ class TestSummarizerTopicAwareHandoff:
         split_point, anchor = result
         assert split_point == 8
 
+    def test_split_never_opens_inside_tool_result_run(self):
+        """A window boundary inside a tc/tr group orphans tool results.
+
+        Strict providers (kimi) reject a ``tool`` message whose call was folded
+        away; the split must back off to the start of the group.
+        """
+        plugin = SummarizerPlugin(max_entries=10, keep_recent=4)
+        tape = Tape()
+        tape.append(
+            Entry(kind="message", payload={"role": "user", "content": "goal"})
+        )
+        for i in range(4):
+            tape.append(
+                Entry(
+                    kind="tool_call",
+                    payload={"id": f"call_{i}", "name": "bash", "arguments": {}},
+                )
+            )
+        for i in range(4):
+            tape.append(
+                Entry(
+                    kind="tool_result",
+                    payload={"tool_call_id": f"call_{i}", "content": "ok"},
+                )
+            )
+        # 9 entries > max 10? pad to exceed the limit.
+        for i in range(3):
+            tape.append(
+                Entry(
+                    kind="message",
+                    payload={"role": "assistant", "content": f"pad {i}"},
+                )
+            )
+        # len(visible)=12, keep_recent=4 -> raw split at 8, inside tr run.
+        result = plugin.resolve_context_window(tape=tape)
+        assert result is not None
+        split_point, _ = result
+        visible = tape.windowed_entries()
+        assert visible[split_point].kind == "tool_call"
+        assert split_point == 1
+
+    def test_split_inside_tool_call_run_backs_off_to_group_start(self):
+        plugin = SummarizerPlugin(max_entries=10, keep_recent=8)
+        tape = Tape()
+        tape.append(
+            Entry(kind="message", payload={"role": "user", "content": "goal"})
+        )
+        for i in range(3):
+            tape.append(
+                Entry(
+                    kind="tool_call",
+                    payload={"id": f"call_{i}", "name": "bash", "arguments": {}},
+                )
+            )
+        for i in range(3):
+            tape.append(
+                Entry(
+                    kind="tool_result",
+                    payload={"tool_call_id": f"call_{i}", "content": "ok"},
+                )
+            )
+        for i in range(4):
+            tape.append(
+                Entry(
+                    kind="message",
+                    payload={"role": "assistant", "content": f"tail {i}"},
+                )
+            )
+        # len=11, keep_recent=8 -> raw split at 3, inside the tc run (tc2).
+        # The safe boundary is the group start at index 1.
+        result = plugin.resolve_context_window(tape=tape)
+        assert result is not None
+        split_point, _ = result
+        assert split_point == 1
+        assert tape.windowed_entries()[split_point].kind == "tool_call"
+
+    def test_visible_slice_has_no_orphan_tool_results(self):
+        """Every tool result in the window must have its call visible too."""
+        from agentkit.context.builder import ContextBuilder
+
+        plugin = SummarizerPlugin(max_entries=10, keep_recent=4)
+        tape = Tape()
+        tape.append(
+            Entry(kind="message", payload={"role": "user", "content": "goal"})
+        )
+        for i in range(4):
+            tape.append(
+                Entry(
+                    kind="tool_call",
+                    payload={"id": f"call_{i}", "name": "bash", "arguments": {}},
+                )
+            )
+            tape.append(
+                Entry(
+                    kind="tool_result",
+                    payload={"tool_call_id": f"call_{i}", "content": "ok"},
+                )
+            )
+        for i in range(3):
+            tape.append(
+                Entry(
+                    kind="message",
+                    payload={"role": "assistant", "content": f"pad {i}"},
+                )
+            )
+        # 12 entries; raw split 8 lands inside tr run of call_3's pair.
+        result = plugin.resolve_context_window(tape=tape)
+        assert result is not None
+        split_point, _ = result
+        visible = tape.windowed_entries()[split_point:]
+        messages = ContextBuilder().build_core_messages(visible)
+        call_ids = {
+            c["id"]
+            for m in messages
+            for c in (m.get("tool_calls") or [])
+        }
+        for m in messages:
+            if m.get("role") == "tool":
+                assert m["tool_call_id"] in call_ids
+
     def test_handoff_anchor_contains_topic_summary(self):
         plugin = SummarizerPlugin(max_entries=5)
         tape = Tape()

@@ -325,6 +325,103 @@ class TestOpenAICompatProvider:
         assert isinstance(events[2], DoneEvent)
 
     @pytest.mark.asyncio
+    async def test_stream_updates_tool_call_id_from_later_delta(self):
+        """A tool-call id arriving after the first delta for an index must win.
+
+        Some providers emit a placeholder first delta (index/type only) and send
+        the id on a subsequent delta; keeping only the first value yields an
+        empty tool_call_id which strict providers reject.
+        """
+        provider = OpenAICompatProvider(
+            model="kimi-for-coding",
+            api_key="sk-test",
+        )
+
+        def make_chunk(tool_calls=None, finish_reason=None):
+            chunk = MagicMock()
+            chunk.choices = [MagicMock()]
+            chunk.choices[0].delta.content = None
+            chunk.choices[0].delta.reasoning_content = None
+            chunk.choices[0].delta.tool_calls = tool_calls
+            chunk.choices[0].finish_reason = finish_reason
+            chunk.usage = None
+            chunk.choices[0].usage = None
+            return chunk
+
+        def make_tc(index, tc_id=None, name=None, arguments=None):
+            tc = MagicMock()
+            tc.index = index
+            tc.id = tc_id
+            tc.function.name = name
+            tc.function.arguments = arguments
+            return tc
+
+        chunks = [
+            make_chunk([make_tc(0, tc_id=None, name="bash")]),
+            make_chunk([make_tc(0, tc_id="call_late", arguments='{"command": "ls"}')]),
+            make_chunk(finish_reason="tool_calls"),
+        ]
+        mock_stream = AsyncMock()
+        mock_stream.__aiter__.return_value = chunks
+        provider._client.chat.completions.create = AsyncMock(return_value=mock_stream)
+
+        events = []
+        async for event in provider.stream(messages=[{"role": "user", "content": "Hi"}]):
+            events.append(event)
+
+        tool_events = [e for e in events if isinstance(e, ToolCallEvent)]
+        assert len(tool_events) == 1
+        assert tool_events[0].tool_call_id == "call_late"
+
+    @pytest.mark.asyncio
+    async def test_stream_synthesizes_tool_call_id_when_never_sent(self):
+        """Calls with no id in any delta still get a stable non-empty id."""
+        provider = OpenAICompatProvider(
+            model="kimi-for-coding",
+            api_key="sk-test",
+        )
+
+        def make_chunk(tool_calls=None, finish_reason=None):
+            chunk = MagicMock()
+            chunk.choices = [MagicMock()]
+            chunk.choices[0].delta.content = None
+            chunk.choices[0].delta.reasoning_content = None
+            chunk.choices[0].delta.tool_calls = tool_calls
+            chunk.choices[0].finish_reason = finish_reason
+            chunk.usage = None
+            chunk.choices[0].usage = None
+            return chunk
+
+        def make_tc(index, name=None, arguments=None):
+            tc = MagicMock()
+            tc.index = index
+            tc.id = None
+            tc.function.name = name
+            tc.function.arguments = arguments
+            return tc
+
+        chunks = [
+            make_chunk([
+                make_tc(0, name="bash", arguments='{"command": "ls"}'),
+                make_tc(1, name="bash", arguments='{"command": "pwd"}'),
+            ]),
+            make_chunk(finish_reason="tool_calls"),
+        ]
+        mock_stream = AsyncMock()
+        mock_stream.__aiter__.return_value = chunks
+        provider._client.chat.completions.create = AsyncMock(return_value=mock_stream)
+
+        events = []
+        async for event in provider.stream(messages=[{"role": "user", "content": "Hi"}]):
+            events.append(event)
+
+        tool_events = [e for e in events if isinstance(e, ToolCallEvent)]
+        assert len(tool_events) == 2
+        ids = [e.tool_call_id for e in tool_events]
+        assert all(i.startswith("call_") for i in ids)
+        assert ids[0] != ids[1]
+
+    @pytest.mark.asyncio
     async def test_stream_captures_reasoning_content(self):
         provider = OpenAICompatProvider(
             model="kimi-for-coding",
